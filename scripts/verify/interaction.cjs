@@ -440,6 +440,7 @@ async function testDrag(page, view) {
     await page.mouse.move(b.x, b.y);
     await page.mouse.down();
     for (const [x, y] of path_) await page.mouse.move(x, y, { steps: 8 });
+    await page.waitForTimeout(250); // ポインタを止めてから離す（離す直前の動きが速いと、回転の慣性が付くので）
     await page.mouse.up();
     await frames(page, 2);
     const hoverDuring = (await ix(page)).hovered;

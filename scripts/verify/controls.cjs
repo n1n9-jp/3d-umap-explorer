@@ -9,6 +9,13 @@
  * 移動量は「向き」と「動いたこと」で判定する。失敗があれば終了コード 1 で終わる。
  * 飛行でクラスタの内部へ進んだ位置と、俯瞰モードのスクリーンショットも保存する。
  * 移動量は速度の係数 1 を前提にするので、始めに T キーで速度の自動調整を無効にする。
+ *
+ * ドラッグを離したあとの回転の慣性（時定数 0.3 秒）は、離す直前の速さで決まる。ソフトウェア描画ではマウス
+ * イベントが 1 つずつ数百ミリ秒かかって届くので、Playwright の `mouse.move(steps)` では速さが出ない。そこで、
+ * 回転量を厳密に測る既存の検証は「止めてから離す」（離す前に 250 ミリ秒待つ）形にし、慣性の検証は CDP の
+ * `Input.dispatchMouseEvent` へ、押す・動かす・離すの時刻（`timestamp`）を指定して一気に送る（ブラウザの入力の
+ * 経路はそのままで、`event.timeStamp` が指定した時刻になる）。慣性の積分はフレームの経過時間（1 回 0.1 秒まで）で
+ * 進むので、待ち時間は壁時計ではなくフレーム数と状態（`getState().rotating`）で数える。
  */
 const { execSync } = require('node:child_process');
 const fs = require('node:fs');
@@ -39,8 +46,9 @@ function check(name, ok, detail = '') {
 }
 
 const consoleErrors = [];
-async function openPage(browser, base, query = '') {
+async function openPage(browser, base, query = '', { reducedMotion = false } = {}) {
   const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 1 });
+  if (reducedMotion) await page.emulateMedia({ reducedMotion: 'reduce' });
   page.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(`[error] ${m.text()}`); });
   page.on('pageerror', (e) => consoleErrors.push(`[pageerror] ${e.message}`));
   page.on('requestfailed', (r) => consoleErrors.push(`[requestfailed] ${r.url()}`));
@@ -64,13 +72,63 @@ async function holdKeys(page, keys, n) {
   await frames(page, 4);
 }
 
-/** (x0,y0) から (x1,y1) までマウスの左ボタンでドラッグする。 */
+/**
+ * (x0,y0) から (x1,y1) までマウスの左ボタンでドラッグする。ポインタを止めて（250 ミリ秒待って）から離すので、
+ * 離したあとに慣性は付かず、回転量はポインタの動きと一致する。
+ */
 async function drag(page, x0, y0, x1, y1) {
   await page.mouse.move(x0, y0);
   await page.mouse.down();
   await page.mouse.move(x1, y1, { steps: 10 });
+  await page.waitForTimeout(250);
   await page.mouse.up();
   await frames(page, 3);
+}
+
+/**
+ * CDP でポインタ操作を送る。`points` は [{x, y, t}]（t は押した時刻からのミリ秒。先頭は押した位置で t = 0）、
+ * `releaseAfterMs` は最後の点から離すまでのミリ秒（ポインタを止めている時間）。すべて await せずに送り、
+ * ブラウザが指定の時刻で届ける（`event.timeStamp`）。
+ */
+async function pointerGesture(page, points, releaseAfterMs = 1) {
+  const cdp = await page.context().newCDPSession(page);
+  const base = Date.now() / 1000;
+  const send = (type, p, ts, buttons) => cdp.send('Input.dispatchMouseEvent', {
+    type, x: p.x, y: p.y, button: type === 'mouseMoved' ? 'none' : 'left', buttons, clickCount: type === 'mouseMoved' ? 0 : 1, timestamp: ts,
+  });
+  const last = points[points.length - 1];
+  const sends = [send('mousePressed', points[0], base + points[0].t / 1000, 1)];
+  for (const p of points.slice(1)) sends.push(send('mouseMoved', p, base + p.t / 1000, 1));
+  sends.push(send('mouseReleased', last, base + (last.t + releaseAfterMs) / 1000, 0));
+  await Promise.all(sends);
+  await cdp.detach();
+}
+
+/** 横（dx）・縦（dy）へ `durationMs` かけて一定の速さで払う操作の点列（12 点）。 */
+function flickPoints(x0, y0, dx, dy, durationMs = 160, n = 10) {
+  const pts = [{ x: x0, y: y0, t: 0 }];
+  for (let i = 1; i <= n; i++) pts.push({ x: x0 + (dx * i) / n, y: y0 + (dy * i) / n, t: (durationMs * i) / n });
+  return pts;
+}
+
+const yawOf = (d) => Math.atan2(-d[0], -d[2]);
+const pitchOf = (d) => Math.asin(Math.max(-1, Math.min(1, d[1])));
+const wrapPi = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+const angleBetween = (a, b) => Math.acos(Math.max(-1, Math.min(1, cos(a, b))));
+
+/**
+ * 1 フレームずつ進めて状態を記録する。`until(s, samples)` が true になるか `max` フレームで終わる。
+ */
+async function sampleFrames(page, until, max = 80) {
+  const samples = [];
+  for (let i = 0; i < max; i++) {
+    await frames(page, 1);
+    const s = await state(page);
+    s.hovered = await page.evaluate(() => window.__explorer.interaction.getState().hovered);
+    samples.push(s);
+    if (until(s, samples)) break;
+  }
+  return samples;
 }
 
 // ---------- 検証本体 ----------
@@ -243,6 +301,294 @@ async function testModes(page, view, centerOf) {
   check('W を押したままモードを切り替えても、キーが押しっぱなし扱いにならない', k0.mode === 'fly' && maxAbsDiff(k0.position, k1.position) < 1e-9);
 }
 
+
+// ---------- 回転の慣性 ----------
+
+/** 向きの列（先頭を含む）の、ヨーの変化（右へ回ると正）。 */
+const yawSteps = (dirs) => dirs.slice(1).map((d, i) => wrapPi(yawOf(dirs[i]) - yawOf(d)));
+
+async function settle(page, max = 80) {
+  return sampleFrames(page, (s) => !s.rotating, max);
+}
+
+/** 慣性が止まったあと、`n` フレーム進めても向きと位置が変わらないか。 */
+async function staysStill(page, n = 3) {
+  const a = await state(page);
+  await frames(page, n);
+  const b = await state(page);
+  return angleBetween(a.direction, b.direction) < 1e-9 && len(sub(a.position, b.position)) < 1e-9 && !b.rotating;
+}
+
+async function testInertiaFly(page, inside) {
+  console.log('\n[飛行モード: ドラッグの慣性]');
+  const cx = width / 2, cy = height / 2;
+  const level = async () => { await setView(page, [0, 0, 0], [0, 0, -1]); await frames(page, 2); };
+
+  // 動かしながら離す: 離したあとも同じ向きへ回り続け、やがて止まる
+  await level();
+  const s0 = await state(page);
+  await pointerGesture(page, flickPoints(cx, cy, 150, 0), 1);
+  const a = await sampleFrames(page, (s) => !s.rotating, 80);
+  const dirs = [s0.direction, ...a.map((s) => s.direction)];
+  const steps = yawSteps(dirs);
+  const last = a[a.length - 1];
+  const total = wrapPi(yawOf(s0.direction) - yawOf(last.direction));
+  const afterRelease = steps.slice(1).filter((d) => d > 1e-4).length;
+  check('動かしながら離すと、離したあとも回り続ける（rotating が true で、向きが同じ向きへ変わり続ける）',
+    a.some((s) => s.rotating) && afterRelease >= 4 && steps.every((d) => d > -1e-9),
+    `回転のあった標本 ${afterRelease}、1 フレームごとの回転量 ${steps.map((d) => d.toFixed(3)).join(' ')}`);
+  check('やがて止まる（rotating が false になり、そのあと向きが変わらない）', !last.rotating && a.length < 80 && (await staysStill(page)), `${a.length} フレーム`);
+  // ドラッグ 150px = 0.375 rad。離す直前の速さ ≈ 940 px/s = 2.3 rad/s、時定数 0.3 秒 → 慣性の総回転量 ≈ 0.7 rad
+  check('慣性の総回転量が、離す直前の速さと時定数から見込める範囲に入る', total > 0.375 + 0.4 && total < 0.375 + 0.9, `総回転 ${total.toFixed(3)} rad（ドラッグ 0.375 + 慣性 ${(total - 0.375).toFixed(3)}、見込み ≈ 0.7）`);
+  check('慣性では位置が動かない', len(sub(s0.position, last.position)) < 1e-9);
+  await level();
+  await frames(page, 4); // HUD の視点の表示は約 0.25 秒ごとに書き換わる
+  const hudBefore = (await hudText(page)).split('\n').pop();
+  await pointerGesture(page, flickPoints(cx, cy, 150, 0), 1);
+  await frames(page, 4);
+  const midState = await state(page);
+  const hudDuring = (await hudText(page)).split('\n').pop();
+  await settle(page);
+  check('慣性の間も HUD の視点の表示（?pos=…&look=…）が更新される', midState.rotating && hudDuring !== hudBefore, `${hudBefore} → ${hudDuring}`);
+
+  // ポインタを止めてから離す: 慣性が付かない（狙った向きで止められる）
+  await level();
+  const t0 = await state(page);
+  await pointerGesture(page, flickPoints(cx, cy, 150, 0), 300);
+  const b = await sampleFrames(page, () => false, 4);
+  const tb = wrapPi(yawOf(t0.direction) - yawOf(b[b.length - 1].direction));
+  check('ポインタを止めてから離すと、慣性は付かない（離したあとに向きが変わらない）',
+    b.every((s) => !s.rotating) && Math.abs(tb - 0.375) < 0.005 && angleBetween(b[0].direction, b[b.length - 1].direction) < 1e-9, `回転 ${tb.toFixed(4)} rad（ドラッグだけなら 0.375）`);
+
+  // 動かさずに押して離す（クリック）: 慣性が付かない
+  await level();
+  const c0 = await state(page);
+  await pointerGesture(page, [{ x: cx, y: cy, t: 0 }], 30);
+  const c = await sampleFrames(page, () => false, 3);
+  check('動かさずに押して離したクリックでは、慣性が付かず、向きも変わらない', c.every((x) => !x.rotating) && angleBetween(c0.direction, c[c.length - 1].direction) < 1e-9);
+  // 数ピクセルの揺れ（押した位置から 4 ピクセル以内）も同じ
+  await level();
+  const j0 = await state(page);
+  await pointerGesture(page, [{ x: cx, y: cy, t: 0 }, { x: cx + 2, y: cy + 1, t: 10 }, { x: cx + 3, y: cy + 1, t: 20 }], 1);
+  const j = await sampleFrames(page, () => false, 3);
+  check('数ピクセルの揺れで離したクリックでも、慣性は付かない', j.every((x) => !x.rotating) && angleBetween(j0.direction, j[j.length - 1].direction) < 0.02);
+
+  // 慣性の間にポインタを押すと止まる
+  await level();
+  await pointerGesture(page, flickPoints(cx, cy, 150, 0), 1);
+  const p0 = await sampleFrames(page, (x) => x.rotating, 4);
+  check('（前提）慣性で回っている', p0[p0.length - 1].rotating);
+  await page.mouse.move(cx, cy);
+  await page.mouse.down();
+  await frames(page, 1);
+  const pd = await state(page);
+  await frames(page, 3);
+  const pe = await state(page);
+  check('慣性の間にポインタを押すと止まる（rotating が false になり、向きが変わらない）', !pd.rotating && !pe.rotating && angleBetween(pd.direction, pe.direction) < 1e-9);
+  await page.mouse.up();
+  await frames(page, 2);
+  const pu = await state(page);
+  check('そのまま離しても（動かさないクリック）、慣性は付かない', !pu.rotating && angleBetween(pe.direction, pu.direction) < 1e-9);
+
+  // 慣性の間に W を押すと、回りながら進む
+  await level();
+  const w0 = await state(page);
+  await pointerGesture(page, flickPoints(cx, cy, 150, 0), 1);
+  await sampleFrames(page, (x) => x.rotating, 4);
+  const w1 = await state(page);
+  await page.keyboard.down('KeyW');
+  const w = await sampleFrames(page, () => false, 4);
+  await page.keyboard.up('KeyW');
+  const w2 = w[w.length - 1];
+  const turned = wrapPi(yawOf(w1.direction) - yawOf(w2.direction));
+  check('慣性の間に W を押すと、W では止まらず、回りながら進む', w.some((x) => x.rotating) && turned > 0.02 && len(sub(w2.position, w1.position)) > 0.02,
+    `回転 ${turned.toFixed(3)} rad、移動 ${len(sub(w2.position, w1.position)).toFixed(3)}`);
+  const bend = angleBetween(sub(w2.position, w0.position), w1.direction);
+  check('進む向きは、W を押した時点の視線ではなく、回っていく視線に沿って曲がる', bend > 0.08, `押した時点の視線と、移動の向きのなす角 ${bend.toFixed(3)} rad`);
+  await settle(page);
+  await frames(page, 6); // 移動の慣性が消えるまで待つ
+
+  // ピッチの制限: 慣性の間も ±89° で止まる
+  for (const [name, y0, dy, sign] of [['上', 600, -400, 1], ['下', 200, 400, -1]]) {
+    await level();
+    await pointerGesture(page, flickPoints(cx + 200, y0, 0, dy, 100), 1);
+    const q = await settle(page);
+    const pitches = q.map((x) => pitchOf(x.direction));
+    const maxAbs = Math.max(...pitches.map(Math.abs));
+    const finalPitch = pitches[pitches.length - 1];
+    const limit = (89 * Math.PI) / 180;
+    check(`${name}へ強く払っても、ピッチは ±89° に収まり、端で止まる`, maxAbs <= limit + 1e-6 && Math.abs(finalPitch - sign * limit) < 1e-3 && !q[q.length - 1].rotating && (await staysStill(page)),
+      `最大 |ピッチ| ${(maxAbs * 180 / Math.PI).toFixed(3)}°、最後 ${(finalPitch * 180 / Math.PI).toFixed(3)}°`);
+  }
+
+  // 止める操作: モード切り替え（O）・ホーム（H）・視点の直接設定・フォーカスの喪失
+  const flickAndWait = async () => {
+    await level();
+    await pointerGesture(page, flickPoints(cx, cy, 150, 0), 1);
+    await sampleFrames(page, (x) => x.rotating, 4);
+  };
+  await flickAndWait();
+  await page.keyboard.press('KeyO');
+  await page.waitForFunction(() => window.__explorer.getState().mode === 'overview');
+  await frames(page, 1);
+  const m0 = await state(page);
+  await frames(page, 3);
+  const m1 = await state(page);
+  check('慣性の間に O でモードを切り替えると、慣性は止まる（切り替えのあとに回らない）', m0.mode === 'overview' && !m0.rotating && !m1.rotating && angleBetween(m0.direction, m1.direction) < 1e-9 && len(sub(m0.position, m1.position)) < 1e-9);
+  await page.keyboard.press('KeyO');
+  await page.waitForFunction(() => window.__explorer.getState().mode === 'fly');
+  await frames(page, 2);
+
+  await flickAndWait();
+  const home = await page.evaluate(() => window.__explorer.homeView());
+  await page.keyboard.press('KeyH');
+  await frames(page, 1);
+  const h0 = await state(page);
+  check('慣性の間に H を押すと、ホームへの移動が始まり、慣性は止まる', h0.homing && !h0.rotating);
+  const hs = await sampleFrames(page, (x) => !x.homing, 40);
+  const hl = hs[hs.length - 1];
+  check('ホームへ着いたあとも、慣性は残らない（向きはホームの向き）', !hl.homing && !hl.rotating && angleBetween(hl.direction, norm(sub(home.look, home.pos))) < 1e-3 && len(sub(hl.position, home.pos)) < 1e-3);
+
+  await flickAndWait();
+  await setView(page, [0.05, 0.02, 0.01], [0.05, 0.02, -1]);
+  await frames(page, 1);
+  const v0 = await state(page);
+  await frames(page, 3);
+  const v1 = await state(page);
+  check('慣性の間に視点が直接設定されると、慣性は止まる', !v0.rotating && !v1.rotating && angleBetween(v0.direction, [0, 0, -1]) < 1e-3 && angleBetween(v0.direction, v1.direction) < 1e-9);
+
+  await flickAndWait();
+  await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+  await frames(page, 1);
+  const f0 = await state(page);
+  await frames(page, 3);
+  const f1 = await state(page);
+  check('慣性の間にウィンドウがフォーカスを失うと、慣性は止まる', !f0.rotating && !f1.rotating && angleBetween(f0.direction, f1.direction) < 1e-9);
+
+  // ホバー: 慣性で回っている間は止まり、止まると再開する（カーソルの位置は動かさない）
+  console.log('\n[慣性とホバー]');
+  let hoverOk = false, detail = '候補の位置が見つからない';
+  for (const y0 of [cy, cy - 120, cy + 120, cy - 220]) {
+    await setView(page, inside.pos, inside.look);
+    await frames(page, 2);
+    await pointerGesture(page, flickPoints(cx - 75, y0, 150, 0), 1);
+    const q = await sampleFrames(page, (x) => !x.rotating, 80);
+    await frames(page, 2);
+    const rotatingSamples = q.slice(1).filter((x) => x.rotating);
+    const hoverDuring = rotatingSamples.map((x) => x.hovered);
+    // 止まったあとのカーソルの位置（離した位置）に見える点
+    const want = await page.evaluate(([x, y]) => window.__explorer.pick(x, y).then((r) => (r ? r.index : null)), [cx + 75, y0]);
+    if (want === null) { detail = `位置 y=${y0} に点がない`; continue; }
+    const h = await waitFrames(page, async () => ({ ok: (await page.evaluate(() => window.__explorer.interaction.getState().hovered)) === want }), 6);
+    hoverOk = rotatingSamples.length > 0 && hoverDuring.every((x) => x === null) && h.ok;
+    detail = `慣性の間のホバー [${hoverDuring.join(',')}]、止まったあと ${want} へ戻るまで ${h.frames} フレーム`;
+    break;
+  }
+  check('慣性で回っている間はホバーが止まり、止まるとカーソルの下の点へ再開する', hoverOk, detail);
+  await setView(page, [0, 0, 0], [0, 0, -1]);
+  await frames(page, 2);
+}
+
+async function waitFrames(page, fn, max = 8) {
+  let r = { ok: false };
+  for (let i = 1; i <= max; i++) {
+    await frames(page, 1);
+    r = await fn(page);
+    if (r.ok) return { ok: true, frames: i, ...r };
+  }
+  return { ...r, ok: false, frames: max };
+}
+
+async function testInertiaOverview(page, center) {
+  console.log('\n[俯瞰モード: ドラッグの慣性]');
+  const cx = width / 2, cy = height / 2;
+  await page.keyboard.press('KeyO');
+  await page.waitForFunction(() => window.__explorer.getState().mode === 'overview');
+  const place = async () => { await setView(page, [1.4, 0.4, 1.5], center); await frames(page, 2); };
+  const azimuth = (st) => Math.atan2(st.position[0] - st.pivot[0], st.position[2] - st.pivot[2]);
+  const dist = (st) => len(sub(st.position, st.pivot));
+
+  await place();
+  const s0 = await state(page);
+  await pointerGesture(page, flickPoints(cx, cy, 120, 0), 1);
+  const a = await sampleFrames(page, (s) => !s.rotating, 80);
+  const az = [azimuth(s0), ...a.map(azimuth)];
+  const steps = az.slice(1).map((v, i) => wrapPi(v - az[i]));
+  const last = a[a.length - 1];
+  const afterRelease = steps.slice(1).filter((d) => Math.abs(d) > 1e-4).length;
+  check('俯瞰モード: 離したあとも中心のまわりを同じ向きへ回り続け、やがて止まる',
+    a.some((s) => s.rotating) && afterRelease >= 4 && steps.every((d) => d < 1e-9) && !last.rotating && a.length < 80 && (await staysStill(page)),
+    `回転のあった標本 ${afterRelease}、1 フレームごとの回転量 ${steps.map((d) => d.toFixed(3)).join(' ')}`);
+  check('俯瞰モード: 慣性の間も中心までの距離は変わらない', [s0, ...a].every((s) => Math.abs(dist(s) - dist(s0)) < 1e-4), `距離 ${dist(s0).toFixed(4)} → ${dist(last).toFixed(4)}`);
+  check('俯瞰モード: 慣性の総回転量が見込める範囲に入る（ドラッグ 0.6 rad に、慣性が加わる）', Math.abs(wrapPi(azimuth(last) - azimuth(s0))) > 0.6 + 0.3, `総回転 ${Math.abs(wrapPi(azimuth(last) - azimuth(s0))).toFixed(3)} rad`);
+
+  await place();
+  const t0 = await state(page);
+  await pointerGesture(page, flickPoints(cx, cy, 120, 0), 300);
+  const b = await sampleFrames(page, () => false, 4);
+  check('俯瞰モード: ポインタを止めてから離すと、慣性は付かない', b.every((s) => !s.rotating) && Math.abs(Math.abs(wrapPi(azimuth(b[b.length - 1]) - azimuth(t0))) - 0.6) < 0.01 && angleBetween(b[0].direction, b[b.length - 1].direction) < 1e-9);
+
+  await place();
+  await pointerGesture(page, flickPoints(cx, cy, 120, 0), 1);
+  await sampleFrames(page, (x) => x.rotating, 4);
+  await page.mouse.move(cx, cy);
+  await page.mouse.down();
+  await frames(page, 1);
+  const pd = await state(page);
+  await frames(page, 3);
+  const pe = await state(page);
+  await page.mouse.up();
+  check('俯瞰モード: 慣性の間にポインタを押すと止まる', !pd.rotating && !pe.rotating && angleBetween(pd.direction, pe.direction) < 1e-9 && len(sub(pd.position, pe.position)) < 1e-9);
+  await frames(page, 2);
+
+  // 仰角の制限
+  for (const [name, y0, dy] of [['上', 600, -400], ['下', 200, 400]]) {
+    await place();
+    await pointerGesture(page, flickPoints(cx + 200, y0, 0, dy, 100), 1);
+    const q = await settle(page);
+    const limit = (89 * Math.PI) / 180;
+    const maxAbs = Math.max(...q.map((x) => Math.abs(pitchOf(x.direction))));
+    check(`俯瞰モード: ${name}へ強く払っても、仰角は ±89° に収まり、中心までの距離を保ち、端で止まる`,
+      maxAbs <= limit + 1e-6 && q.every((x) => Math.abs(dist(x) - dist(s0)) < 1e-4) && !q[q.length - 1].rotating && (await staysStill(page)), `最大 |仰角| ${(maxAbs * 180 / Math.PI).toFixed(3)}°`);
+  }
+
+  // 飛行モードへ戻っても、向きが跳ばず、慣性は残らない
+  await place();
+  await pointerGesture(page, flickPoints(cx, cy, 120, 0), 1);
+  await sampleFrames(page, (x) => x.rotating, 3);
+  await page.keyboard.press('KeyO');
+  await page.waitForFunction(() => window.__explorer.getState().mode === 'fly');
+  await frames(page, 1);
+  const r0 = await state(page);
+  await frames(page, 3);
+  const r1 = await state(page);
+  check('俯瞰モードの慣性の間に O で飛行モードへ切り替えると、慣性は止まる', !r0.rotating && !r1.rotating && angleBetween(r0.direction, r1.direction) < 1e-9 && len(sub(r0.position, r1.position)) < 1e-9);
+}
+
+async function testInertiaReducedMotion(browser, base) {
+  console.log('\n[「視差効果を減らす」設定]');
+  const page = await openPage(browser, base, '', { reducedMotion: true });
+  await frames(page, 2);
+  const cx = width / 2, cy = height / 2;
+  const matches = await page.evaluate(() => window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  check('（前提）ブラウザが prefers-reduced-motion: reduce を報告する', matches === true);
+  for (const mode of ['fly', 'overview']) {
+    if (mode === 'overview') {
+      await page.keyboard.press('KeyO');
+      await page.waitForFunction(() => window.__explorer.getState().mode === 'overview');
+    }
+    await setView(page, mode === 'fly' ? [0, 0, 0] : [1.4, 0.4, 1.5], mode === 'fly' ? [0, 0, -1] : [0, 0, 0]);
+    await frames(page, 2);
+    const s0 = await state(page);
+    await pointerGesture(page, flickPoints(cx, cy, 150, 0), 1);
+    const a = await sampleFrames(page, () => false, 4);
+    const moved = angleBetween(s0.direction, a[0].direction);
+    check(`「視差効果を減らす」では、${mode === 'fly' ? '飛行' : '俯瞰'}モードでも既定で慣性が付かない（ドラッグの回転だけで、離したあとに回らない）`,
+      a.every((s) => !s.rotating) && moved > 0.1 && angleBetween(a[0].direction, a[a.length - 1].direction) < 1e-9, `ドラッグでの回転 ${moved.toFixed(3)} rad`);
+  }
+  await page.close();
+}
+
 async function testUrl(browser, base) {
   console.log('\n[URL パラメータ]');
   const pos = [-0.5, 0.3, -0.7], look = [-0.33, 0.21, -0.44];
@@ -304,6 +650,8 @@ async function main() {
     await testDrag(page);
     await testWheel(page);
     await testModes(page, edge, center);
+    await testInertiaFly(page, inside);
+    await testInertiaOverview(page, center);
 
     // 飛行でクラスタの内部へ進み、スクリーンショットを撮る
     console.log('\n[クラスタへの飛行]');
@@ -325,6 +673,7 @@ async function main() {
     console.log('俯瞰モードのスクリーンショット → artifacts/controls-overview.png');
     await page.close();
 
+    await testInertiaReducedMotion(browser, base);
     await testUrl(browser, base);
 
     check('コンソールエラーがない', consoleErrors.length === 0, consoleErrors.join(' | '));

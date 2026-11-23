@@ -31,6 +31,8 @@ export interface CameraState {
   autoSpeed: AutoSpeedState;
   /** ホームの視点へ移動中か（`goHome` の途中）。 */
   homing: boolean;
+  /** ドラッグを離したあとの回転の慣性で回っている最中か（現在のモード）。 */
+  rotating: boolean;
 }
 
 /** 密度に応じた速度の自動調整の状態。 */
@@ -294,6 +296,7 @@ export class CameraRig {
         distance: this.autoSpeed ? this.autoSpeed.distance : null,
       },
       homing: this.flight !== null,
+      rotating: this.isRotatingByInertia,
     };
   }
 
