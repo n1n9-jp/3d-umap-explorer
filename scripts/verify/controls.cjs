@@ -257,7 +257,11 @@ async function testUrl(browser, base) {
   const def = await openPage(browser, base);
   await frames(def, 2);
   const ds = await state(def);
-  check('パラメータなしでは既定の視点（0, 0, 2.6 から原点へ）', maxAbsDiff(ds.position, [0, 0, 2.6]) < 1e-5 && maxAbsDiff(ds.direction, [0, 0, -1]) < 1e-5);
+  // 既定の視点は、点群全体が画面に収まるホームの視点（詳細は home.cjs で検証する）
+  const home = await def.evaluate(() => window.__explorer.homeView());
+  check('パラメータなしではホームの視点（点群の中心を向き、全体が収まる位置）から始まる',
+    maxAbsDiff(ds.position, home.pos) < 1e-4 && maxAbsDiff(ds.direction, norm(sub(home.look, home.pos))) < 1e-5 && len(sub(home.pos, home.look)) > 2,
+    `位置 ${fmt(ds.position)}, 向き ${fmt(ds.direction)}`);
   await def.close();
 }
 

@@ -12,6 +12,8 @@ import { createPickingDebug, type PickingDebug } from './picking/debug';
 import { SpatialIndex } from './spatial/SpatialIndex';
 import { AutoSpeed, autoSpeedParams } from './app/autoSpeed';
 import { bindAutoSpeedKey } from './app/autoSpeedKey';
+import { computeHomeView } from './app/homeView';
+import { bindShortcut, isShortcutPress, isFromEditable } from './app/keyEvents';
 
 interface FrameStats { frames: number; meanMs: number; medianMs: number; p95Ms: number; maxMs: number }
 
@@ -21,6 +23,8 @@ declare global {
       ready: boolean;
       error?: string;
       setView(view: ViewSpec): void;
+      /** いまの画面の縦横比での、点群全体が収まるホームの視点（H キーの移動先、起動時の視点）。 */
+      homeView(): ViewSpec;
       /** 現在のモード・位置・注視点・速度・速度の自動調整の状態。 */
       getState(): CameraState;
       measureFrames(n: number): Promise<FrameStats>;
@@ -76,12 +80,17 @@ async function start(): Promise<void> {
 
   // 点群の中心（バウンディングボックスの中心）。俯瞰モードの回転の中心になる
   const cloudCenter = new THREE.Vector3(...arrays.bounds.min).add(new THREE.Vector3(...arrays.bounds.max)).multiplyScalar(0.5);
+  // 点群を含む球の中心。霧の距離の基準になる（俯瞰モードの回転の中心とは別）
+  const boundsCenter = new THREE.Vector3(...arrays.bounds.center);
   // 密度に応じた速度の自動調整（manifest に density がなければ使わない）
   const autoParams = autoSpeedParams(arrays.manifest.density);
   const autoSpeed = autoParams ? new AutoSpeed(new SpatialIndex(arrays.positions), autoParams) : null;
   const controller = new CameraRig(camera, renderer.domElement, cloudCenter, { autoSpeed });
   bindAutoSpeedKey(window, controller); // T キーで有効・無効を切り替える
-  controller.setView(parseView(search));
+  // ホームの視点: 点群全体（bounds の球）が画面に収まる位置。向きは manifest の overview.axes（第3軸の方向から見る）
+  const homeView = () => computeHomeView(arrays.bounds, camera.fov, camera.aspect, arrays.manifest.overview?.axes);
+  bindShortcut(window, 'KeyH', () => controller.goHome(homeView())); // H キーでホームの視点へ戻る
+  controller.setView(parseView(search, homeView())); // pos・look がなければホームの視点から始める
 
   const resize = () => {
     camera.aspect = window.innerWidth / window.innerHeight;
@@ -94,7 +103,7 @@ async function start(): Promise<void> {
 
   // 点の大きさを [ ] キーで変える
   window.addEventListener('keydown', (e) => {
-    if (e.key === '[' || e.key === ']') {
+    if ((e.key === '[' || e.key === ']') && !isFromEditable(e)) {
       const k = e.key === ']' ? 1.25 : 0.8;
       cloud.set({ pointSize: Math.min(0.1, Math.max(0.0005, cloud.params.pointSize * k)) });
     }
@@ -102,10 +111,7 @@ async function start(): Promise<void> {
 
   // O キーで飛行モードと俯瞰モードを切り替える
   window.addEventListener('keydown', (e) => {
-    if (e.code !== 'KeyO' || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
-    const t = e.target as HTMLElement | null;
-    if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
-    controller.toggle();
+    if (isShortcutPress(e, 'KeyO')) controller.toggle();
   });
 
   const updateHud = () => {
@@ -151,7 +157,7 @@ async function start(): Promise<void> {
     last = now;
 
     controller.update(dt);
-    cloud.set({ fog: fogForCamera(camera.position.length(), arrays.bounds.radius, INTERIOR_FOG) });
+    cloud.set({ fog: fogForCamera(camera.position.distanceTo(boundsCenter), arrays.bounds.radius, INTERIOR_FOG) });
     renderer.render(scene, camera);
 
     hudTimer += dt;
@@ -171,6 +177,7 @@ async function start(): Promise<void> {
     pick: (x, y) => picker.pick(camera, x, y),
     picking,
     setView: (v) => controller.setView(v),
+    homeView,
     getState: () => controller.getState(),
     measureFrames: (n) =>
       new Promise((resolve) => {

@@ -43,3 +43,34 @@ export function parsePositiveNumber(search: string, key: string): number | null 
   const v = Number(raw);
   return Number.isFinite(v) && v > 0 ? v : null;
 }
+
+/** 視線の仰角の上限（±89°）。飛行モードの制限と同じで、真上・真下を向いた視点を避ける。 */
+export const MAX_VIEW_PITCH = (89 * Math.PI) / 180;
+
+export interface ViewAngles {
+  /** +Y まわりの回転（正で左を向く）。 */
+  yaw: number;
+  /** 水平からの仰角（正で上を向く）。±MAX_VIEW_PITCH に収める。 */
+  pitch: number;
+}
+
+/**
+ * 位置と注視点から、視線の向きを yaw / pitch で求める。仰角は ±MAX_VIEW_PITCH に収める。
+ * 位置と注視点が一致して向きが決まらないときは `fallback` を返す。真上・真下を向くときの yaw は `fallback.yaw`。
+ */
+export function viewAngles(view: ViewSpec, fallback: ViewAngles = { yaw: 0, pitch: 0 }): ViewAngles {
+  const x = view.look[0] - view.pos[0];
+  const y = view.look[1] - view.pos[1];
+  const z = view.look[2] - view.pos[2];
+  const len = Math.hypot(x, y, z);
+  if (!(len > 1e-12) || !Number.isFinite(len)) return { ...fallback };
+  const yaw = Math.hypot(x, z) > 1e-9 * len ? Math.atan2(-x, -z) : fallback.yaw;
+  const pitch = Math.min(MAX_VIEW_PITCH, Math.max(-MAX_VIEW_PITCH, Math.asin(Math.min(1, Math.max(-1, y / len)))));
+  return { yaw, pitch };
+}
+
+/** yaw / pitch から視線方向（単位ベクトル）を求める。`viewAngles` の逆。 */
+export function directionFromAngles({ yaw, pitch }: ViewAngles): Vec3 {
+  const c = Math.cos(pitch);
+  return [-Math.sin(yaw) * c, Math.sin(pitch), -Math.cos(yaw) * c];
+}

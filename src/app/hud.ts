@@ -3,8 +3,8 @@ import type { CameraMode } from './cameraRig';
 export const MODE_LABEL: Record<CameraMode, string> = { fly: '飛行', overview: '俯瞰' };
 
 const HELP: Record<CameraMode, string> = {
-  fly: 'WASD 前後左右 / E Q 上下 / Shift 加速 / ドラッグ 視点 / ホイール 速度 / T 速度の自動調整 / O 俯瞰モードへ',
-  overview: 'ドラッグ 点群の中心を回る / ホイール 寄る・離れる / O 飛行モードへ',
+  fly: 'WASD 前後左右 / E Q 上下 / Shift 加速 / ドラッグ 視点 / ホイール 速度 / T 速度の自動調整 / H 全体へ戻る / O 俯瞰モードへ',
+  overview: 'ドラッグ 点群の中心を回る / ホイール 寄る・離れる / H 全体へ戻る / O 飛行モードへ',
 };
 
 export interface HudInfo {
