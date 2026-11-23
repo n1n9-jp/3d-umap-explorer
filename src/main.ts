@@ -1,42 +1,12 @@
 import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { cellOrigins, atlasLayout, inkIsDark } from './data/atlas';
 import { loadAtlasImage, loadDatasetArrays, measureBorderLuma } from './data/loader';
 import { PointCloud } from './render/pointCloud';
 import { BACKGROUND_COLOR } from './render/palette';
 import { fogForCamera } from './render/fog';
 import { formatView, parsePositiveNumber, parseView, type ViewSpec } from './render/view';
-
-/**
- * カメラ操作の差し替え口。飛行操作（src/controls/）が統合されるまでは OrbitControls を使う。
- * 新しい操作はこの形を満たせば createCameraController を差し替えるだけで入る。
- */
-interface CameraController {
-  update(dt: number): void;
-  setView(view: ViewSpec): void;
-  dispose(): void;
-}
-
-function createOrbitController(camera: THREE.PerspectiveCamera, dom: HTMLElement): CameraController {
-  const controls = new OrbitControls(camera, dom);
-  controls.enableDamping = true;
-  controls.dampingFactor = 0.12;
-  controls.zoomSpeed = 0.6;
-  controls.minDistance = 0.002;
-  controls.maxDistance = 8;
-  return {
-    update: () => controls.update(),
-    setView: (view) => {
-      camera.position.set(...view.pos);
-      controls.target.set(...view.look);
-      camera.lookAt(controls.target);
-      controls.update();
-    },
-    dispose: () => controls.dispose(),
-  };
-}
-
-const createCameraController = createOrbitController;
+import { CameraRig, type CameraState } from './app/cameraRig';
+import { formatHud } from './app/hud';
 
 interface FrameStats { frames: number; meanMs: number; medianMs: number; p95Ms: number; maxMs: number }
 
@@ -46,6 +16,8 @@ declare global {
       ready: boolean;
       error?: string;
       setView(view: ViewSpec): void;
+      /** 現在のモード・位置・注視点・速度。 */
+      getState(): CameraState;
       measureFrames(n: number): Promise<FrameStats>;
       pointCloud: PointCloud;
     };
@@ -93,7 +65,9 @@ async function start(): Promise<void> {
   );
   scene.add(cloud.mesh);
 
-  const controller = createCameraController(camera, renderer.domElement);
+  // 点群の中心（バウンディングボックスの中心）。俯瞰モードの回転の中心になる
+  const cloudCenter = new THREE.Vector3(...arrays.bounds.min).add(new THREE.Vector3(...arrays.bounds.max)).multiplyScalar(0.5);
+  const controller = new CameraRig(camera, renderer.domElement, cloudCenter);
   controller.setView(parseView(search));
 
   const resize = () => {
@@ -113,17 +87,26 @@ async function start(): Promise<void> {
     }
   });
 
+  // O キーで飛行モードと俯瞰モードを切り替える
+  window.addEventListener('keydown', (e) => {
+    if (e.code !== 'KeyO' || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+    const t = e.target as HTMLElement | null;
+    if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+    controller.toggle();
+  });
+
   const updateHud = () => {
-    hud.textContent =
-      `${arrays.manifest.name}  ${arrays.manifest.count.toLocaleString()} 点  ` +
-      `点の大きさ ${cloud.params.pointSize.toPrecision(3)}（[ ] で変更）\n` +
-      `?${formatView({ pos: camera.position.toArray(), look: lookTarget() })}`;
+    const s = controller.getState();
+    hud.textContent = formatHud({
+      datasetName: arrays.manifest.name,
+      pointCount: arrays.manifest.count,
+      pointSize: cloud.params.pointSize,
+      mode: s.mode,
+      speed: s.speed,
+      viewParams: formatView({ pos: s.position, look: s.lookAt }),
+    });
   };
-  const dir = new THREE.Vector3();
-  const lookTarget = (): [number, number, number] => {
-    camera.getWorldDirection(dir);
-    return camera.position.clone().add(dir.multiplyScalar(0.25)).toArray();
-  };
+  controller.onChange(() => updateHud()); // モードと速度の変化はすぐに見せる
 
   let frameTimes: number[] | null = null;
   let frameWanted = 0;
@@ -167,6 +150,7 @@ async function start(): Promise<void> {
   window.__explorer = {
     ready: true,
     setView: (v) => controller.setView(v),
+    getState: () => controller.getState(),
     measureFrames: (n) =>
       new Promise((resolve) => {
         frameTimes = [];
