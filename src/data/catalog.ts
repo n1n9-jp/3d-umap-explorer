@@ -111,6 +111,10 @@ export function searchForDataset(search: string, target: DatasetTarget): string 
   q.delete('pos');
   q.delete('look');
   q.delete('size');
+  // ブラウザで計算した埋め込みのパラメータ（src/compute/params.ts）。データセットを切り替えると事前計算に戻る
+  q.delete('nn');
+  q.delete('md');
+  q.delete('seed');
   const s = q.toString().replace(/%2F/gi, '/');
   return `?${s}`;
 }

@@ -19,7 +19,7 @@ import { defaultPointSize } from '../render/pointSize';
 import { INTERIOR_FOG, fogForCamera } from '../render/fog';
 import { clipPlanesForCamera, type ClipPlanes } from '../render/clip';
 import type { ViewSpec } from '../render/view';
-import { CameraRig } from './cameraRig';
+import { CameraRig, type CameraMode } from './cameraRig';
 import { AutoSpeed, autoSpeedParams } from './autoSpeed';
 import { computeHomeView } from './homeView';
 import { GpuPicker } from '../picking/GpuPicker';
@@ -75,6 +75,27 @@ export interface AppContext {
 export interface DatasetViewOptions {
   /** 点の大きさ（URL の `size`）。省略時はデータの点の間隔から決める */
   pointSize?: number | null;
+  /**
+   * 点の色の上書き（ブラウザで計算した埋め込みで、ラベルのないデータセットの色を、事前計算のクラスタの色のまま引き継ぐ）。
+   * 省略時は arrays のラベル・クラスタから決める
+   */
+  coloring?: PointColoring | null;
+}
+
+/**
+ * 表示を作り直すときに引き継ぐ、利用者が決めた状態（ブラウザで計算した埋め込みへ差し替えるとき。src/compute/）。
+ * カメラの位置と向きは、カメラ（アプリ全体で 1 つ）がそのまま持つ。
+ */
+export interface ViewUiState {
+  mode: CameraMode;
+  position: [number, number, number];
+  lookAt: [number, number, number];
+  speed: number;
+  autoSpeedEnabled: boolean;
+  pointSize: number;
+  labelsEnabled: boolean;
+  minimapVisible: boolean;
+  selected: number | null;
 }
 
 export class DatasetView {
@@ -96,6 +117,11 @@ export class DatasetView {
   readonly text: string[] | null;
   private readonly ctx: AppContext;
   private readonly boundsCenter: THREE.Vector3;
+  /**
+   * 点群の描画に渡している座標（`arrays.positions` のコピー）。ブラウザで計算した埋め込みへ切り替えるとき、
+   * 計算の途中の座標や、新旧の座標の間を動く点を、ここへ書いて見せる（`setDisplayPositions`）。
+   */
+  private readonly displayPositions: Float32Array;
   private disposed = false;
 
   constructor(ctx: AppContext, data: LoadedDataset, options: DatasetViewOptions = {}) {
@@ -109,7 +135,8 @@ export class DatasetView {
     const coarseLevel = manifest.clusters?.levels[0];
     const coarseIds = arrays.clusterAssignments?.[0]?.ids;
     const coarse = coarseLevel && coarseIds ? { ids: coarseIds, noise: manifest.clusters!.noise } : null;
-    this.coloring = pointColoring({ count: manifest.count, labels: arrays.labels, coarse });
+    this.coloring = options.coloring ?? pointColoring({ count: manifest.count, labels: arrays.labels, coarse });
+    this.displayPositions = new Float32Array(arrays.positions);
 
     // ---- 点群（src/render/）。画像があれば画像と丸い点、なければすべて丸い点 ----
     let atlas = null;
@@ -123,7 +150,7 @@ export class DatasetView {
       };
     }
     this.cloud = new PointCloud(
-      { positions: arrays.positions, colorIndices: this.coloring.indices, atlas },
+      { positions: this.displayPositions, colorIndices: this.coloring.indices, atlas },
       { fog: INTERIOR_FOG, pointSize: options.pointSize ?? defaultPointSize(manifest.density) },
     );
     this.root.add(this.cloud.mesh);
@@ -191,6 +218,47 @@ export class DatasetView {
 
   get name(): string {
     return this.arrays.manifest.name;
+  }
+
+  /** 点群に描いている座標（長さ 3 * count。書き換えないこと）。 */
+  get shownPositions(): Float32Array {
+    return this.displayPositions;
+  }
+
+  /**
+   * 点群の描画だけを、指定の座標で描く（空間索引・ピッキングの対応・目印・ミニマップは作り直さない）。
+   * 計算の途中の座標と、新旧の座標の間を動く点を見せるのに使う。GPU ピッキングは描画と同じ座標を使う。
+   */
+  setDisplayPositions(positions: ArrayLike<number>): void {
+    if (positions.length !== this.displayPositions.length) throw new RangeError('座標の長さが点の数と一致しません');
+    this.displayPositions.set(positions);
+    const attr = this.cloud.mesh.geometry.getAttribute('instancePosition');
+    attr.needsUpdate = true;
+    // 強調表示の輪の位置も合わせ直す
+    for (const kind of ['hover', 'selected'] as const) this.cloud.setHighlight(kind, this.cloud.getHighlight(kind));
+  }
+
+  /** 表示を作り直すときに引き継ぐ状態。 */
+  captureUiState(): ViewUiState {
+    const s = this.controller.getState();
+    return {
+      mode: s.mode, position: s.position, lookAt: s.lookAt, speed: s.speed, autoSpeedEnabled: s.autoSpeed.enabled,
+      pointSize: this.cloud.params.pointSize, labelsEnabled: this.clusterLabels.enabled,
+      minimapVisible: this.minimap.isVisible, selected: this.interaction.getState().selected,
+    };
+  }
+
+  /** `captureUiState` の状態を引き継ぐ（作り直した直後に呼ぶ）。選択は番号で引き継ぐ。 */
+  applyUiState(s: ViewUiState): void {
+    this.controller.setMode(s.mode);
+    this.controller.setView({ pos: s.position, look: s.lookAt });
+    this.controller.fly.speed = s.speed;
+    if (this.controller.autoSpeedAvailable) this.controller.autoSpeedEnabled = s.autoSpeedEnabled;
+    this.cloud.set({ pointSize: s.pointSize });
+    if (this.clusterLabels.enabled !== s.labelsEnabled) this.clusterLabels.setEnabled(s.labelsEnabled);
+    if (this.minimap.isVisible !== s.minimapVisible) this.minimap.setVisible(s.minimapVisible);
+    if (s.selected !== null && s.selected < this.arrays.manifest.count) this.interaction.select(s.selected);
+    this.updateCameraDependent();
   }
 
   /** ホームの視点: 点群全体（bounds の球）が画面に収まる位置。向きは manifest の overview.axes（第3軸の方向から見る） */

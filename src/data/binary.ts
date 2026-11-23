@@ -44,3 +44,17 @@ export function decodeUint16LE(buffer: ArrayBuffer, expectedLength: number, labe
   for (let i = 0; i < expectedLength; i++) out[i] = view.getUint16(i * 2, true);
   return out;
 }
+
+/** uint32 LE のバッファを長さ検証つきで Uint32Array にする。 */
+export function decodeUint32LE(buffer: ArrayBuffer, expectedLength: number, label = 'uint32'): Uint32Array {
+  if (buffer.byteLength !== expectedLength * 4) {
+    throw new BinaryFormatError(
+      `${label}: バイト長 ${buffer.byteLength} が期待値 ${expectedLength * 4}（${expectedLength} 要素）と一致しません`,
+    );
+  }
+  if (hostIsLittleEndian) return new Uint32Array(buffer.slice(0));
+  const view = new DataView(buffer);
+  const out = new Uint32Array(expectedLength);
+  for (let i = 0; i < expectedLength; i++) out[i] = view.getUint32(i * 4, true);
+  return out;
+}
