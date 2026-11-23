@@ -9,6 +9,9 @@ import { CameraRig, type CameraState } from './app/cameraRig';
 import { formatHud } from './app/hud';
 import { GpuPicker, type PickResult } from './picking/GpuPicker';
 import { createPickingDebug, type PickingDebug } from './picking/debug';
+import { SpatialIndex } from './spatial/SpatialIndex';
+import { AutoSpeed, autoSpeedParams } from './app/autoSpeed';
+import { bindAutoSpeedKey } from './app/autoSpeedKey';
 
 interface FrameStats { frames: number; meanMs: number; medianMs: number; p95Ms: number; maxMs: number }
 
@@ -18,7 +21,7 @@ declare global {
       ready: boolean;
       error?: string;
       setView(view: ViewSpec): void;
-      /** 現在のモード・位置・注視点・速度。 */
+      /** 現在のモード・位置・注視点・速度・速度の自動調整の状態。 */
       getState(): CameraState;
       measureFrames(n: number): Promise<FrameStats>;
       pointCloud: PointCloud;
@@ -73,7 +76,11 @@ async function start(): Promise<void> {
 
   // 点群の中心（バウンディングボックスの中心）。俯瞰モードの回転の中心になる
   const cloudCenter = new THREE.Vector3(...arrays.bounds.min).add(new THREE.Vector3(...arrays.bounds.max)).multiplyScalar(0.5);
-  const controller = new CameraRig(camera, renderer.domElement, cloudCenter);
+  // 密度に応じた速度の自動調整（manifest に density がなければ使わない）
+  const autoParams = autoSpeedParams(arrays.manifest.density);
+  const autoSpeed = autoParams ? new AutoSpeed(new SpatialIndex(arrays.positions), autoParams) : null;
+  const controller = new CameraRig(camera, renderer.domElement, cloudCenter, { autoSpeed });
+  bindAutoSpeedKey(window, controller); // T キーで有効・無効を切り替える
   controller.setView(parseView(search));
 
   const resize = () => {
@@ -109,6 +116,7 @@ async function start(): Promise<void> {
       pointSize: cloud.params.pointSize,
       mode: s.mode,
       speed: s.speed,
+      autoSpeed: { available: s.autoSpeed.available, enabled: s.autoSpeed.enabled, effectiveSpeed: s.effectiveSpeed },
       viewParams: formatView({ pos: s.position, look: s.lookAt }),
     });
   };
