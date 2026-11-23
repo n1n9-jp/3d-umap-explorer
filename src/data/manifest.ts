@@ -2,6 +2,12 @@
 
 export type Vec3 = [number, number, number];
 
+/**
+ * ラベル名の数の上限。ラベルは uint8 で持つので 0..255 の 256 個。
+ * 描画（src/render/）はラベル色を 10 色の繰り返しで割り当て、この範囲のどのラベルも同じ式で色を引く。
+ */
+export const MAX_LABELS = 256;
+
 /** 全点を含む球（`center` はバウンディングボックスの中心）。 */
 export interface ManifestBounds {
   center: Vec3;
@@ -280,7 +286,7 @@ export function parseManifest(json: unknown): DatasetManifest {
   if (!Array.isArray(names) || names.length === 0 || !names.every((n) => typeof n === 'string')) {
     throw new ManifestError('"labels.names" が文字列の配列ではありません');
   }
-  if (names.length > 256) throw new ManifestError('"labels.names" は 256 個までです');
+  if (names.length > MAX_LABELS) throw new ManifestError(`"labels.names" は ${MAX_LABELS} 個までです`);
 
   const sprite = requireRecord(json, 'sprite');
   const spriteFile = requireString(sprite, 'file', 'sprite.file');

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { BACKGROUND_COLOR, LABEL_COLORS, hexToRgb, labelColors } from './palette';
+import { INTERIOR_FOG } from './fog';
 
 // ---------- 色覚の模擬と色差の計算（テスト用の実装） ----------
 
@@ -164,6 +165,38 @@ describe('palette', () => {
   it(`通常の色覚で、明るさを除いた色の違い（a*b*）が ${MIN_CHROMA_DISTANCE} 以上離れている`, () => {
     const { delta, i, j } = closestPair(LABEL_COLORS, chromaDistance);
     expect(delta, `色${i}(${LABEL_COLORS[i]}) と 色${j}(${LABEL_COLORS[j]})`).toBeGreaterThanOrEqual(MIN_CHROMA_DISTANCE);
+  });
+});
+
+/**
+ * 霧で背景色へ割合 f だけ溶かした色。シェーダと同じく sRGB の値（ガンマ補正後）のまま線形に混ぜる
+ * （fragmentShader の mix(color, uBackground, vFog)。カラーマネジメントは無効で、値をそのまま出力する）。
+ */
+function fogged(hex: string, f: number): string {
+  const c = hexToRgb(hex);
+  const bg = hexToRgb(BACKGROUND_COLOR);
+  const v = c.map((x, k) => Math.round(255 * (x + ((bg[k] as number) - x) * f)));
+  return `#${v.map((x) => x.toString(16).padStart(2, '0')).join('')}`;
+}
+
+describe('霧で溶けた色', () => {
+  const fogMax = INTERIOR_FOG[2];
+  it('霧の上限は 0 より大きく 1 未満', () => {
+    expect(fogMax).toBeGreaterThan(0);
+    expect(fogMax).toBeLessThan(1);
+  });
+  describe.each(VISIONS)('色覚の多様性: %s', (vision) => {
+    it(`霧の上限（${fogMax}）まで溶けた色でも、どの2色も ΔE76 が ${MIN_DELTA_E} 以上`, () => {
+      const colors = LABEL_COLORS.map((c) => fogged(c, fogMax));
+      const { delta, i, j } = closestPair(colors, pairDeltaE(vision));
+      expect(delta, `${vision}: 色${i}(${colors[i]}) と 色${j}(${colors[j]})`).toBeGreaterThanOrEqual(MIN_DELTA_E);
+    });
+  });
+  it('変更前の霧の上限 0.75 では、コードレビューで測った 6〜8 まで下がる（模擬と混色の実装の確認）', () => {
+    const colors = LABEL_COLORS.map((c) => fogged(c, 0.75));
+    const mins = VISIONS.map((v) => closestPair(colors, pairDeltaE(v)).delta);
+    expect(Math.min(...mins)).toBeGreaterThan(5.5);
+    expect(Math.max(...mins)).toBeLessThan(8.5);
   });
 });
 

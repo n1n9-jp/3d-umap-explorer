@@ -58,7 +58,7 @@ export function createPickingDebug(renderer: THREE.WebGLRenderer, scene: THREE.S
       const depth = -v.z;
       const bh = renderer.getDrawingBufferSize(size).y;
       const pxPerUnit = 0.5 * bh * camera.projectionMatrix.elements[5]! / Math.max(depth, 1e-6);
-      const shown = Math.max(p.pointSize * pxPerUnit, p.minPixelSize);
+      const shown = Math.max(p.pointSize * pxPerUnit, cloud.minPixelSizeInBuffer());
       v.applyMatrix4(camera.projectionMatrix);
       const rect = renderer.domElement.getBoundingClientRect();
       const scale = bh / rect.height;

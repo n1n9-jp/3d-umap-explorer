@@ -9,13 +9,22 @@
  * - 数字の線の外側に背景色の縁取りを付け、重なった数字どうしを切り分ける。
  * - カメラのごく近くの点は、線を細らせながら消す。距離に応じて背景色へ溶かす。
  *
+ * 画面上の大きさのユニフォーム（uMinPixelSize・uDigitPx・uDotRadius.y・強調表示の uRing）は描画バッファのピクセル単位。
+ * PointCloud が CSS ピクセルの値に pixelRatio を掛けて渡すので、見かけの大きさは pixelRatio によらない。
+ *
+ * ラベル色は PALETTE_SIZE 色のパレットを繰り返して引く（ラベル番号を PALETTE_SIZE で割った余り）。
+ * ラベルは uint8 なので、どのラベル（0..255）でも配列の範囲内を読む。
+ *
  * PICKING を define すると、同じ形の判定のまま「点の番号」を出力する（GPU ピッキング用）。
  * 出力は index + 1 を RGB の24ビットに入れたもの（R が下位8ビット）で、0 は点なし。
  * 判定は、MSAA の半分以上のサンプルが覆われるかどうかに相当する「アルファ 0.5 以上」とする。
  * 縁取りは背景色で描かれて背後を隠すので、番号 0 のまま深度だけを書く。
  */
 
-export const MAX_LABELS = 32;
+import { LABEL_COLORS } from './palette';
+
+/** シェーダのパレットの色数（ラベル色の繰り返しの周期）。 */
+export const PALETTE_SIZE = LABEL_COLORS.length;
 
 export const vertexShader = /* glsl */ `
 precision highp float;
@@ -31,7 +40,7 @@ uniform vec2 uCellSize;
 uniform vec2 uDigitPx;     // x: これ以下は丸い点, y: これ以上は数字
 uniform vec2 uNearFade;    // x: 完全に消える距離, y: フェードが始まる距離
 uniform vec3 uFog;         // x: 霧の始まる距離, y: 霧が 1-1/e になるまでの距離, z: 霧の上限
-uniform vec3 uPalette[${MAX_LABELS}];
+uniform vec3 uPalette[${PALETTE_SIZE}];
 
 out vec2 vUv;
 out vec2 vLocal;
@@ -67,7 +76,8 @@ void main() {
   vLocal = position.xy;                         // -0.5..0.5
   vec2 cornerUv = vec2(position.x + 0.5, 0.5 - position.y); // v は下向き（画像の上端が 0）
   vUv = instanceCell + cornerUv * uCellSize;
-  vColor = uPalette[int(instanceLabel + 0.5)];
+  int label = clamp(int(instanceLabel + 0.5), 0, 255);
+  vColor = uPalette[label % ${PALETTE_SIZE}];
   vDigit = smoothstep(uDigitPx.x, uDigitPx.y, shownPx);
   vPx = shownPx;
   vFade = fade;

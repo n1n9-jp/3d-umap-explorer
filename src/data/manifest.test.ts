@@ -1,6 +1,6 @@
 import realManifestRaw from '../../public/data/mnist/manifest.json?raw';
 import { describe, expect, it } from 'vitest';
-import { ManifestError, parseManifest } from './manifest';
+import { MAX_LABELS, ManifestError, parseManifest } from './manifest';
 
 export const validManifest = () => ({
   name: 'MNIST 10k',
@@ -35,6 +35,16 @@ describe('parseManifest', () => {
   it('count が正の整数でなければ拒否する', () => {
     expect(() => parseManifest({ ...validManifest(), count: 0 })).toThrow(ManifestError);
     expect(() => parseManifest({ ...validManifest(), count: 1.5 })).toThrow(ManifestError);
+  });
+
+  it(`ラベル名は ${MAX_LABELS} 個まで受け付け、それを超えると拒否する`, () => {
+    const names = (n: number) => Array.from({ length: n }, (_, i) => String(i));
+    const ok = validManifest();
+    ok.labels.names = names(MAX_LABELS);
+    expect(parseManifest(ok).labels.names).toHaveLength(MAX_LABELS);
+    const ng = validManifest();
+    ng.labels.names = names(MAX_LABELS + 1);
+    expect(() => parseManifest(ng)).toThrow(ManifestError);
   });
 
   it('オブジェクトでない入力を拒否する', () => {
