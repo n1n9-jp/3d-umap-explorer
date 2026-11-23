@@ -93,7 +93,10 @@ async function start(): Promise<void> {
   const boundsCenter = new THREE.Vector3(...arrays.bounds.center);
   // 密度に応じた速度の自動調整（manifest に density がなければ使わない）
   const autoParams = autoSpeedParams(arrays.manifest.density);
-  const autoSpeed = autoParams ? new AutoSpeed(new SpatialIndex(arrays.positions), autoParams) : null;
+  // 空間索引は 1 つを、速度の自動調整とホバー・選択の「止まる距離」で共有する。
+  // 問い合わせは同期的に終わり、結果は都度コピーされる。JS は単一スレッドで、互いの問い合わせの途中に割り込まないので安全
+  const spatialIndex = new SpatialIndex(arrays.positions);
+  const autoSpeed = autoParams ? new AutoSpeed(spatialIndex, autoParams) : null;
   const controller = new CameraRig(camera, renderer.domElement, cloudCenter, { autoSpeed });
   bindAutoSpeedKey(window, controller); // T キーで有効・無効を切り替える
   // ホームの視点: 点群全体（bounds の球）が画面に収まる位置。向きは manifest の overview.axes（第3軸の方向から見る）
@@ -204,8 +207,7 @@ async function start(): Promise<void> {
     camera,
     cloud,
     pick: (x, y) => picker.pick(camera, x, y).then((r) => (r ? r.index : null)),
-    // 速度の自動調整の索引とは別に持つ（索引は再入を想定しないので、使い手ごとに分ける）
-    index: new SpatialIndex(arrays.positions),
+    index: spatialIndex, // 速度の自動調整と共有（上で構築）
     panel: infoPanel,
     flyTo: (target, options) => controller.flyTo(target, options),
     bufferHeight: () => renderer.getDrawingBufferSize(new THREE.Vector2()).y,
