@@ -17,6 +17,12 @@
  *   - K キーで文字が消え（丸い点に戻る）、もう一度押すと戻る。HUD の操作説明に K キーがある
  *   - MNIST へ切り替えると、単語のメッシュとアトラスが解放される（往復しても WebGL のテクスチャとジオメトリの数が増え続けない）。MNIST では働かない
  *   - 選び直し 1 回の時間、グリフアトラスの生成時間、フレーム時間（文字の表示の有無）を出力する（ソフトウェア描画なので参考値）
+ *   - 文字の高さ: 画面上の文字の高さ（1 em）が下限以上・上限以下（内部の視点で、最も大きい単語も上限以下。文字の画素の高さでも確かめる）。
+ *     クラスタの縁の視点で、読める大きさ（12 CSS ピクセル以上）の単語の数が、変更前（下の EDGE_BEFORE）より増えている
+ *   - 重ならない: 縁・内部・内部の密な場所・点を選択した状態で、表示中の単語の矩形が、表示中の目印の要素の矩形とも、
+ *     UI の要素（HUD・選択欄・現在地・情報パネル・ミニマップ・UMAP のパネル）の矩形とも重ならない。UMAP のパネルを開いても同じ
+ *   - クラスタの内部では、ほかのクラスタの目印が小さく薄くなり、単語と重なる目印は隠れる（理由 words）
+ *   - クラスタに属さない点の単語の文字は、点の灰色より明るい色（NOISE_TEXT_COLOR）で描く
  *   - コンソールエラーがない
  * スクリーンショット（クラスタの縁・内部・内部の密な場所・点を選択した状態）を --out に保存する。失敗があれば終了コード 1 で終わる。
  */
@@ -47,7 +53,17 @@ const PALETTE = [...paletteSrc.slice(paletteSrc.indexOf('LABEL_COLORS'), palette
 const NOISE = /NOISE_COLOR = '(#[0-9a-f]{6})'/i.exec(fs.readFileSync(path.join(root, 'src/render/colorScheme.ts'), 'utf8'))[1].toLowerCase();
 const w2v = loadDataset(path.join(root, 'public/data/word2vec-10k'));
 const W2V_NOISE = w2v.manifest.clusters.noise;
+const NOISE_TEXT = /NOISE_TEXT_COLOR = '(#[0-9a-f]{6})'/i.exec(fs.readFileSync(path.join(root, 'src/text/WordLabels.ts'), 'utf8'))[1].toLowerCase();
 const expectedColor = (i) => (w2v.coarse[i] === W2V_NOISE ? NOISE : PALETTE[w2v.coarse[i] % PALETTE.length]);
+/** 文字の色（クラスタに属さない点だけ、点の灰色より明るい） */
+const expectedTextColor = (i) => (w2v.coarse[i] === W2V_NOISE ? NOISE_TEXT : expectedColor(i));
+/** 変更前（文字の大きさを写さず、UI・目印を避けない版。eadc3b9）の、同じ視点での値 */
+const EDGE_BEFORE = { shown: 7, readable: 0, maxTextPx: 9.3 };
+const INSIDE_BEFORE = { shown: 92, maxTextPx: 71.0 };
+/** 読める大きさ（文字の高さ、CSS ピクセル） */
+const READABLE_PX = 12;
+/** 単語の文字を重ねない UI の要素（src/app/datasetView.ts の WORD_OBSTACLE_IDS と同じ） */
+const UI_IDS = ['hud', 'dataset-switcher', 'umap-panel', 'cluster-location', 'info', 'minimap'];
 const { views: libViews } = computeViews(w2v);
 const VIEWS = Object.fromEntries(libViews.map((v) => [v.name.replace(/^\d-/, ''), v]));
 
@@ -108,8 +124,9 @@ async function waitWords(page, maxFrames = 60) {
  * - 通常の描画と番号の画像の形の一致（輪郭の 2 画素を除く）
  */
 /* eslint-disable no-undef */
-async function analyze() {
+async function analyze(textColors) {
   const ex = window.__explorer, dbg = ex.picking;
+  const textColor = (i) => textColors[i];
   const ws = ex.words.getState();
   const frame = dbg.readFrame();
   const img = await dbg.readIdImage();
@@ -141,7 +158,7 @@ async function analyze() {
     const bbox = s.n ? { x0: s.minX / scale, y0: s.minY / scale, x1: s.maxX / scale, y1: s.maxY / scale } : null;
     const outside = bbox ? Math.max(0, (r.x - r.width / 2) - bbox.x0, bbox.x1 - (r.x + r.width / 2), (r.y - r.height / 2) - bbox.y0, bbox.y1 - (r.y + r.height / 2)) : 0;
     // 色: 内側の画素（3×3 が同じ番号）
-    const want = hex(ex.dataset.pointColor(w.index));
+    const want = hex(textColor(w.index));
     const f = fog.z * (1 - Math.exp(-Math.max(w.distance - fog.x, 0) / fog.y));
     const wantRgb = want.map((c, k) => c * (1 - f) + BG[k] * f);
     let samples = 0;
@@ -270,6 +287,53 @@ async function analyze() {
 }
 /* eslint-enable no-undef */
 
+const TEXT_COLORS = Array.from({ length: w2v.count }, (_, i) => expectedTextColor(i));
+
+/**
+ * 表示中の単語の矩形と、表示中の目印の要素・UI の要素の矩形が重ならないか（DOM の実際の矩形で調べる）。
+ * 目印の状態（内部では小さく薄い。単語と重なる目印は理由 words で隠れる）も返す。
+ */
+async function layoutReport(page) {
+  return page.evaluate((uiIds) => {
+    const ex = window.__explorer;
+    const ws = ex.words.getState();
+    const ls = ex.labels.getState();
+    const box = (r) => ({ x0: r.left, y0: r.top, x1: r.right, y1: r.bottom });
+    const chips = [...document.querySelectorAll('.cluster-label')].filter((e) => getComputedStyle(e).visibility !== 'hidden')
+      .map((e) => ({ id: e.dataset.clusterId, ...box(e.getBoundingClientRect()) }));
+    const ui = uiIds.map((id) => { const e = document.getElementById(id); if (!e || e.hidden) return null; const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0 ? { id, ...box(r) } : null; }).filter(Boolean);
+    const hit = (w, b) => w.x0 < b.x1 && b.x0 < w.x1 && w.y0 < b.y1 && b.y0 < w.y1;
+    const labelHits = [], uiHits = [];
+    for (const w of ws.shown) {
+      const r = { x0: w.rect.x - w.rect.width / 2, x1: w.rect.x + w.rect.width / 2, y0: w.rect.y - w.rect.height / 2, y1: w.rect.y + w.rect.height / 2 };
+      for (const c of chips) if (hit(r, c)) labelHits.push(`${w.text}×目印${c.id}`);
+      for (const u of ui) if (hit(r, u)) uiHits.push(`${w.text}×#${u.id}`);
+    }
+    return {
+      shown: ws.shown.length, chips: chips.length, ui: ui.map((u) => u.id), labelHits, uiHits,
+      location: ls.location.kind,
+      labels: ls.labels.map((l) => ({ id: l.id, visible: l.visible, reason: l.reason, scale: l.scale, opacity: l.opacity, distance: l.distance })),
+    };
+  }, UI_IDS);
+}
+
+async function checkLayout(page, name) {
+  const r = await layoutReport(page);
+  check(`${name}: 表示中の単語の矩形が、表示中の目印の矩形と重ならない`, r.labelHits.length === 0,
+    `単語 ${r.shown}、目印 ${r.chips} 個、重なり ${r.labelHits.length}${r.labelHits.length ? `（${r.labelHits.slice(0, 4).join(' / ')}）` : ''}`);
+  check(`${name}: 表示中の単語の矩形が、UI の領域（${r.ui.join('・')}）と重ならない`, r.uiHits.length === 0,
+    `重なり ${r.uiHits.length}${r.uiHits.length ? `（${r.uiHits.slice(0, 4).join(' / ')}）` : ''}`);
+  const visible = r.labels.filter((l) => l.visible);
+  const byWords = r.labels.filter((l) => l.reason === 'words').length;
+  if (r.location === 'inside') {
+    // 内部では、ほかのクラスタの目印を小さく薄くする（src/labels/appearance.ts の INSIDE_SCALE・INSIDE_OPACITY を掛けたもの）
+    check(`${name}: クラスタの内部では、ほかのクラスタの目印が小さく薄い（不透明度 0.6 以下、大きさ 0.85 倍以下）`, visible.every((l) => l.opacity <= 0.6 + 1e-9 && l.scale <= 0.85 + 1e-9),
+      `出ている目印 ${visible.length} 個（不透明度 ${visible.map((l) => l.opacity.toFixed(2)).join(',')}）、単語と重なって隠した目印 ${byWords} 個`);
+  }
+  metrics[`layout-${name}`] = { location: r.location, chips: r.chips, hiddenByWords: byWords, ui: r.ui };
+  return r;
+}
+
 function overlaps(shown) {
   const bad = [];
   for (let i = 0; i < shown.length; i++) for (let j = i + 1; j < shown.length; j++) {
@@ -292,14 +356,32 @@ async function testDisplay(page) {
     await setView(page, VIEWS[name]);
     const s = await waitWords(page);
     await page.screenshot({ path: path.join(outDir, `w2v-${name}.png`) });
-    const a = await page.evaluate(analyze);
+    const a = await page.evaluate(analyze, TEXT_COLORS);
     const ov = overlaps(s.shown);
     console.log(`  ${name}: 表示中 ${s.shown.length} 語（候補 ${s.select.candidates}、条件を満たす ${s.select.eligible}）、文字 ${s.drawnGlyphs}、文字の高さ ${Math.min(...s.shown.map((w) => w.textPx)).toFixed(1)}〜${Math.max(...s.shown.map((w) => w.textPx)).toFixed(1)}px`);
     check(`${name}: 単語が文字として描かれる（表示中の単語の数が 0 より多く、上限 ${s.params.maxWords} 以下）`, s.shown.length > 0 && s.shown.length <= s.params.maxWords && s.drawnWords === s.shown.length,
       `${s.shown.length} 語`);
     check(`${name}: 表示中の単語の画面上の矩形が互いに重ならない`, ov.length === 0, ov.slice(0, 5).join(' / '));
     const smallest = Math.min(...s.shown.map((w) => w.textPx));
-    check(`${name}: 画面上の文字の高さ（1 em）が 8px 以上（新しく出す単語は 9px 以上）`, smallest >= 8, `最小 ${smallest.toFixed(2)}px`);
+    const largestPx = Math.max(...s.shown.map((w) => w.textPx));
+    const sz = s.params.select.size;
+    check(`${name}: 画面上の文字の高さ（1 em）が下限 ${sz.minPx}px 以上、上限 ${sz.maxPx}px 以下`, smallest >= sz.minPx - 1e-6 && largestPx <= sz.maxPx + 1e-6,
+      `${smallest.toFixed(2)}〜${largestPx.toFixed(2)}px（自然な大きさ ${Math.min(...s.shown.map((w) => w.naturalPx)).toFixed(1)}〜${Math.max(...s.shown.map((w) => w.naturalPx)).toFixed(1)}px）`);
+    const glyphMax = Math.max(...a.perWord.map((w) => w.glyphHeightCss));
+    const boxEm = Math.max(...s.shown.map((w) => w.rect.height / w.textPx)); // 単語の矩形の高さ（em。縁取りを含む）
+    check(`${name}: 文字の画素の高さも、上限の大きさに収まる（上限 × 単語の矩形の高さ以下）`, glyphMax <= sz.maxPx * boxEm + 1,
+      `文字の画素の高さの最大 ${glyphMax.toFixed(1)}px（上限 ${sz.maxPx}px × ${boxEm.toFixed(2)} em = ${(sz.maxPx * boxEm).toFixed(1)}px）`);
+    const readable = s.shown.filter((w) => w.textPx >= READABLE_PX).length;
+    metrics[`size-${name}`] = { shown: s.shown.length, readable, minPx: +smallest.toFixed(2), maxPx: +largestPx.toFixed(2), glyphMaxPx: +glyphMax.toFixed(1) };
+    if (name === 'edge') {
+      check(`edge: 読める大きさ（${READABLE_PX}px 以上）の単語の数が、変更前より増えている`, readable > EDGE_BEFORE.readable && readable >= 15,
+        `変更前 ${EDGE_BEFORE.shown} 語（うち ${READABLE_PX}px 以上 ${EDGE_BEFORE.readable}、最大 ${EDGE_BEFORE.maxTextPx}px） → 変更後 ${s.shown.length} 語（うち ${readable}、${smallest.toFixed(1)}〜${largestPx.toFixed(1)}px）`);
+    }
+    if (name === 'inside') {
+      check('inside: 最も大きい単語の文字の高さが、上限以下（変更前より小さい）', largestPx <= sz.maxPx && largestPx < INSIDE_BEFORE.maxTextPx,
+        `変更前 最大 ${INSIDE_BEFORE.maxTextPx}px（${INSIDE_BEFORE.shown} 語） → 変更後 最大 ${largestPx.toFixed(1)}px（${s.shown.length} 語）`);
+    }
+    await checkLayout(page, name);
     check(`${name}: 単語の基準点が、その点を投影した位置と一致する`, a.anchorErr < 0.5, `最大のずれ ${a.anchorErr.toFixed(3)}px`);
     const visible = a.perWord.filter((w) => w.n > 0);
     const outside = a.perWord.filter((w) => w.outside > 1.5);
@@ -397,9 +479,22 @@ async function testHoverSelect(page) {
     `選択 ${sel.selected}、パネル "${selInfo.label}"`);
   check('選択の強調が、単語を囲む矩形になる（単語の矩形の外側に黄色の枠が描かれる）', selInfo.box[0] > 0 && selInfo.yellow >= 40,
     `黄色の画素 ${selInfo.yellow}/${selInfo.band}、box ${JSON.stringify(selInfo.box.map((v) => +v.toFixed(5)))}`);
+  await waitWords(page);
   await page.screenshot({ path: path.join(outDir, 'w2v-selected.png') });
+  await checkLayout(page, 'selected');
   await page.keyboard.press('Escape');
   await frames(page, 2);
+  // UMAP のパネルを開いた状態でも、パネルの下に単語を出さない（開閉に追従する）
+  await page.keyboard.press('u');
+  await page.waitForFunction(() => !document.getElementById('umap-panel').hidden, null, { timeout: 60000 });
+  await page.evaluate(() => document.activeElement && document.activeElement.blur());
+  await waitWords(page);
+  await page.screenshot({ path: path.join(outDir, 'w2v-umap-panel.png') });
+  const rp = await checkLayout(page, 'umap-panel');
+  check('UMAP のパネルを開くと、パネルが単語を避ける領域に入る', rp.ui.includes('umap-panel'), rp.ui.join(','));
+  await page.click('#umap-close');
+  await page.waitForFunction(() => document.getElementById('umap-panel').hidden, null, { timeout: 10000 });
+  await waitWords(page);
 }
 
 async function testStability(page) {
@@ -466,12 +561,12 @@ async function testDpr(browser, base, page1) {
   console.log('\n[deviceScaleFactor 1 と 2 での見かけの大きさ]');
   await setView(page1, VIEWS.inside);
   const s1 = await waitWords(page1);
-  const a1 = await page1.evaluate(analyze);
+  const a1 = await page1.evaluate(analyze, TEXT_COLORS);
   const page2 = await openPage(browser, base, 'data=word2vec-10k', 2);
   try {
     await setView(page2, VIEWS.inside);
     const s2 = await waitWords(page2);
-    const a2 = await page2.evaluate(analyze);
+    const a2 = await page2.evaluate(analyze, TEXT_COLORS);
     const m1 = new Map(a1.perWord.map((w) => [w.index, w]));
     const ratios = [], textRatios = [];
     for (const w of a2.perWord) {

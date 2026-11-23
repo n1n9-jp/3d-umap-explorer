@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { appearanceParamsForBounds, labelAppearance } from './appearance';
+import { appearanceParamsForBounds, INSIDE_OPACITY, INSIDE_SCALE, insideAppearance, labelAppearance } from './appearance';
 
 const P = { near: 1, far: 3 };
 
@@ -40,5 +40,18 @@ describe('labelAppearance', () => {
   });
   it('点群の半径から基準距離を決める（0.6 R と 3 R）', () => {
     expect(appearanceParamsForBounds(2)).toEqual({ near: 1.2, far: 6 });
+  });
+});
+
+describe('insideAppearance（内部にいるときのほかのクラスタの目印）', () => {
+  it('小さく薄くする（距離に対する単調さは保つ）', () => {
+    const p = { near: 1, far: 3 };
+    const a = labelAppearance(1.5, p), b = labelAppearance(2.5, p);
+    const ia = insideAppearance(a), ib = insideAppearance(b);
+    expect(ia.scale).toBeCloseTo(a.scale * INSIDE_SCALE, 9);
+    expect(ia.opacity).toBeCloseTo(a.opacity * INSIDE_OPACITY, 9);
+    expect(ia.scale).toBeLessThan(a.scale);
+    expect(ia.opacity).toBeLessThan(a.opacity);
+    expect(ia.scale).toBeGreaterThan(ib.scale);
   });
 });

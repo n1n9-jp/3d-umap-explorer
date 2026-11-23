@@ -31,6 +31,13 @@ import { ClusterLabels } from '../labels/ClusterLabels';
 import { Minimap } from '../minimap/Minimap';
 import { WordLabels } from '../text/WordLabels';
 import { takeFault } from './faults';
+import type { ScreenRect } from '../text/selection';
+
+/**
+ * 画面の端の UI の要素（単語の文字をこの下に出さない）。HUD・データセットの選択欄・UMAP のパネル・現在地・
+ * 情報パネル・ミニマップ。毎フレーム、要素の実際の矩形を読む（開閉や大きさの変化に追従する）。
+ */
+export const WORD_OBSTACLE_IDS = ['hud', 'dataset-switcher', 'umap-panel', 'cluster-location', 'info', 'minimap'] as const;
 
 /** 読み込み済みのデータ（GPU の資源はまだ作らない）。 */
 export interface LoadedDataset {
@@ -202,6 +209,8 @@ export class DatasetView {
         boundsRadius: arrays.bounds.radius,
         colorSource: this.coloring.source,
         flyTo: (target, opts) => this.controller.flyTo(target, opts),
+        // クラスタの内部では、単語の文字と重なる目印を隠す（this.words はこのあと作る）
+        wordRects: () => this.words?.shownRects() ?? [],
       });
 
       // ---- ピッキング（src/picking/）----
@@ -362,6 +371,21 @@ export class DatasetView {
     badge.style.top = `${Math.round(map.top + 4)}px`;
   }
 
+  /**
+   * 近くの単語の文字の表示の有効・無効（K キー）。点が新旧の位置の間を動いている間や、計算の途中を表示している間
+   * （setDisplayPositions で文字を止めている間）は、止め終わったあとの状態として覚えておくだけにする。
+   */
+  setWordsEnabled(enabled: boolean): void {
+    if (!this.words) return;
+    if (this.wordsSuspended) this.wordsEnabledBeforeSuspend = enabled;
+    else this.words.setEnabled(enabled);
+  }
+
+  /** 単語の文字を止めているか（setDisplayPositions）。 */
+  get wordsPaused(): boolean {
+    return this.wordsSuspended;
+  }
+
   /** 表示を作り直すときに引き継ぐ状態。 */
   captureUiState(): ViewUiState {
     const s = this.controller.getState();
@@ -419,7 +443,10 @@ export class DatasetView {
   update(dt: number, width: number, height: number): void {
     this.controller.update(dt);
     this.updateCameraDependent();
-    this.words?.update(dt, width, height);
+    if (this.words) {
+      this.words.setObstacles(this.wordObstacles());
+      this.words.update(dt, width, height);
+    }
     this.clusterLabels.update(width, height);
     this.layoutComputingBadge();
   }
@@ -445,6 +472,26 @@ export class DatasetView {
     this.computingBadge = null;
     this.ctx.scene.remove(this.root);
     made.cloud?.dispose();
+  }
+
+  /**
+   * 単語の文字を重ねない画面上の領域: UI の要素の矩形と、目印。クラスタの外では目印を優先し（出ている目印と重なる単語を出さない）、
+   * 内部では単語を優先する（目印のほうを隠す。ClusterLabels）。内部でも、キーボードのフォーカスがある目印とは重ねない。
+   * 目印は前のフレームの位置（単語の選び直しは、位置が変われば次のフレームで追いつく）。
+   */
+  private wordObstacles(): ScreenRect[] {
+    const out: ScreenRect[] = [];
+    const doc = this.ctx.doc;
+    for (const id of WORD_OBSTACLE_IDS) {
+      const el = doc.getElementById(id);
+      if (!el || el.hidden) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) continue;
+      out.push({ x: r.left + r.width / 2, y: r.top + r.height / 2, width: r.width, height: r.height });
+    }
+    const labels = this.clusterLabels;
+    out.push(...labels.visibleRects(labels.insideCluster));
+    return out;
   }
 
   private pointInfoSource(clusterNames: string[]): PointInfoSource {

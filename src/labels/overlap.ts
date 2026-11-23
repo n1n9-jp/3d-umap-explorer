@@ -63,3 +63,27 @@ export function resolveOverlaps(items: readonly OverlapItem[], gap = 4, memory?:
   }
   return new Set(kept.map((k) => k.id));
 }
+
+/** 画面上の矩形（中心と大きさ。CSS ピクセル）。 */
+export interface ScreenBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * 単語の文字の矩形と重なる目印の id（間隔 `gap` を含めて重なるもの）。`pinned`（キーボードのフォーカスがある目印）は除く。
+ * クラスタの内部では、近くの単語の読み取りを優先して、これらの目印を隠す。
+ */
+export function labelsCoveringWords(items: readonly OverlapItem[], words: readonly ScreenBox[], gap = 4, pinned: number | null = null): Set<number> {
+  const hidden = new Set<number>();
+  if (!words.length) return hidden;
+  for (const it of items) {
+    if (it.id === pinned) continue;
+    for (const w of words) {
+      if (Math.abs(it.x - w.x) < (it.width + w.width) / 2 + gap && Math.abs(it.y - w.y) < (it.height + w.height) / 2 + gap) { hidden.add(it.id); break; }
+    }
+  }
+  return hidden;
+}

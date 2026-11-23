@@ -1,8 +1,10 @@
 /**
  * 単語の文字のシェーダ。文字 1 つを 1 インスタンスとして描く。
  *
- * - 単語は点の位置を基準に、ビュー空間でカメラに正対させる。文字の大きさはワールド空間で一定
+ * - 単語は点の位置を基準に、ビュー空間でカメラに正対させる。文字の基準の大きさはワールド空間で一定
  *   （1 em = uTextScale × uPointSize。点群の uPointSize を共有するので、`[` `]` キーに追従する）。
+ *   画面上の高さは、透視投影のままの高さ（自然な大きさ）を selection.ts の textSizePx と同じ式で写した値にする
+ *   （近くは上限、遠くは下限で止め、その間は緩やかに変える）。ピッキングも同じシェーダなので、描く形と選ばれる形は一致する。
  * - 形は SDF の値を閾値で切る。点群（src/render/shaders.ts）と同じ共通の GLSL（輪郭の滑らかさ・近接フェード・霧・
  *   ピッキングの番号）を使う。
  * - 縁取り（背景色）と文字の本体は、別のパスで描く（OUTLINE_PASS）。縁取りは polygonOffset で奥へずらすので、
@@ -23,10 +25,13 @@ in vec3 iStyle;    // x: 色の番号, y: 不透明度, z: 点の番号
 uniform float uPointSize;
 uniform float uViewportHeight;
 uniform float uTextScale;
+uniform vec4 uTextSize;     // 画面上の文字の高さの決め方（CSS ピクセル）。x: 基準, y: 指数, z: 下限, w: 上限
+uniform float uPixelRatio;  // 描画の画素 / CSS ピクセル（描画用の画面の大きさから。ピッキングでも同じ値）
 uniform vec2 uNearFade;
 uniform vec3 uFog;
 uniform vec3 uPalette[${PALETTE_SIZE}];
 uniform vec3 uNoiseColor;
+uniform vec3 uNoiseTextColor; // クラスタに属さない点の文字の色（点の灰色より明るくして、暗い背景の上でも読めるようにする）
 
 out vec2 vUv;
 out vec3 vColor;
@@ -45,12 +50,17 @@ void main() {
     return;
   }
   float em = uTextScale * uPointSize;
+  // 自然な大きさ（CSS ピクセル）から画面に描く大きさを決め、その比で 1 em のワールドの大きさを変える。
+  // pxPerUnitAt はピッキングの小領域でも全画面と同じ値になる（src/picking/GpuPicker.ts）
+  float natural = em * pxPerUnitAt(-mv.z) / uPixelRatio;
+  float shown = clamp(uTextSize.x * pow(natural / uTextSize.x, uTextSize.y), uTextSize.z, uTextSize.w);
+  em *= shown / natural;
   vec2 corner = position.xy + 0.5;   // 0..1（PlaneGeometry の -0.5..0.5）
   mv.xy += (iQuad.xy + corner * iQuad.zw) * em;
   gl_Position = projectionMatrix * mv;
 
   vUv = vec2(mix(iUv.x, iUv.z, corner.x), mix(iUv.w, iUv.y, corner.y));
-  vColor = paletteColor(iStyle.x);
+  vColor = iStyle.x < -0.5 ? uNoiseTextColor : paletteColor(iStyle.x);
   vFade = fade;
   vFog = fogAt(dist);
 #ifdef PICKING

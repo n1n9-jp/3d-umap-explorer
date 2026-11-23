@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { rectsOverlap, resolveOverlaps, type OverlapItem } from './overlap';
+import { labelsCoveringWords, rectsOverlap, resolveOverlaps, type OverlapItem } from './overlap';
 
 const item = (id: number, x: number, y: number, distance: number, width = 40, height = 20): OverlapItem => ({ id, x, y, width, height, distance });
 
@@ -106,5 +106,21 @@ describe('resolveOverlaps の切り替えの幅（前のフレームの結果を
     const frames = (t: number) => [item(0, 0, 0, 1), item(1, t % 2 ? 43.5 : 44.5, 0, 2)];
     expect(toggles(frames, 40, false)).toBeGreaterThan(20);
     expect(toggles(frames, 40, true)).toBeLessThanOrEqual(2);
+  });
+});
+
+describe('labelsCoveringWords（内部で単語の文字と重なる目印）', () => {
+  const chip = (id: number, x: number, y: number): OverlapItem => ({ id, x, y, width: 100, height: 20, distance: 1 });
+  it('単語の矩形と、間隔を含めて重なる目印だけを返す', () => {
+    const words = [{ x: 200, y: 100, width: 60, height: 14 }];
+    const items = [chip(0, 200, 100), chip(1, 200, 125), chip(2, 200, 160), chip(3, 500, 100)];
+    // 1: 縦の中心の差 25。間隔 4 では (20 + 14) / 2 + 4 = 21 なので重ならず、間隔 10 では 27 なので重なる
+    expect([...labelsCoveringWords(items, words, 4)].sort()).toEqual([0]);
+    expect([...labelsCoveringWords(items, words, 10)].sort()).toEqual([0, 1]);
+  });
+  it('フォーカスのある目印は隠さない。単語がなければ何も隠さない', () => {
+    const words = [{ x: 200, y: 100, width: 60, height: 14 }];
+    expect([...labelsCoveringWords([chip(0, 200, 100)], words, 4, 0)]).toEqual([]);
+    expect([...labelsCoveringWords([chip(0, 200, 100)], [], 4)]).toEqual([]);
   });
 });

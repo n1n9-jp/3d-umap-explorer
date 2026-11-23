@@ -87,6 +87,8 @@ declare global {
       words: {
         getState(): WordLabelsState | null;
         setEnabled(enabled: boolean): void;
+        /** 点が新旧の位置の間を動いている間など、文字を止めているか */
+        paused(): boolean;
       };
       /** 検証用の故障の注入（`src/app/faults.ts`）。次に起こす失敗の回数を書く */
       faults: Faults;
@@ -174,7 +176,8 @@ async function start(): Promise<void> {
   const state: DatasetState = { current: null, loading: false, error: null, generation: 0 };
   let loadToken = 0;
   let wordsEnabled = true; // K キーの状態（データセットを切り替えても保つ）
-  const setWordsEnabled = (enabled: boolean) => { wordsEnabled = enabled; view?.words?.setEnabled(enabled); };
+  // 点が動いている間（文字を止めている間）は、DatasetView が止め終わったあとの状態として覚える
+  const setWordsEnabled = (enabled: boolean) => { wordsEnabled = enabled; view?.setWordsEnabled(enabled); };
 
   const switcher = new DatasetSwitcher(doc, catalog, (id) => { void switchTo(id, { pushHistory: true }); });
 
@@ -484,6 +487,7 @@ async function start(): Promise<void> {
     words: {
       getState: () => v().words?.getState() ?? null,
       setEnabled: (enabled) => setWordsEnabled(enabled),
+      paused: () => v().wordsPaused,
     },
     faults,
     notice: () => view?.notice ?? null,

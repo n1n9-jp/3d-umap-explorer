@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
 import {
-  DEFAULT_SELECT_PARAMS, rectsOverlap, selectWords, stepOpacities, type SelectInput, type WordBox, type WordSelectParams,
+  DEFAULT_SELECT_PARAMS, DEFAULT_TEXT_SIZE, NATURAL_TEXT_SIZE, rectsOverlap, selectWords, stepOpacities, textSizePx,
+  type SelectInput, type WordBox, type WordSelectParams,
 } from './selection';
 
 const W = 1000, H = 800;
@@ -30,7 +31,8 @@ function input(points: number[][], over: Partial<SelectInput> = {}, params: Part
     nearLimit: 0.05,
     box: () => BOX,
     shown: new Set(),
-    params: { ...DEFAULT_SELECT_PARAMS, ...params },
+    // 既存の判定は、透視投影のままの大きさ（写さない）と、閾値 9px・8px で確かめる
+    params: { ...DEFAULT_SELECT_PARAMS, minNaturalPx: 9, keepMinNaturalPx: 8, size: NATURAL_TEXT_SIZE, ...params },
     ...over,
   };
 }
@@ -46,7 +48,7 @@ describe('selectWords（視錐台・距離・大きさ）', () => {
     ]));
     expect(ids(r)).toEqual([0]);
   });
-  it('画面上の文字の高さが minTextPx 未満の単語を外す', () => {
+  it('画面上の文字の高さが minNaturalPx 未満の単語を外す', () => {
     // 文字の高さ = emWorld × PX_AT_1 / 奥行き。9px になる奥行き
     const d9 = 0.01 * PX_AT_1 / 9;
     const r = selectWords(input([[0, 0, -d9 * 0.95], [0.5, 0, -d9 * 1.05]]));
@@ -107,7 +109,7 @@ describe('selectWords（フレーム間の安定）', () => {
     // 0 が 30% 近くなれば入れ替わる
     expect(ids(selectWords(input([[0, 0, -0.38], far], { shown: new Set([1]) })))).toEqual([0]);
   });
-  it('文字の高さの閾値に幅がある（表示中は keepMinTextPx まで残す）', () => {
+  it('文字の高さの閾値に幅がある（表示中は keepMinNaturalPx まで残す）', () => {
     const d = 0.01 * PX_AT_1 / 8.5; // 8.5px
     expect(ids(selectWords(input([[0, 0, -d]])))).toEqual([]);
     expect(ids(selectWords(input([[0, 0, -d]], { shown: new Set([0]) })))).toEqual([0]);
@@ -168,5 +170,80 @@ describe('stepOpacities（切り替えの不透明度）', () => {
     expect(op.get(1)).toBeCloseTo(0.75);
     stepOpacities(op, new Set([1]), 0.05, 0.2);
     expect(op.get(1)).toBe(1);
+  });
+});
+
+describe('textSizePx（文字の高さの写し方）', () => {
+  const p = DEFAULT_TEXT_SIZE;
+  it('下限と上限で止め、その間は単調に増える（近いほど大きい）', () => {
+    expect(textSizePx(2, p)).toBe(p.minPx);
+    expect(textSizePx(500, p)).toBe(p.maxPx);
+    let prev = 0;
+    for (let n = 1; n <= 200; n += 0.5) {
+      const v = textSizePx(n, p);
+      expect(v).toBeGreaterThanOrEqual(prev);
+      expect(v).toBeGreaterThanOrEqual(p.minPx);
+      expect(v).toBeLessThanOrEqual(p.maxPx);
+      prev = v;
+    }
+    expect(textSizePx(30, p)).toBeGreaterThan(textSizePx(20, p));
+  });
+  it('近くと遠くの大きさの差を縮める（自然な大きさの比 8 倍が、2 倍程度になる）', () => {
+    const near = textSizePx(72, p), far = textSizePx(9, p);
+    expect(near / far).toBeLessThan(2.5);
+    expect(far).toBeGreaterThanOrEqual(12);
+  });
+  it('基準の高さでは自然な大きさのまま。写さない設定では恒等', () => {
+    expect(textSizePx(p.referencePx, p)).toBeCloseTo(p.referencePx, 9);
+    expect(textSizePx(37.5, NATURAL_TEXT_SIZE)).toBe(37.5);
+    expect(textSizePx(0, p)).toBe(0);
+  });
+});
+
+describe('selectWords（文字の高さの写し方と障害物）', () => {
+  it('矩形は写したあとの大きさ。閾値は自然な大きさで判定する', () => {
+    const size = DEFAULT_TEXT_SIZE;
+    // 自然な大きさ 6px（minNaturalPx 5 以上）と 4px（未満）
+    const d6 = 0.01 * PX_AT_1 / 6, d4 = 0.01 * PX_AT_1 / 4;
+    const r = selectWords(input([[0, 0, -d6], [0.3 * d4, 0, -d4]], {}, { minNaturalPx: 5, keepMinNaturalPx: 4.5, size }));
+    expect(ids(r)).toEqual([0]);
+    const w = r.words[0]!;
+    expect(w.naturalPx).toBeCloseTo(6, 6);
+    expect(w.textPx).toBe(size.minPx);
+    expect(w.rect.height).toBeCloseTo(size.minPx, 6); // 単語の矩形の高さは 1 em
+  });
+  it('近い単語は上限の大きさで描く', () => {
+    const r = selectWords(input([[0, 0, -0.06]], {}, { size: DEFAULT_TEXT_SIZE }));
+    expect(r.words[0]!.naturalPx).toBeGreaterThan(DEFAULT_TEXT_SIZE.maxPx * 2);
+    expect(r.words[0]!.textPx).toBe(DEFAULT_TEXT_SIZE.maxPx);
+    expect(r.words[0]!.rect.width).toBeCloseTo(2 * DEFAULT_TEXT_SIZE.maxPx, 6);
+  });
+  it('障害物（UI の領域）と重なる単語は出さない。間隔 obstacleGapPx を含める', () => {
+    // 画面の中央の単語（高さ約 27.7px、幅 55.4px）
+    const base = selectWords(input([[0, 0, -0.5]]));
+    const rect = base.words[0]!.rect;
+    const covering = { x: rect.x + rect.width / 2 + 10, y: rect.y, width: 22, height: 10 }; // 右端に 1px 重なる
+    expect(ids(selectWords(input([[0, 0, -0.5]], { obstacles: [covering] })))).toEqual([]);
+    const near = { ...covering, x: covering.x + 3 }; // 2px 離れる（間隔 4 より狭い）
+    expect(ids(selectWords(input([[0, 0, -0.5]], { obstacles: [near] }, { obstacleGapPx: 4 })))).toEqual([]);
+    const far = { ...covering, x: covering.x + 6 }; // 5px 離れる
+    expect(ids(selectWords(input([[0, 0, -0.5]], { obstacles: [far] }, { obstacleGapPx: 4 })))).toEqual([0]);
+  });
+  it('新しく出す単語は、画面の端で切れるものを出さない（表示中なら残す）', () => {
+    // 基準点は画面の内側だが、矩形（幅 2 em）が右端からはみ出す位置
+    const z = -0.5, px = 0.01 * PX_AT_1 / 0.5; // 1 em の画面上の大きさ（約 13.9px。単語の幅は 2 em）
+    const ndcX = 1 - (0.5 * px) / (W / 2); // 右端から 0.5 em 内側
+    const x = ndcX * Math.tan(Math.PI / 6) * (W / H) * -z;
+    expect(ids(selectWords(input([[x, 0, z]])))).toEqual([]);
+    expect(ids(selectWords(input([[x, 0, z]], { shown: new Set([0]) })))).toEqual([0]);
+    // 表示中でも、はみ出し（0.5 em ≈ 6.9px）が余白（画面の半分 × keepFrustumMargin）を超えれば外す
+    expect(ids(selectWords(input([[x, 0, z]], { shown: new Set([0]) }, { keepFrustumMargin: 0.02 })))).toEqual([0]); // 余白 10px
+    expect(ids(selectWords(input([[x, 0, z]], { shown: new Set([0]) }, { keepFrustumMargin: 0.01 })))).toEqual([]); // 余白 5px
+  });
+  it('障害物に隠れた単語の代わりに、ほかの単語が残る', () => {
+    const r0 = selectWords(input([[0, 0, -0.5], [0.15, 0, -0.5]]));
+    const left = r0.words.find((w) => w.index === 0)!.rect;
+    const r = selectWords(input([[0, 0, -0.5], [0.15, 0, -0.5]], { obstacles: [left] }));
+    expect(ids(r)).toEqual([1]);
   });
 });

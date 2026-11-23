@@ -713,6 +713,7 @@ async function testWord2vec(page) {
   const hs = c ? await hoverAndSelect(page, c) : null;
   const word = c ? w2v.text[c.i] : null;
   check('ホバーと選択で単語が出る', hs && hs.hovered && hs.selected && hs.hoverText === word && hs.info.label === word, c ? `#${c.i} ${word}` : '見える点がない');
+  await testWordsKeyWhilePaused(page, P);
   await page.keyboard.press('KeyH');
   await waitStill(page);
   await page.screenshot({ path: path.join(outDir, 'word2vec-nn15.png') });
@@ -776,6 +777,43 @@ async function testWorkerError(page) {
   const r2 = await page.evaluate((q) => window.__explorer.umap.compute(q), p);
   const st2 = await umapState(page);
   check('そのあと、次の計算ができる（Worker を作り直し、結果を表示する）', r2.ok && st2.lastOutcome === 'done' && st2.current.kind === 'computed' && st2.workerStarted && st2.error === null, JSON.stringify(r2));
+}
+
+/**
+ * 点が動いている間（計算の途中の表示）は単語の文字を止める。その間の K キーは、止め終わったあとの状態として覚えるだけで、
+ * 文字を計算前の位置に出さない。
+ */
+async function testWordsKeyWhilePaused(page, P) {
+  console.log('\n[点が動いている間の K キー]');
+  await viewNear(page, [P[0], P[1], P[2]], 0.05);
+  await frames(page, 4);
+  const ws0 = await page.evaluate(() => window.__explorer.words.getState());
+  await page.check('#umap-preview');
+  await computeViaPanel(page, { nNeighbors: 15, minDist: 0.1, seed: 7 }, { wait: false });
+  await waitUntil(page, () => window.__explorer.words.paused(), null, 120000);
+  const words = () => page.evaluate(() => {
+    const ws = window.__explorer.words.getState();
+    return { paused: window.__explorer.words.paused(), enabled: ws.enabled, shown: ws.shown.length, glyphs: ws.drawnGlyphs };
+  });
+  await page.evaluate(() => document.activeElement && document.activeElement.blur());
+  const seq = [];
+  for (let k = 0; k < 3; k++) {
+    await page.keyboard.press('KeyK');
+    await frames(page, 2);
+    seq.push(await words(page));
+  }
+  const stillPaused = seq.filter((x) => x.paused);
+  check('点が動いている間に K キーを押しても、単語の文字が出ない（計算前の位置に出さない）', stillPaused.length >= 2 && stillPaused.every((x) => !x.enabled && x.shown === 0 && x.glyphs === 0),
+    `計算前 ${ws0.shown.length} 語。押したあと ${JSON.stringify(seq)}`);
+  const r = await waitIdle(page);
+  await frames(page, 4);
+  const after = await words(page);
+  check('点が動き終わると、その間の K キーの操作（3 回で表示→非表示）が反映される', r.value && r.value.lastOutcome === 'done' && !after.paused && !after.enabled && after.glyphs === 0, JSON.stringify(after));
+  await page.keyboard.press('KeyK');
+  await frames(page, 4);
+  const on = await words(page);
+  check('動き終わったあとに K キーで、文字の表示が戻る', on.enabled && !on.paused, JSON.stringify(on));
+  await page.uncheck('#umap-preview');
 }
 
 async function main() {

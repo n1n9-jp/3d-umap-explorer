@@ -121,6 +121,8 @@ class FakeElement {
   readonly style: Record<string, string> = {};
   removed = false;
   setAttribute() {}
+  /** 画面の端の UI の矩形（単語の文字が避ける領域）を読む処理のための、大きさ 0 の矩形 */
+  getBoundingClientRect() { return { left: 0, top: 0, width: 0, height: 0 }; }
   remove() { this.removed = true; }
 }
 
