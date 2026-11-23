@@ -58,6 +58,93 @@ describe('loadDatasetArrays', () => {
   });
 });
 
+describe('loadDatasetArrays: 空間の構造', () => {
+  const positions = new Float32Array([1, 0, -0.5, -1, 0.5, 0]).buffer;
+  const u16 = (...v: number[]) => new Uint16Array(v).buffer;
+  const cluster = (id: number, parent: number | null) => ({
+    id, name: `C${id + 1}`, size: 1, medoid: id, center: [0, 0, 0], radius: 0.1,
+    bbox: [[-1, -1, -1], [1, 1, 1]], majorityLabel: null, purity: null, parent,
+  });
+  const structured = {
+    ...manifest,
+    bounds: { center: [0, 0.1, 0], radius: 2 },
+    clusters: {
+      method: 'hdbscan',
+      noise: 65535,
+      levels: [
+        { name: 'coarse', params: { minClusterSize: 1, minSamples: 1, maxClusterSize: null, selectionMethod: 'eom' },
+          pointFile: 'clusters-coarse.u16', clusters: [cluster(0, null)] },
+        { name: 'fine', params: { minClusterSize: 1, minSamples: 1, maxClusterSize: null, selectionMethod: 'eom' },
+          pointFile: 'clusters-fine.u16', clusters: [cluster(0, 0), cluster(1, 0)] },
+      ],
+    },
+  };
+  const files = (coarse: ArrayBuffer, fine: ArrayBuffer) => ({
+    'data/t/manifest.json': structured,
+    'data/t/positions.f32': positions,
+    'data/t/labels.u8': new Uint8Array([0, 1]).buffer,
+    'data/t/clusters-coarse.u16': coarse,
+    'data/t/clusters-fine.u16': fine,
+  });
+
+  it('各階層の pointFile を読み、noise を許す', async () => {
+    const d = await loadDatasetArrays('data/t/', fakeFetch(files(u16(0, 65535), u16(1, 0))));
+    expect(d.clusterAssignments?.map((a) => a.level)).toEqual(['coarse', 'fine']);
+    expect(d.clusterAssignments?.[0]?.ids).toBeInstanceOf(Uint16Array);
+    expect(Array.from(d.clusterAssignments![0]!.ids)).toEqual([0, 65535]);
+    expect(Array.from(d.clusterAssignments![1]!.ids)).toEqual([1, 0]);
+  });
+
+  it('構造のない manifest では clusterAssignments を返さない', async () => {
+    const d = await loadDatasetArrays('data/t/', fakeFetch({
+      'data/t/manifest.json': manifest,
+      'data/t/positions.f32': positions,
+      'data/t/labels.u8': new Uint8Array([0, 1]).buffer,
+    }));
+    expect(d.clusterAssignments).toBeUndefined();
+  });
+
+  it('pointFile の長さが合わなければエラー', async () => {
+    await expect(loadDatasetArrays('data/t/', fakeFetch(files(u16(0), u16(1, 0)))))
+      .rejects.toThrow(/clusters-coarse\.u16.*バイト長/);
+    await expect(loadDatasetArrays('data/t/', fakeFetch(files(u16(0, 0), u16(1, 0, 0)))))
+      .rejects.toThrow(/clusters-fine\.u16.*バイト長/);
+  });
+
+  it('クラスタの id が範囲外（noise 以外）ならエラー', async () => {
+    // coarse のクラスタは 1 個なので id 1 は範囲外、fine は 2 個なので id 2 は範囲外
+    await expect(loadDatasetArrays('data/t/', fakeFetch(files(u16(0, 1), u16(1, 0)))))
+      .rejects.toThrow(/clusters-coarse\.u16.*点 1.*範囲外/);
+    await expect(loadDatasetArrays('data/t/', fakeFetch(files(u16(0, 0), u16(2, 0)))))
+      .rejects.toThrow(/clusters-fine\.u16.*点 0.*範囲外/);
+    await expect(loadDatasetArrays('data/t/', fakeFetch(files(u16(0, 0), u16(65534, 0)))))
+      .rejects.toThrow(/範囲外/);
+  });
+
+  it('pointFile が取得できなければ HTTP ステータスつきのエラー', async () => {
+    const f: Record<string, unknown> = files(u16(0, 0), u16(0, 0));
+    delete f['data/t/clusters-fine.u16'];
+    await expect(loadDatasetArrays('data/t/', fakeFetch(f))).rejects.toThrow(/clusters-fine\.u16.*404/);
+  });
+
+  it('bounds は manifest の値を使い、min/max は座標から計算する', async () => {
+    const d = await loadDatasetArrays('data/t/', fakeFetch(files(u16(0, 0), u16(0, 1))));
+    expect(d.bounds.center).toEqual([0, 0.1, 0]);
+    expect(d.bounds.radius).toBe(2);
+    expect(d.bounds.min).toEqual([-1, 0, -0.5]);
+    expect(d.bounds.max).toEqual([1, 0.5, 0]);
+  });
+
+  it('manifest に bounds がなければ座標から計算する（原点中心）', async () => {
+    const f: Record<string, unknown> = files(u16(0, 0), u16(0, 1));
+    const { bounds: _omitted, ...withoutBounds } = structured;
+    f['data/t/manifest.json'] = withoutBounds;
+    const d = await loadDatasetArrays('data/t/', fakeFetch(f));
+    expect(d.bounds.center).toEqual([0, 0, 0]);
+    expect(d.bounds.radius).toBeCloseTo(Math.hypot(1, 0, 0.5));
+  });
+});
+
 describe('computeBounds', () => {
   it('外接球の半径は原点からの最大距離', () => {
     expect(computeBounds(new Float32Array([0, 0, 0, 3, 4, 0])).radius).toBe(5);
