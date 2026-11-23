@@ -10,7 +10,9 @@
 
     python scripts/precompute/add_structure.py public/data/mnist
 
-manifest.json に labels がなくても動く（クラスタの majorityLabel と purity は null、name は C1, C2, ...）。
+manifest.json に labels がなくても動く（クラスタの majorityLabel と purity は null）。そのとき name は、
+manifest.json に text（点ごとの単語）があれば、クラスタの medoid に近い単語を並べた文字列（terms も付く）、
+なければ C1, C2, ... になる。
 階層ごとの HDBSCAN のパラメータは、--coarse-max-cluster-size などの引数でデータセットごとに上書きできる。
 同じ入力からは同じ出力になる（HDBSCAN・PCA・medoid のどれも乱数を使わない）。
 """
@@ -21,6 +23,7 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
 from collections import Counter
 from pathlib import Path
@@ -55,6 +58,13 @@ LEVELS = [
 
 STRUCTURE_KEYS = ("bounds", "density", "overview", "clusters")
 
+# 単語のデータセットで、クラスタの名前に使う代表の単語（medoid に近い順に TERMS_PER_CLUSTER 個）
+TERMS_PER_CLUSTER = 3
+TERMS_SEPARATOR = "、"
+TERM_MIN_LENGTH = 3  # これより短い単語（1〜2文字）は代表にしない
+TERM_EXCLUDE = frozenset({"UNK"})  # 語彙の特殊トークン
+TERM_PATTERN = re.compile(r"[^\W\d_]+(?:['\-][^\W\d_]+)*")  # 文字（字種は問わない）だけ。語中の ' と - は可
+
 # 上限（maxClusterSize）を超えた塊が消えたとみなす基準:
 # 上限なしでは1つのクラスタだった点のうち、上限ありでノイズになった点の割合がこれを超えたとき警告する。
 LOST_NOISE_RATIO = 0.5
@@ -70,6 +80,7 @@ OVERRIDABLE = {
 # ---------- 読み込み ----------
 
 def load_dataset(ds: Path):
+    """manifest・座標・ラベル・単語を読む。ラベルがなければ labels と names は None、text がなければ words は None。"""
     manifest = json.loads((ds / "manifest.json").read_text())
     count = int(manifest["count"])
 
@@ -83,9 +94,16 @@ def load_dataset(ds: Path):
     if not np.isfinite(pos).all():
         raise SystemExit("positions に有限でない値があります")
 
+    words = None
+    text_info = manifest.get("text")
+    if text_info is not None:
+        words = json.loads((ds / text_info["file"]).read_text(encoding="utf-8"))
+        if not isinstance(words, list) or len(words) != count or not all(isinstance(w, str) for w in words):
+            raise SystemExit(f"{text_info['file']} は長さ count の文字列の配列ではありません")
+
     lab_info = manifest.get("labels")
     if lab_info is None:  # ラベルのないデータセット
-        return manifest, pos, None, None
+        return manifest, pos, None, None, words
     if lab_info["dtype"] != "uint8":
         raise SystemExit("labels は uint8 のみ対応しています")
     labels = np.fromfile(ds / lab_info["file"], dtype=np.uint8)
@@ -94,7 +112,7 @@ def load_dataset(ds: Path):
     names = list(lab_info["names"])
     if labels.max() >= len(names):
         raise SystemExit("labels の値が names の範囲を超えています")
-    return manifest, pos, labels, names
+    return manifest, pos, labels, names, words
 
 
 # ---------- 丸め ----------
@@ -243,10 +261,36 @@ def renumber(raw: np.ndarray) -> np.ndarray:
     return out
 
 
+def is_displayable_term(word: str) -> bool:
+    """クラスタの代表の単語に使える単語か。記号だけの語、短すぎる語、特殊トークンを避ける。"""
+    return len(word) >= TERM_MIN_LENGTH and word not in TERM_EXCLUDE and TERM_PATTERN.fullmatch(word) is not None
+
+
+def representative_terms(pos: np.ndarray, words: list[str], members: np.ndarray, medoid: int) -> list[str]:
+    """クラスタの代表の単語。クラスタ内で、medoid に近い順（同じ距離なら点の番号の小さい順）に、使える単語を選ぶ。"""
+    dist = np.linalg.norm(pos[members] - pos[medoid], axis=1)
+    terms = []
+    for k in np.lexsort((members, dist)):
+        word = words[members[k]]
+        if is_displayable_term(word):
+            terms.append(word)
+            if len(terms) == TERMS_PER_CLUSTER:
+                break
+    return terms
+
+
 def describe_clusters(
-    pos: np.ndarray, labels: np.ndarray | None, names: list[str] | None, assign: np.ndarray
+    pos: np.ndarray,
+    labels: np.ndarray | None,
+    names: list[str] | None,
+    assign: np.ndarray,
+    words: list[str] | None = None,
 ) -> list[dict]:
-    """クラスタの一覧。labels がないときは、majorityLabel と purity が null、name は C1, C2, ...（id の順）。"""
+    """クラスタの一覧。
+
+    labels がないときは、majorityLabel と purity が null。name は、words があれば代表の単語を TERMS_SEPARATOR で
+    並べた文字列（terms に単語の配列も入れる。使える単語がなければ C1, ...）、なければ C1, C2, ...（id の順）。
+    """
     clusters = []
     for cid in range(int(assign[assign != NOISE].max()) + 1 if (assign != NOISE).any() else 0):
         members = np.flatnonzero(assign == cid)
@@ -254,8 +298,13 @@ def describe_clusters(
         m = members[medoid_index(pts)]
         center = pos[m]
         dist = np.linalg.norm(pts - center, axis=1)
+        terms = None
         if labels is None:
             name, majority, purity = f"C{cid + 1}", None, None
+            if words is not None:
+                terms = representative_terms(pos, words, members, int(m))
+                if terms:
+                    name = TERMS_SEPARATOR.join(terms)
         else:
             counts = np.bincount(labels[members], minlength=len(names))
             majority = int(np.argmax(counts))  # 同数なら番号の小さいラベル
@@ -264,6 +313,7 @@ def describe_clusters(
             {
                 "id": cid,
                 "name": name,
+                **({"terms": terms} if terms is not None else {}),
                 "size": int(len(members)),
                 "medoid": int(m),
                 "center": [r(c) for c in center],
@@ -367,13 +417,14 @@ def write_atomically(ds: Path, files: dict[str, bytes], last: str, stale_glob: s
 
 # ---------- 実行 ----------
 
-def add_structure(ds: Path, overrides: dict[str, dict] | None = None) -> None:
+def add_structure(ds: Path, overrides: dict[str, dict] | None = None) -> list[str]:
     """ds の manifest.json へ空間の構造を書き加え、クラスタ番号のファイルを ds へ書き出す。
 
     overrides は、階層名 → {"minClusterSize": ..., "minSamples": ..., "maxClusterSize": ...} の辞書
     （HDBSCAN のパラメータの上書き。maxClusterSize が 0 のときは上限なし）。
+    上限による塊の消失の警告（標準エラー出力にも表示する）の一覧を返す。
     """
-    manifest, pos, labels, names = load_dataset(ds)
+    manifest, pos, labels, names, words = load_dataset(ds)
     count = len(pos)
     overrides = overrides or {}
     unknown = set(overrides) - {lv["name"] for lv in LEVELS}
@@ -392,7 +443,7 @@ def add_structure(ds: Path, overrides: dict[str, dict] | None = None) -> None:
         raw = run_hdbscan(pos, params)
         warnings += find_lost_blobs(pos, level["name"], params, raw)
         assign = renumber(raw)
-        clusters = describe_clusters(pos, labels, names, assign)
+        clusters = describe_clusters(pos, labels, names, assign, words)
         verify_level(count, assign, clusters)
         level_assigns.append(assign)
         level_clusters.append((params, clusters))
@@ -421,13 +472,15 @@ def add_structure(ds: Path, overrides: dict[str, dict] | None = None) -> None:
     for lv, assign in zip(levels_out, level_assigns):
         noise_ratio = float((assign == NOISE).mean())
         print(f"\n[{lv['name']}] params={lv['params']}  clusters={len(lv['clusters'])}  noise={noise_ratio:.2%}")
-        print(f"{'id':>3} {'name':<8} {'size':>6} {'purity':>7} {'radius':>8} {'parent':>6}")
+        width = max([4] + [len(c["name"]) for c in lv["clusters"]])
+        print(f"{'id':>3} {'name':<{width}} {'size':>6} {'purity':>7} {'radius':>8} {'parent':>6}")
         for c in lv["clusters"]:
             parent = "-" if c["parent"] is None else c["parent"]
             purity = "-" if c["purity"] is None else f"{c['purity']:.3f}"
-            print(f"{c['id']:>3} {c['name']:<8} {c['size']:>6} {purity:>7} {c['radius']:>8.4f} {parent!s:>6}")
+            print(f"{c['id']:>3} {c['name']:<{width}} {c['size']:>6} {purity:>7} {c['radius']:>8.4f} {parent!s:>6}")
     for w in warnings:
         print(f"警告: {w}", file=sys.stderr)
+    return warnings
 
 
 def main() -> None:
