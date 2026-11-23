@@ -18,8 +18,11 @@ import {
   FALLBACK_CATALOG, parseCatalog, resolveDatasetParam, searchForDataset, type DatasetCatalog, type DatasetTarget,
 } from './data/catalog';
 import { DatasetSwitcher } from './app/datasetSwitcher';
-import { colorIndexHex } from './render/colorScheme';
+import { colorIndexHex, type PointColoring } from './render/colorScheme';
 import type { DatasetKind } from './data/manifest';
+import type { EmbeddingHost, UmapFeatureState } from './compute/host';
+import type { UmapFeature, UmapOutcome } from './compute/umapFeature';
+import { embeddingStatusText, parseUrlParams, searchWithParams, type UmapParams } from './compute/params';
 
 interface FrameStats { frames: number; meanMs: number; medianMs: number; p95Ms: number; maxMs: number }
 
@@ -79,6 +82,28 @@ declare global {
       };
       /** WebGL の資源の数（renderer.info.memory と programs） */
       memory(): { geometries: number; textures: number; programs: number };
+      /**
+       * ブラウザ内の UMAP の再計算（src/compute/。U キーのパネル）。`open()` までは計算の部分（チャンク・Worker・kNN グラフ）を読み込まない。
+       * `getState()` は、読み込む前なら `{ loaded: false }`。
+       */
+      umap: {
+        getState(): UmapFeatureState | { loaded: false };
+        open(): Promise<void>;
+        close(): void;
+        compute(params: UmapParams, opts?: { force?: boolean }): Promise<UmapOutcome>;
+        cancel(): void;
+        revert(): Promise<UmapOutcome>;
+        setPreview(enabled: boolean): Promise<void>;
+        /** 保持している結果の、Worker が返した座標（正規化の前）。なければ null */
+        raw(key: string): Float32Array | null;
+        /** 表示中の埋め込みの座標（データに依存する部分が使っている座標）と、点群に描いている座標 */
+        positions(): Float32Array;
+        shownPositions(): Float32Array;
+        /** 表示中の粗い階層のクラスタ（目印に使っているもの）。なければ null */
+        clusters(): { id: number; name: string; center: [number, number, number]; radius: number; size: number; medoid: number }[] | null;
+        /** 表示中の manifest の bounds・density・overview */
+        structure(): unknown;
+      };
     };
   }
 }
@@ -122,6 +147,18 @@ async function start(): Promise<void> {
   const catalog = await loadCatalog();
   let view: DatasetView | null = null;
   let target: DatasetTarget | null = null;
+  /** 表示中のデータセットの、読み込んだ（事前計算の）データ。ブラウザで計算した埋め込みを表示していても、これは変わらない */
+  let baseData: LoadedDataset | null = null;
+  /** ブラウザ内の UMAP の再計算（使うときにだけ読み込む） */
+  let umapFeature: UmapFeature | null = null;
+  let umapFeaturePromise: Promise<UmapFeature> | null = null;
+  const embeddingStatus = doc.getElementById('embedding-status');
+  const umapOpenButton = doc.getElementById('umap-open') as HTMLButtonElement | null;
+  const setEmbeddingStatus = (text: string, computed: boolean) => {
+    if (!embeddingStatus) return;
+    if (embeddingStatus.textContent !== text) embeddingStatus.textContent = text;
+    embeddingStatus.classList.toggle('computed', computed);
+  };
   const state: DatasetState = { current: null, loading: false, error: null, generation: 0 };
   let loadToken = 0;
 
@@ -160,7 +197,7 @@ async function start(): Promise<void> {
     } catch (e) {
       // 作れなければ、前のデータで作り直して表示を保つ（視点はホーム）
       if (prev && prevTarget) {
-        view = new DatasetView(ctx, prev.data, {});
+        view = new DatasetView(ctx, prev.data, { coloring: prev.coloring });
         view.controller.onChange(() => updateHud());
         view.controller.setView(view.homeView());
       }
@@ -168,6 +205,7 @@ async function start(): Promise<void> {
     }
     target = next;
     if (prev && prev.data !== data) releaseLoadedDataset(prev.data);
+    baseData = data;
     view.controller.onChange(() => updateHud()); // モードと速度の変化はすぐに見せる
     // URL の pos・look があればその視点、なければホームの視点から始める（切り替えでは常にホームの視点）
     view.controller.setView(search !== null ? parseView(search, view.homeView()) : view.homeView());
@@ -178,7 +216,73 @@ async function start(): Promise<void> {
     };
     state.generation++;
     switcher.setCurrent(next.entry?.id ?? null, next.entry ? null : next.dir);
+    setEmbeddingStatus(embeddingStatusText({ kind: 'precomputed', umap: data.arrays.manifest.umap }), false);
+    if (umapOpenButton) umapOpenButton.disabled = false;
+    umapFeature?.datasetChanged(); // 計算中の Worker を止め、保持していた結果を捨てる
     updateHud();
+  };
+
+  /**
+   * 同じデータセットのまま、座標（ブラウザで計算した埋め込み）を差し替えて表示を作り直す。利用者の状態（点の大きさ・カメラ・モード・
+   * 速度・自動調整・目印とミニマップの表示・選択）を引き継ぐ。読み込んだ画像は共有なので解放しない。
+   */
+  const replaceView = (data: LoadedDataset, options: { coloring: PointColoring | null }): DatasetView => {
+    const prev = view;
+    if (!prev) throw new Error('表示中のデータセットがありません');
+    const ui = prev.captureUiState();
+    prev.dispose();
+    view = null;
+    let next: DatasetView;
+    try {
+      next = new DatasetView(ctx, data, { pointSize: ui.pointSize, coloring: options.coloring });
+    } catch (e) {
+      // 作れなければ、前のデータで作り直して表示を保つ
+      view = new DatasetView(ctx, prev.data, { pointSize: ui.pointSize, coloring: prev.coloring });
+      view.controller.onChange(() => updateHud());
+      view.applyUiState(ui);
+      throw e;
+    }
+    view = next;
+    next.controller.onChange(() => updateHud());
+    next.applyUiState(ui);
+    updateHud();
+    return next;
+  };
+
+  const umapHost: EmbeddingHost = {
+    doc,
+    view: () => view,
+    baseData: () => baseData,
+    generation: () => state.generation,
+    replaceView,
+    setUrlParams: (p) => {
+      const url = `${window.location.pathname}${searchWithParams(window.location.search, p)}${window.location.hash}`;
+      window.history.replaceState(window.history.state, '', url);
+    },
+    setEmbeddingStatus,
+  };
+  const loadUmapFeature = (): Promise<UmapFeature> => {
+    umapFeaturePromise ??= import('./compute/umapFeature').then((m) => {
+      umapFeature = new m.UmapFeature(umapHost);
+      return umapFeature;
+    }, (e: unknown) => {
+      umapFeaturePromise = null;
+      throw e;
+    });
+    return umapFeaturePromise;
+  };
+  const toggleUmapPanel = (moveFocus: boolean) => {
+    loadUmapFeature().then((f) => f.toggle(moveFocus), (e: unknown) => console.warn('UMAP の再計算を読み込めませんでした:', e));
+  };
+  umapOpenButton?.addEventListener('click', () => toggleUmapPanel(true));
+
+  /** URL に nn・md・seed があれば、読み込みのあとに同じ計算をして表示する。 */
+  const applyUrlEmbedding = (search: string) => {
+    const p = parseUrlParams(search);
+    if (p === null) return;
+    if ('error' in p) { console.warn(`URL の nn・md・seed を使えません: ${p.error}`); return; }
+    if (!baseData?.arrays.manifest.knn) { console.warn('このデータセットには kNN グラフがないため、URL の nn・md・seed は使えません'); return; }
+    loadUmapFeature().then((f) => f.computeFromUrl(p), (e: unknown) => console.warn('UMAP の再計算を読み込めませんでした:', e));
   };
 
   /**
@@ -196,6 +300,7 @@ async function start(): Promise<void> {
       data = await loadDataset(next.dir);
       if (token !== loadToken) { releaseLoadedDataset(data); return { ok: false, error: '別の切り替えで置き換えられました' }; }
       install(data, next, opts.search ?? null);
+      if (opts.search) applyUrlEmbedding(opts.search);
       explorer.ready = true;
       delete explorer.error;
       if (opts.pushHistory) {
@@ -255,6 +360,7 @@ async function start(): Promise<void> {
   bindShortcut(window, 'KeyH', () => view?.controller.goHome(view.homeView())); // H キーでホームの視点へ戻る
   bindShortcut(window, 'KeyL', () => view?.clusterLabels.toggle()); // L キーで目印の表示・非表示
   bindShortcut(window, 'KeyM', () => view?.minimap.toggle()); // M キーでミニマップの表示・非表示
+  bindShortcut(window, 'KeyU', () => toggleUmapPanel(true)); // U キーで UMAP の再計算のパネルを開閉
 
   // ---- 描画ループ ----
   let frameTimes: number[] | null = null;
@@ -288,6 +394,7 @@ async function start(): Promise<void> {
     // 画面の倍率（devicePixelRatio）が変わったら、画面の大きさが変わったときと同じ経路で、描画バッファ・点の大きさ・
     // ミニマップを合わせ直す（ズームやモニタの移動では resize イベントが来ないことがある）
     if (currentPixelRatio() !== renderer.getPixelRatio()) resize();
+    umapFeature?.update(dt); // 埋め込みを切り替えるとき、点を新旧の座標の間で動かす
     view?.update(dt, window.innerWidth, window.innerHeight);
     renderer.render(scene, camera);
     view?.renderOverlay(); // 本体の描画のあと、右下の領域へ重ねて描く（src/minimap/）
@@ -337,6 +444,25 @@ async function start(): Promise<void> {
       switchTo: (param) => switchTo(param, { pushHistory: true }),
       text: (i) => view?.text?.[i] ?? null,
       pointColor: (i) => colorIndexHex(v().coloring.indices[i] ?? 0),
+    },
+    umap: {
+      getState: () => umapFeature ? umapFeature.getState() : { loaded: false },
+      open: () => loadUmapFeature().then((f) => f.open()),
+      close: () => { if (umapFeature?.isOpen) umapFeature.toggle(); },
+      compute: (p, o) => loadUmapFeature().then((f) => f.compute(p, o)),
+      cancel: () => umapFeature?.cancel(),
+      revert: () => loadUmapFeature().then((f) => f.revert()),
+      setPreview: (on) => loadUmapFeature().then((f) => f.setPreview(on)),
+      raw: (key) => umapFeature?.raw(key) ?? null,
+      positions: () => new Float32Array(v().arrays.positions),
+      shownPositions: () => new Float32Array(v().shownPositions),
+      clusters: () => v().arrays.manifest.clusters?.levels[0]?.clusters.map((c) => ({
+        id: c.id, name: c.name, center: [...c.center] as [number, number, number], radius: c.radius, size: c.size, medoid: c.medoid,
+      })) ?? null,
+      structure: () => {
+        const m = v().arrays.manifest;
+        return { bounds: m.bounds ?? null, density: m.density ?? null, overview: m.overview ?? null, umap: m.umap ?? null };
+      },
     },
     memory: () => ({
       geometries: renderer.info.memory.geometries,

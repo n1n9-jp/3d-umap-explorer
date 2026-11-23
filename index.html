@@ -108,6 +108,59 @@
       #dataset-status { color: #b4bccb; }
       #dataset-status[hidden] { display: none; }
       #dataset-status.error { color: #ff8080; }
+      /* 表示中の埋め込み（事前計算か、ブラウザで計算したものか）と、UMAP の再計算のパネルを開くボタン（選択欄の横） */
+      #embedding-status { color: #8a93a6; }
+      #embedding-status.computed { color: #ffc233; }
+      #umap-open {
+        font: inherit; color: #e8ecf4; background: #141a26; border: 1px solid rgba(180, 188, 203, 0.45);
+        border-radius: 4px; padding: 1px 6px; cursor: pointer;
+      }
+      #umap-open:focus-visible { outline: 2px solid #ffc233; outline-offset: 1px; }
+      #umap-open[aria-expanded="true"] { border-color: #ffc233; }
+      #umap-open:disabled { opacity: 0.6; cursor: default; }
+      /* UMAP の再計算のパネル（左上、選択欄の下）。src/app/umapPanel.ts */
+      #umap-panel {
+        position: fixed; left: 12px; top: 50px; z-index: 2; width: 300px; max-width: calc(100vw - 48px);
+        max-height: calc(100vh - 70px); overflow: auto; box-sizing: border-box;
+        padding: 10px 12px; border-radius: 8px; border: 1px solid rgba(180, 188, 203, 0.45);
+        background: rgba(7, 8, 12, 0.94); color: #d6dce8;
+        font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      #umap-panel[hidden] { display: none; }
+      #umap-panel:focus { outline: none; }
+      #umap-panel:focus-visible { outline: 2px solid #ffc233; outline-offset: 2px; }
+      #umap-panel h2 { margin: 0 24px 6px 0; font-size: 13px; color: #fff; }
+      #umap-panel h3 { margin: 8px 0 2px; font-size: 12px; color: #b4bccb; font-weight: 600; }
+      #umap-current { margin: 0 0 8px; color: #e8ecf4; }
+      #umap-form { display: grid; grid-template-columns: auto 1fr; gap: 4px 8px; align-items: center; }
+      #umap-form label { color: #b4bccb; }
+      #umap-form input[type="number"] {
+        font: inherit; color: #e8ecf4; background: #141a26; border: 1px solid rgba(180, 188, 203, 0.45);
+        border-radius: 4px; padding: 2px 4px; width: 100%; box-sizing: border-box;
+      }
+      #umap-form input[aria-invalid="true"] { border-color: #ff8080; }
+      #umap-form .umap-check { grid-column: 1 / -1; display: flex; gap: 6px; align-items: center; }
+      #umap-form .umap-buttons { grid-column: 1 / -1; display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+      #umap-panel button {
+        font: inherit; color: #e8ecf4; background: #1d2536; border: 1px solid rgba(180, 188, 203, 0.55);
+        border-radius: 4px; padding: 2px 8px; cursor: pointer;
+      }
+      #umap-panel button:disabled { opacity: 0.5; cursor: default; }
+      #umap-panel button[hidden] { display: none; }
+      #umap-panel button:focus-visible, #umap-panel input:focus-visible { outline: 2px solid #ffc233; outline-offset: 1px; }
+      #umap-run { border-color: #ffc233 !important; }
+      #umap-close { position: absolute; right: 4px; top: 2px; border: 0 !important; background: none !important; color: #8a93a6 !important; font: 16px/1 sans-serif !important; padding: 4px !important; }
+      #umap-progress { margin-top: 8px; }
+      #umap-progress[hidden] { display: none; }
+      #umap-progress progress { width: 100%; height: 8px; display: block; accent-color: #ffc233; }
+      #umap-message { margin: 6px 0 0; color: #b4bccb; }
+      #umap-message[hidden] { display: none; }
+      #umap-message.error { color: #ff8080; }
+      #umap-cache[hidden] { display: none; }
+      #umap-cache ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+      #umap-cache button { width: 100%; text-align: left; }
+      #umap-cache button[aria-current="true"] { border-color: #ffc233; opacity: 1; }
+      #umap-panel .umap-note { margin: 8px 0 0; color: #8a93a6; font-size: 11px; }
       #hover-label {
         position: fixed; left: 0; top: 0; z-index: 3; pointer-events: none;
         padding: 1px 7px; border-radius: 4px; border: 1px solid #f2f5fa;
@@ -123,7 +176,38 @@
       <label for="dataset-select">データ</label>
       <select id="dataset-select"></select>
       <span id="dataset-status" role="status" aria-live="polite" hidden></span>
+      <span id="embedding-status">埋め込み: 事前計算</span>
+      <button id="umap-open" type="button" aria-controls="umap-panel" aria-expanded="false" title="UMAP の再計算（U）" disabled>UMAP 再計算 (U)</button>
     </div>
+    <section id="umap-panel" role="region" aria-labelledby="umap-heading" tabindex="-1" hidden>
+      <h2 id="umap-heading">UMAP の再計算</h2>
+      <p id="umap-current"></p>
+      <form id="umap-form" novalidate>
+        <label for="umap-nn">近傍数</label>
+        <input id="umap-nn" type="number" inputmode="numeric" step="1" />
+        <label for="umap-md">min_dist</label>
+        <input id="umap-md" type="number" inputmode="decimal" />
+        <label for="umap-seed">乱数の種</label>
+        <input id="umap-seed" type="number" inputmode="numeric" step="1" />
+        <label class="umap-check"><input id="umap-preview" type="checkbox" /> 計算の途中を表示する</label>
+        <div class="umap-buttons">
+          <button id="umap-run" type="submit">計算</button>
+          <button id="umap-cancel" type="button" hidden>中断</button>
+          <button id="umap-revert" type="button">事前計算に戻す</button>
+        </div>
+      </form>
+      <div id="umap-progress" hidden>
+        <progress id="umap-progress-bar" max="200" value="0"></progress>
+        <span id="umap-progress-text" role="status" aria-live="polite"></span>
+      </div>
+      <p id="umap-message" role="status" aria-live="polite" hidden></p>
+      <div id="umap-cache" hidden>
+        <h3>保持している結果</h3>
+        <ul id="umap-cache-list"></ul>
+      </div>
+      <p class="umap-note">点の配置は、近傍数・min_dist・乱数の種で変わります。塊の中の並びは元のデータの近さを反映しますが、遠く離れた塊どうしの位置関係や距離は当てにしないでください。</p>
+      <button id="umap-close" type="button" aria-label="UMAP の再計算のパネルを閉じる"><span aria-hidden="true">×</span></button>
+    </section>
     <div id="cluster-location" hidden></div>
     <div id="info-live" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
     <section id="info" role="region" aria-labelledby="info-heading" hidden>

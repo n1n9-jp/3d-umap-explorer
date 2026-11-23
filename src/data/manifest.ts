@@ -27,6 +27,20 @@ export interface ManifestOverview {
   axes: [Vec3, Vec3, Vec3];
 }
 
+/**
+ * 元の高次元空間での k 近傍グラフ（README の「近傍グラフ（`knn`）と埋め込みの質（`quality`）」）。
+ * ブラウザでの UMAP の再計算（src/compute/）が、この機能を開いたときにだけ取得する。
+ */
+export interface ManifestKnn {
+  k: number;
+  metric: 'euclidean' | 'cosine';
+  /** 自分自身を含むか（常に false） */
+  includesSelf: false;
+  exact: boolean;
+  indices: { file: string; dtype: 'uint16' | 'uint32' };
+  distances: { file: string; dtype: 'float32' };
+}
+
 export interface ClusterParams {
   minClusterSize: number;
   minSamples: number;
@@ -93,6 +107,8 @@ export interface DatasetManifest {
   density?: ManifestDensity;
   overview?: ManifestOverview;
   clusters?: ManifestClusters;
+  /** 任意。元の高次元空間での k 近傍グラフ（ファイルは、使うときに `src/data/knn.ts` で読む） */
+  knn?: ManifestKnn;
 }
 
 export class ManifestError extends Error {
@@ -286,6 +302,26 @@ function parseClusters(v: unknown, count: number, labelCount: number): ManifestC
   return { method, noise, levels };
 }
 
+function parseKnn(v: unknown, count: number): ManifestKnn {
+  const o = recordAt(v, 'knn');
+  const k = requirePositiveInt(o, 'k', 'knn.k');
+  if (k >= count) throw new ManifestError(`"knn.k" ${k} が点の数 ${count} 以上です`);
+  if (o.metric !== 'euclidean' && o.metric !== 'cosine') throw new ManifestError('"knn.metric" は "euclidean" か "cosine" です');
+  if (o.includesSelf !== false) throw new ManifestError('"knn.includesSelf" は false のみ対応しています');
+  if (typeof o.exact !== 'boolean') throw new ManifestError('"knn.exact" が真偽値ではありません');
+  const indices = recordAt(o.indices, 'knn.indices');
+  const distances = recordAt(o.distances, 'knn.distances');
+  const indicesFile = requireString(indices, 'file', 'knn.indices.file');
+  const distancesFile = requireString(distances, 'file', 'knn.distances.file');
+  if (indices.dtype !== 'uint16' && indices.dtype !== 'uint32') throw new ManifestError('"knn.indices.dtype" は "uint16" か "uint32" です');
+  if (indices.dtype === 'uint16' && count > 65536) throw new ManifestError('"knn.indices.dtype" が uint16 ですが、点の数が 65536 を超えています');
+  if (distances.dtype !== 'float32') throw new ManifestError('"knn.distances.dtype" は "float32" のみ対応しています');
+  return {
+    k, metric: o.metric, includesSelf: false, exact: o.exact,
+    indices: { file: indicesFile, dtype: indices.dtype }, distances: { file: distancesFile, dtype: 'float32' },
+  };
+}
+
 /** JSON をパースした値を検証し、型付きの manifest を返す。不正なら ManifestError を投げる。 */
 export function parseManifest(json: unknown): DatasetManifest {
   if (!isRecord(json)) throw new ManifestError('最上位がオブジェクトではありません');
@@ -361,5 +397,6 @@ export function parseManifest(json: unknown): DatasetManifest {
   if (json.density !== undefined) manifest.density = parseDensity(json.density);
   if (json.overview !== undefined) manifest.overview = parseOverview(json.overview);
   if (json.clusters !== undefined) manifest.clusters = parseClusters(json.clusters, count, labels?.names.length ?? 0);
+  if (json.knn !== undefined) manifest.knn = parseKnn(json.knn, count);
   return manifest;
 }

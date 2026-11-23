@@ -80,4 +80,9 @@ describe('URL の更新', () => {
     expect(searchForDataset('?data=data/mnist/&pos=1,2,3&look=0,0,0&size=0.01&x=1', w)).toBe('?data=word2vec-10k&x=1');
     expect(searchForDataset('', resolveDatasetParam('data/other', catalog))).toBe('?data=data/other/');
   });
+
+  it('ブラウザで計算した埋め込みのパラメータ（nn・md・seed）も外す', () => {
+    const w = resolveDatasetParam('word2vec-10k', catalog);
+    expect(searchForDataset('?data=mnist&nn=30&md=0.5&seed=7&x=1', w)).toBe('?data=word2vec-10k&x=1');
+  });
 });
