@@ -73,32 +73,49 @@ function dist2(p: Float32Array, i: number, x: number, y: number, z: number): num
   return dx * dx + dy * dy + dz * dz;
 }
 
-/** 全点を（二乗距離, 添字）の昇順に並べる。 */
-function bruteSorted(
-  p: Float32Array,
-  x: number,
-  y: number,
-  z: number,
-): { index: number; d2: number }[] {
+interface Hit {
+  index: number;
+  d2: number;
+}
+
+/**
+ * 全点のうち、（二乗距離, 添字）の昇順で上位 k 個。
+ * k が小さいときは、長さ k の整列済みバッファへの挿入で求める（全点の整列は問い合わせ数が多いと遅いため）。
+ * 添字の昇順に走査し、同距離なら後から来た点を後ろに置くので、同距離は添字の小さい順になる。
+ */
+function bruteTopK(p: Float32Array, x: number, y: number, z: number, k: number): Hit[] {
   const n = p.length / 3;
-  const all: { index: number; d2: number }[] = [];
-  for (let i = 0; i < n; i++) all.push({ index: i, d2: dist2(p, i, x, y, z) });
-  all.sort((a, b) => a.d2 - b.d2 || a.index - b.index);
-  return all;
+  const want = Math.min(Math.max(0, Math.floor(k)), n);
+  if (want * 16 >= n) {
+    const all: Hit[] = [];
+    for (let i = 0; i < n; i++) all.push({ index: i, d2: dist2(p, i, x, y, z) });
+    all.sort((a, b) => a.d2 - b.d2 || a.index - b.index);
+    return all.slice(0, want);
+  }
+  const buf: Hit[] = [];
+  for (let i = 0; i < n; i++) {
+    const d2 = dist2(p, i, x, y, z);
+    if (buf.length === want && d2 >= buf[want - 1].d2) continue;
+    let j = buf.length === want ? want - 1 : buf.length;
+    while (j > 0 && buf[j - 1].d2 > d2) {
+      buf[j] = buf[j - 1];
+      j--;
+    }
+    buf[j] = { index: i, d2 };
+  }
+  return buf;
 }
 
 function bruteNearest(p: Float32Array, x: number, y: number, z: number, maxDistance = Infinity) {
   const limit = maxDistance * maxDistance;
-  const first = bruteSorted(p, x, y, z)[0];
+  const first = bruteTopK(p, x, y, z, 1)[0];
   if (!first || first.d2 > limit) return null;
   return { index: first.index, distance: Math.sqrt(first.d2) };
 }
 
 function bruteK(p: Float32Array, x: number, y: number, z: number, k: number, maxDistance = Infinity) {
   const limit = maxDistance * maxDistance;
-  const hits = bruteSorted(p, x, y, z)
-    .filter((h) => h.d2 <= limit)
-    .slice(0, Math.max(0, k));
+  const hits = bruteTopK(p, x, y, z, k).filter((h) => h.d2 <= limit);
   return {
     indices: hits.map((h) => h.index),
     distances: hits.map((h) => Math.fround(Math.sqrt(h.d2))),
@@ -107,10 +124,9 @@ function bruteK(p: Float32Array, x: number, y: number, z: number, k: number, max
 
 function bruteWithin(p: Float32Array, x: number, y: number, z: number, radius: number): number[] {
   const limit = radius * radius;
-  return bruteSorted(p, x, y, z)
-    .filter((h) => h.d2 <= limit)
-    .map((h) => h.index)
-    .sort((a, b) => a - b);
+  const ids: number[] = [];
+  for (let i = 0; i < p.length / 3; i++) if (dist2(p, i, x, y, z) <= limit) ids.push(i);
+  return ids;
 }
 
 /** 3 つのメソッドを、総当たりの結果と照合する。 */
