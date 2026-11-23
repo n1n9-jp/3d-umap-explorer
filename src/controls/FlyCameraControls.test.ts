@@ -701,16 +701,48 @@ describe('FlyCameraControls: ホイールの払い（マウスとタッチパッ
     expect(r.controls.speed / 0.15).toBeLessThanOrEqual(2);
   });
 
-  it('マウスのノッチと小さな移動量のイベントが混在しても、小さな移動量の側の累積上限（7 ノッチ）が保たれる', () => {
-    // 払いの頭にあるノッチ 3 つは、そのまま 3 ノッチ反映される。
+  it('マウスのノッチと小さな移動量のイベントが混在すると、払い全体（先に反映したノッチを含む）で 7 ノッチに収まる', () => {
+    // 払いの頭にあるノッチ 3 つは、小さな移動量がまだ来ていないので、そのまま 3 ノッチ反映される。
     for (let i = 0; i < 3; i++) send(-100, i * 50);
     expect(r.controls.speed / 0.15).toBeCloseTo(1.1 ** 3, 9);
-    // そのあと小さな移動量が続くと、累積は 7 ノッチで止まる（途中にノッチが混ざっても、その上限を越えない）。
+    // そのあと小さな移動量が続くと払いはタッチパッドと判明し、先に反映した 3 ノッチも数えて、全体で 7 ノッチで止まる。
+    // （以前は先に反映した分を数えず、3 + 7 = 10 ノッチまで効いていた。）
     for (let i = 0; i < 100; i++) send(i % 5 === 4 ? -100 : -20, 116 + i * 16);
-    expect(r.controls.speed / 0.15).toBeCloseTo(1.1 ** (3 + 7), 9);
+    expect(r.controls.speed / 0.15).toBeCloseTo(1.1 ** 7, 9);
     // 間をあけて払いが変われば、ノッチはまた制限なく効く。
     for (let i = 0; i < 5; i++) send(-100, 5000 + i * 50);
-    expect(r.controls.speed / 0.15).toBeCloseTo(1.1 ** (3 + 7 + 5), 9);
+    expect(r.controls.speed / 0.15).toBeCloseTo(1.1 ** (7 + 5), 9);
+  });
+
+  it('タッチパッド: 50 ピクセル以上のイベント数個で始まり、小さなイベントが続く払いは、速度の変化が 2 倍以内（加速・減速とも）', () => {
+    for (const lead of [1, 2, 3, 4]) {
+      for (const dir of [-1, 1]) {
+        const rig = createRig();
+        let t = 0;
+        // 立ち上がりに 150 ピクセル（1.5 ノッチ）のイベントが lead 個。ここまでは小さなイベントが来ていないので、そのまま反映される。
+        for (let i = 0; i < lead; i++, t += 16) rig.el.emit('wheel', { deltaY: dir * 150, deltaMode: 0, timeStamp: t });
+        const afterLead = rig.controls.speed;
+        expect(afterLead / 0.15, `lead=${lead}`).toBeCloseTo(dir < 0 ? 1.1 ** (1.5 * lead) : 1.1 ** (-1.5 * lead), 9);
+        // 小さなイベント（合計 2000 ピクセル）が慣性つきで続く。払い全体で 7 ノッチ（1.1^7 ≈ 1.95 倍）に収まる。
+        for (let i = 0; i < 150; i++, t += 16) rig.el.emit('wheel', { deltaY: dir * 20, deltaMode: 0, timeStamp: t });
+        const ratio = dir < 0 ? rig.controls.speed / 0.15 : 0.15 / rig.controls.speed;
+        expect(ratio, `lead=${lead} dir=${dir}`).toBeCloseTo(1.1 ** 7, 9);
+        expect(ratio, `lead=${lead} dir=${dir}`).toBeLessThanOrEqual(2);
+      }
+    }
+  });
+
+  it('タッチパッド: 先頭の大きなイベントだけで上限を越えた払いは、越えた分を戻さず、そのあとの小さなイベントを反映しない', () => {
+    // 300 ピクセル（3 ノッチ）を 3 個 = 9 ノッチ。タッチパッドと判明する前なのでそのまま反映される。
+    for (let i = 0; i < 3; i++) send(-300, i * 16);
+    const afterLead = r.controls.speed;
+    expect(afterLead / 0.15).toBeCloseTo(1.1 ** 9, 9);
+    // 小さなイベントが続いても、同じ向きには反映しない。
+    for (let i = 0; i < 100; i++) send(-20, 48 + i * 16);
+    expect(r.controls.speed).toBe(afterLead);
+    // 逆向きの入力はすぐ反映される。
+    send(100, 48 + 100 * 16);
+    expect(r.controls.speed / afterLead).toBeCloseTo(1 / 1.1, 12);
   });
 
   it('マウスのノッチと小さな移動量が交互に届いても、小さな移動量の側だけで 7 ノッチを越えない', () => {

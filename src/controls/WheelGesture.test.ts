@@ -83,14 +83,33 @@ describe('WheelGestureLimiter', () => {
     expect(g.consume(-10, 10, true)).toBe(-MAX_WHEEL_EVENT_NOTCHES);
   });
 
-  it('ノッチ扱いのイベントは、小さな移動量の累積を使わない（払いの頭のノッチのあとも 7 ノッチ使える）', () => {
+  it('払いの頭のノッチ扱いのイベントは、その払いがタッチパッドと判明したあと、累積に数えられる', () => {
     const g = new WheelGestureLimiter();
     let notches = 0;
     for (let i = 0; i < 5; i++) notches += g.consume(1, i * 10, true);
     expect(notches).toBe(5);
+    // 小さな移動量が続くと、先に反映した 5 ノッチを含めて 7 ノッチまで（残り 2 ノッチ）。
     let small = 0;
     for (let i = 0; i < 100; i++) small += g.consume(0.2, 100 + i * 16);
-    expect(small).toBeCloseTo(DEFAULT_WHEEL_GESTURE_LIMIT_NOTCHES, 9);
+    expect(small).toBeCloseTo(DEFAULT_WHEEL_GESTURE_LIMIT_NOTCHES - 5, 9);
+  });
+
+  it('払いの頭のノッチ扱いのイベントが上限を越えていたら、戻さず、同じ向きの以降のイベントを反映しない', () => {
+    const g = new WheelGestureLimiter();
+    let applied = 0;
+    for (let i = 0; i < 4; i++) applied += g.consume(3, i * 10, true);
+    expect(applied).toBe(12);
+    for (let i = 0; i < 50; i++) expect(g.consume(0.2, 40 + i * 16)).toBe(0);
+    expect(g.consume(3, 40 + 50 * 16, true)).toBe(0);
+    // 逆向きは累積を減らす向きなので反映される（累積 12 → 11）。
+    expect(g.consume(-1, 40 + 51 * 16)).toBe(-1);
+  });
+
+  it('マウスのノッチだけの払い（小さなイベントが一度も来ない）は、何度続けても制限されない', () => {
+    const g = new WheelGestureLimiter();
+    let total = 0;
+    for (let i = 0; i < 20; i++) total += g.consume(1, i * 50, true);
+    expect(total).toBe(20);
   });
 
   it('払いの中に小さな移動量のイベントがあれば、その払いのノッチ扱いのイベントにも上限が掛かる', () => {

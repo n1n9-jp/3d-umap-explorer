@@ -1,5 +1,6 @@
 import { Quaternion, Vector3 } from 'three';
 import type { PerspectiveCamera } from 'three';
+import { DEFAULT_WHEEL_GESTURE_LIMIT_NOTCHES, isDiscreteWheelDelta, WheelGestureLimiter } from '../controls/WheelGesture';
 
 /**
  * 俯瞰モードのカメラ操作。点群の中心（pivot）のまわりを回り、ホイールで中心へ寄り・離れる。
@@ -84,8 +85,17 @@ export interface OverviewControlsOptions {
 
 const PIXELS_PER_NOTCH = 100;
 const LINES_PER_NOTCH = 3;
-/** 1 回のホイールイベントで反映するノッチ数の上限（タッチパッドの慣性で跳ねないように）。 */
-const MAX_NOTCHES_PER_EVENT = 3;
+/** 飛行モードの速度の倍率（1 ノッチあたり）。払いの上限を、飛行モードと同じ倍率の変化に揃える基準。 */
+const FLY_WHEEL_FACTOR = 1.1;
+
+/**
+ * 1 回の払いで距離を変えられる倍率の上限が、飛行モードの速度（1.1^7 ≈ 1.95 倍）と同じになるノッチ数。
+ * 俯瞰モードは 1 ノッチあたりの倍率が大きいので、ノッチ数そのものは飛行モードより少なくなる。
+ */
+export function overviewGestureLimitNotches(wheelFactor: number): number {
+  if (!(wheelFactor > 1) || !Number.isFinite(wheelFactor)) return DEFAULT_WHEEL_GESTURE_LIMIT_NOTCHES;
+  return (DEFAULT_WHEEL_GESTURE_LIMIT_NOTCHES * Math.log(FLY_WHEEL_FACTOR)) / Math.log(wheelFactor);
+}
 
 export class OverviewControls {
   readonly camera: PerspectiveCamera;
@@ -99,12 +109,15 @@ export class OverviewControls {
   private lastX = 0;
   private lastY = 0;
   private disposed = false;
+  /** タッチパッドの 1 回の払いでの距離の変化を、飛行モードの速度と同じ倍率（約 1.95 倍）に制限する。 */
+  private readonly wheelGesture: WheelGestureLimiter;
 
   constructor(camera: PerspectiveCamera, domElement: HTMLElement, options: OverviewControlsOptions = {}) {
     this.camera = camera;
     this.domElement = domElement;
     this.rotateSpeed = options.rotateSpeed ?? 0.005;
     this.wheelFactor = options.wheelFactor ?? 1.15;
+    this.wheelGesture = new WheelGestureLimiter({ limitNotches: overviewGestureLimitNotches(this.wheelFactor) });
     domElement.addEventListener('pointerdown', this.onPointerDown);
     domElement.addEventListener('pointermove', this.onPointerMove);
     domElement.addEventListener('pointerup', this.onPointerUp);
@@ -120,7 +133,10 @@ export class OverviewControls {
   set enabled(value: boolean) {
     if (value === this._enabled) return;
     this._enabled = value;
-    if (!value) this.endDrag();
+    if (!value) {
+      this.endDrag();
+      this.wheelGesture.reset();
+    }
   }
 
   dispose(): void {
@@ -190,7 +206,10 @@ export class OverviewControls {
   private readonly onWheel = (e: WheelEvent): void => {
     if (!this._enabled) return;
     e.preventDefault();
+    // ピンチ操作（ctrlKey つきのホイール）はページのズームに当たる操作で、距離の変更ではない。
     if (e.ctrlKey) return;
+    // 横方向だけのスクロールは、距離の変更ではなく、払いの継続にも数えない。
+    if (e.deltaY === 0) return;
     let notches: number;
     switch (e.deltaMode) {
       case 1:
@@ -202,10 +221,11 @@ export class OverviewControls {
       default:
         notches = e.deltaY / PIXELS_PER_NOTCH;
     }
-    notches = Math.min(MAX_NOTCHES_PER_EVENT, Math.max(-MAX_NOTCHES_PER_EVENT, notches));
-    if (!Number.isFinite(notches) || notches === 0) return;
+    const timeMs = typeof e.timeStamp === 'number' ? e.timeStamp : performance.now();
+    const effective = this.wheelGesture.consume(notches, timeMs, isDiscreteWheelDelta(e.deltaMode, e.deltaY));
+    if (effective === 0) return;
     // 下へ回す（正）と離れ、上へ回す（負）と近づく。
-    const position = dollyPosition(this.camera.position, this.camera.quaternion, this.pivot, Math.pow(this.wheelFactor, notches));
+    const position = dollyPosition(this.camera.position, this.camera.quaternion, this.pivot, Math.pow(this.wheelFactor, effective));
     this.camera.position.copy(position);
     this.camera.updateMatrixWorld();
   };

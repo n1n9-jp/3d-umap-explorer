@@ -13,6 +13,8 @@
  *   1 ノッチをそのまま 1 ノッチとして反映する（連続して回せば 1.1^n 倍になる）。
  * - ただし、同じ払いの中に小さな移動量のイベントが 1 つでもあれば、その払いはタッチパッドとみなし、
  *   大きな移動量のイベント（タッチパッドの最速部分は 50 ピクセルを越えうる）にも上限を掛ける。
+ *   小さなイベントが来る前に反映済みのノッチ扱いのイベントの分も、その払いの累積に数える。
+ *   すでに上限を超えて反映した分は戻さず、同じ向きのそれ以降のイベントを反映しない。
  * - 払いの区切り: 直前のイベントから `gapMs` 以上あいたら新しい払いとして数え直す。
  *   移動量が 0 のイベント（横方向だけのスクロール）は、払いの継続として数えない。
  * - 累積は符号つきで、上限に張りついた状態から逆向きに回せばすぐ戻る（不感帯を作らない）。
@@ -51,6 +53,7 @@ export class WheelGestureLimiter {
   readonly limitNotches: number;
   readonly gapMs: number;
 
+  /** 現在の払いで反映済みのノッチ数（符号つき）。ノッチ扱いのイベントを先に反映した分も含み、上限を超えうる。 */
   private accumulated = 0;
   /** 現在の払いに、小さな移動量のイベントが含まれているか。 */
   private hasSmallEvent = false;
@@ -76,12 +79,21 @@ export class WheelGestureLimiter {
     this.lastTimeMs = timeMs;
 
     const n = Math.min(MAX_WHEEL_EVENT_NOTCHES, Math.max(-MAX_WHEEL_EVENT_NOTCHES, notches));
-    if (discrete && !this.hasSmallEvent) return n;
-    if (!discrete) this.hasSmallEvent = true;
-
     const before = this.accumulated;
-    this.accumulated = Math.min(this.limitNotches, Math.max(-this.limitNotches, before + n));
-    return this.accumulated - before;
+    if (discrete && !this.hasSmallEvent) {
+      // タッチパッドと判明する前の大きなイベントは、そのまま反映する。あとで払いがタッチパッドと
+      // 分かったときに累積へ数えるため、反映した分を覚えておく。
+      this.accumulated = before + n;
+      return n;
+    }
+    this.hasSmallEvent = true;
+
+    // 累積の許容範囲は ±limitNotches。すでに範囲の外へ反映してしまった分は戻さず、その位置までを許す。
+    const lower = Math.min(-this.limitNotches, before);
+    const upper = Math.max(this.limitNotches, before);
+    const next = Math.min(upper, Math.max(lower, before + n));
+    this.accumulated = next;
+    return next - before;
   }
 
   /** 進行中の払いを捨てる。 */
