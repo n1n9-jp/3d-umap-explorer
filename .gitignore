@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.vite/
+*.local
+.DS_Store
+
+# Python
+__pycache__/
+.venv/
+*.pyc
+
+# 事前計算の入力データ（ダウンロードして使う。配信用の成果物は public/data/ に置く）
+scripts/precompute/.cache/
+
+# 検証で生成する画像
+artifacts/
