@@ -7,6 +7,12 @@
  *   一様グリッドと違い、密な塊と広い空白が混在する分布でも、問い合わせが O(log N) で済む。
  * - 距離の定義: 座標は Float32 の値を倍精度に広げて計算する（`dx*dx + dy*dy + dz*dz`）。
  *   範囲の判定（maxDistance・radius）は、この二乗距離と `r*r` の比較で、境界を含む（<=）。
+ * - 枝刈り: 遠い側の子へ降りるかは、その子の領域（分割面で切った箱）までの二乗距離の下限で決める。
+ *   下限は、問い合わせ点から領域までの軸ごとのずれの二乗和で、分割面を越えて遠い側へ降りるたびに
+ *   その分割軸のずれだけを「分割面までの差」に差し替えて更新する（増分計算）。分割面 1 枚までの距離だけで
+ *   判断するより厳しいので、小さな塊に分かれた分布で、塊から離れた問い合わせでも訪れる節点が少なくて済む。
+ *   二乗和は点の二乗距離と同じ式・同じ足し順で作るので、浮動小数点でも領域内の点の二乗距離を超えない
+ *   （境界の点を誤って刈ることはない）。
  * - 同じ距離の点は、添字の小さい方を先にする。結果は構築や木の形に依らず決まる。
  * - 問い合わせの作業領域（探索スタック・kNearest のヒープ・within の収集用バッファ）は
  *   インスタンスが持ち回して使う。戻り値のオブジェクトと配列だけが問い合わせごとに作られる。
@@ -45,18 +51,29 @@ export class SpatialIndex {
   // 問い合わせの作業領域
   private readonly stackLo = new Int32Array(STACK_SIZE);
   private readonly stackHi = new Int32Array(STACK_SIZE);
+  /** 積んだ範囲の領域までの二乗距離の下限 */
   private readonly stackBound = new Float64Array(STACK_SIZE);
+  /** 積んだ範囲の領域までの、軸ごとのずれ（問い合わせ点から領域の箱までの符号付きの差。箱の内側なら 0） */
+  private readonly stackOffX = new Float64Array(STACK_SIZE);
+  private readonly stackOffY = new Float64Array(STACK_SIZE);
+  private readonly stackOffZ = new Float64Array(STACK_SIZE);
   private heapD: Float64Array = new Float64Array(16);
   private heapI: Int32Array = new Int32Array(16);
   private collected: Int32Array = new Int32Array(64);
 
   /**
    * @param positions 長さ 3N。点 i が [3i, 3i+1, 3i+2] に x, y, z。構築時にコピーするので、
-   *   後から書き換えても索引には反映されない。
+   *   後から書き換えても索引には反映されない。NaN を含む場合は RangeError（NaN があると木の分割の
+   *   前提が崩れ、正常な点の検索結果まで誤るため）。±Infinity は受け付ける。
    */
   constructor(positions: Float32Array) {
     if (positions.length % 3 !== 0) {
       throw new RangeError(`positions の長さは 3 の倍数である必要があります: ${positions.length}`);
+    }
+    for (let i = 0; i < positions.length; i++) {
+      if (positions[i] !== positions[i]) {
+        throw new RangeError(`positions に NaN が含まれています: 点 ${Math.floor(i / 3)} の ${'xyz'[i % 3]} 座標`);
+      }
     }
     const n = positions.length / 3;
     this.count = n;
@@ -76,6 +93,9 @@ export class SpatialIndex {
     const stackLo = this.stackLo;
     const stackHi = this.stackHi;
     const stackBound = this.stackBound;
+    const stackOffX = this.stackOffX;
+    const stackOffY = this.stackOffY;
+    const stackOffZ = this.stackOffZ;
 
     let best = maxDistance * maxDistance;
     let bestPos = -1;
@@ -84,6 +104,9 @@ export class SpatialIndex {
     stackLo[0] = 0;
     stackHi[0] = this.count;
     stackBound[0] = 0;
+    stackOffX[0] = 0;
+    stackOffY[0] = 0;
+    stackOffZ[0] = 0;
     sp = 1;
 
     while (sp > 0) {
@@ -91,7 +114,9 @@ export class SpatialIndex {
       if (stackBound[sp] > best) continue;
       let lo = stackLo[sp];
       let hi = stackHi[sp];
-      const nodeBound = stackBound[sp];
+      const ox = stackOffX[sp];
+      const oy = stackOffY[sp];
+      const oz = stackOffZ[sp];
 
       while (hi - lo > LEAF_SIZE) {
         const mid = (lo + hi) >> 1;
@@ -107,22 +132,33 @@ export class SpatialIndex {
         }
         const axis = splitAxis[mid];
         const diff = axis === 0 ? dx : axis === 1 ? dy : dz;
-        const planeD2 = diff * diff;
-        const farBound = planeD2 > nodeBound ? planeD2 : nodeBound;
+        // 遠い側の子の領域までのずれ: 分割軸のずれだけを分割面までの差に差し替える
+        // （近い側の子は、この節点と同じずれのまま）。下限は、軸ごとのずれの二乗和。
+        // 無限大どうしの差で下限が NaN になっても刈らないよう、刈る条件は `下限 > 上限` の否定で書く。
+        const fx = axis === 0 ? diff : ox;
+        const fy = axis === 1 ? diff : oy;
+        const fz = axis === 2 ? diff : oz;
+        const farBound = fx * fx + fy * fy + fz * fz;
         if (diff < 0) {
           // 左が近い側。右を後回しにする
-          if (farBound <= best) {
+          if (!(farBound > best)) {
             stackLo[sp] = mid + 1;
             stackHi[sp] = hi;
             stackBound[sp] = farBound;
+            stackOffX[sp] = fx;
+            stackOffY[sp] = fy;
+            stackOffZ[sp] = fz;
             sp++;
           }
           hi = mid;
         } else {
-          if (farBound <= best) {
+          if (!(farBound > best)) {
             stackLo[sp] = lo;
             stackHi[sp] = mid;
             stackBound[sp] = farBound;
+            stackOffX[sp] = fx;
+            stackOffY[sp] = fy;
+            stackOffZ[sp] = fz;
             sp++;
           }
           lo = mid + 1;
@@ -174,6 +210,9 @@ export class SpatialIndex {
     const stackLo = this.stackLo;
     const stackHi = this.stackHi;
     const stackBound = this.stackBound;
+    const stackOffX = this.stackOffX;
+    const stackOffY = this.stackOffY;
+    const stackOffZ = this.stackOffZ;
 
     // heapD/heapI は最大ヒープ。根が「採用中で最も遠い」点（同距離なら添字が大きい方）。
     let size = 0;
@@ -184,6 +223,9 @@ export class SpatialIndex {
     stackLo[0] = 0;
     stackHi[0] = this.count;
     stackBound[0] = 0;
+    stackOffX[0] = 0;
+    stackOffY[0] = 0;
+    stackOffZ[0] = 0;
     sp = 1;
 
     while (sp > 0) {
@@ -191,7 +233,9 @@ export class SpatialIndex {
       if (stackBound[sp] > limit) continue;
       let lo = stackLo[sp];
       let hi = stackHi[sp];
-      const nodeBound = stackBound[sp];
+      const ox = stackOffX[sp];
+      const oy = stackOffY[sp];
+      const oz = stackOffZ[sp];
 
       while (hi - lo > LEAF_SIZE) {
         const mid = (lo + hi) >> 1;
@@ -206,21 +250,32 @@ export class SpatialIndex {
         }
         const axis = splitAxis[mid];
         const diff = axis === 0 ? dx : axis === 1 ? dy : dz;
-        const planeD2 = diff * diff;
-        const farBound = planeD2 > nodeBound ? planeD2 : nodeBound;
+        // 遠い側の子の領域までのずれ: 分割軸のずれだけを分割面までの差に差し替える
+        // （近い側の子は、この節点と同じずれのまま）。下限は、軸ごとのずれの二乗和。
+        // 無限大どうしの差で下限が NaN になっても刈らないよう、刈る条件は `下限 > 上限` の否定で書く。
+        const fx = axis === 0 ? diff : ox;
+        const fy = axis === 1 ? diff : oy;
+        const fz = axis === 2 ? diff : oz;
+        const farBound = fx * fx + fy * fy + fz * fz;
         if (diff < 0) {
-          if (farBound <= limit) {
+          if (!(farBound > limit)) {
             stackLo[sp] = mid + 1;
             stackHi[sp] = hi;
             stackBound[sp] = farBound;
+            stackOffX[sp] = fx;
+            stackOffY[sp] = fy;
+            stackOffZ[sp] = fz;
             sp++;
           }
           hi = mid;
         } else {
-          if (farBound <= limit) {
+          if (!(farBound > limit)) {
             stackLo[sp] = lo;
             stackHi[sp] = mid;
             stackBound[sp] = farBound;
+            stackOffX[sp] = fx;
+            stackOffY[sp] = fy;
+            stackOffZ[sp] = fz;
             sp++;
           }
           lo = mid + 1;
@@ -268,6 +323,9 @@ export class SpatialIndex {
     const stackLo = this.stackLo;
     const stackHi = this.stackHi;
     const stackBound = this.stackBound;
+    const stackOffX = this.stackOffX;
+    const stackOffY = this.stackOffY;
+    const stackOffZ = this.stackOffZ;
     const limit = radius * radius;
 
     let found = 0;
@@ -277,6 +335,9 @@ export class SpatialIndex {
     stackLo[0] = 0;
     stackHi[0] = this.count;
     stackBound[0] = 0;
+    stackOffX[0] = 0;
+    stackOffY[0] = 0;
+    stackOffZ[0] = 0;
     sp = 1;
 
     while (sp > 0) {
@@ -284,7 +345,9 @@ export class SpatialIndex {
       if (stackBound[sp] > limit) continue;
       let lo = stackLo[sp];
       let hi = stackHi[sp];
-      const nodeBound = stackBound[sp];
+      const ox = stackOffX[sp];
+      const oy = stackOffY[sp];
+      const oz = stackOffZ[sp];
 
       while (hi - lo > LEAF_SIZE) {
         const mid = (lo + hi) >> 1;
@@ -298,21 +361,32 @@ export class SpatialIndex {
         }
         const axis = splitAxis[mid];
         const diff = axis === 0 ? dx : axis === 1 ? dy : dz;
-        const planeD2 = diff * diff;
-        const farBound = planeD2 > nodeBound ? planeD2 : nodeBound;
+        // 遠い側の子の領域までのずれ: 分割軸のずれだけを分割面までの差に差し替える
+        // （近い側の子は、この節点と同じずれのまま）。下限は、軸ごとのずれの二乗和。
+        // 無限大どうしの差で下限が NaN になっても刈らないよう、刈る条件は `下限 > 上限` の否定で書く。
+        const fx = axis === 0 ? diff : ox;
+        const fy = axis === 1 ? diff : oy;
+        const fz = axis === 2 ? diff : oz;
+        const farBound = fx * fx + fy * fy + fz * fz;
         if (diff < 0) {
-          if (farBound <= limit) {
+          if (!(farBound > limit)) {
             stackLo[sp] = mid + 1;
             stackHi[sp] = hi;
             stackBound[sp] = farBound;
+            stackOffX[sp] = fx;
+            stackOffY[sp] = fy;
+            stackOffZ[sp] = fz;
             sp++;
           }
           hi = mid;
         } else {
-          if (farBound <= limit) {
+          if (!(farBound > limit)) {
             stackLo[sp] = lo;
             stackHi[sp] = mid;
             stackBound[sp] = farBound;
+            stackOffX[sp] = fx;
+            stackOffY[sp] = fy;
+            stackOffZ[sp] = fz;
             sp++;
           }
           lo = mid + 1;
