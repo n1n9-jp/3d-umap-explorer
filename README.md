@@ -177,6 +177,7 @@ node scripts/verify/depth.cjs       # 深度の精度。カメラを少しずつ
 | `sprite.png` | 任意（`manifest.sprite` があるときのみ）。画像アトラス。点 `i` の画像は、列 `i % columns`、行 `floor(i / columns)` のセル（左上が原点） |
 | `text.json` | 任意（`manifest.text` があるときのみ）。UTF-8 の JSON で、長さ `count` の文字列の配列。点 `i` の表示用の文字列（単語）が `i` 番目に入る |
 | `clusters-coarse.u16`, `clusters-fine.u16` | `Uint16Array`、長さ `count`。点ごとのクラスタ `id`（粗い階層・細かい階層）。どのクラスタにも属さない点は `65535`（`manifest.clusters.noise`） |
+| `knn-indices.u16`（または `.u32`）, `knn-distances.f32` | 任意（`manifest.knn` があるときのみ）。元の高次元空間での k 近傍グラフ（下記「近傍グラフ（`knn`）と埋め込みの質（`quality`）」） |
 
 座標は、バウンディングボックスの中心が原点、絶対値の最大が 1 になるように、等方スケールで正規化します（全点が `[-1, 1]` の立方体に収まる）。
 
@@ -202,6 +203,8 @@ node scripts/verify/depth.cjs       # 深度の精度。カメラを少しずつ
 | `sprite` | 任意。`sprite.png` のセルの大きさ `cellSize`、列数 `columns`、行数 `rows` |
 | `text` | 任意。`{ "file": "text.json" }`。点ごとの表示用の文字列 |
 | `umap` | UMAP の設定。`metric` は入力ベクトルの距離（MNIST は `"euclidean"`、単語ベクトルは `"cosine"`） |
+| `knn` | 任意。元の高次元空間での k 近傍グラフのファイルと設定（下記） |
+| `quality` | 任意。3次元の埋め込みが元の近傍をどの程度保っているか（下記） |
 
 単語のデータセット（`public/data/word2vec-10k/`）の `manifest.json` は、`labels`・`sprite` がなく、`text` がある形です。
 
@@ -268,6 +271,37 @@ node scripts/verify/depth.cjs       # 深度の精度。カメラを少しずつ
 MNIST 1 万点では、粗い階層が 10 クラスタ（数字ごとに 1 つ、ノイズ 8.3%）、細かい階層が 67 クラスタ（ノイズ 25.2%）です。細かい階層は、小さな塊を拾う設定のため、塊の周縁の点がノイズになりやすくなっています。
 
 word2vec 1 万語では、粗い階層が 18 クラスタ（ノイズ 31.5%）、細かい階層が 66 クラスタ（ノイズ 30.3%）です。単語ベクトルのUMAPは大きさの揃った塊にならず、密度が連続的に変わるため、粗い階層には MNIST と異なるパラメータ（`minClusterSize` 150、`minSamples` 2）を使います（理由は `scripts/precompute/README.md`）。粗い階層は、MNIST の「数字ごと」と違い、空間の大まかな地域です。
+
+### 近傍グラフ（`knn`）と埋め込みの質（`quality`）
+
+`scripts/precompute/build_dataset.py` が、元の高次元ベクトルから厳密な k 近傍グラフを計算し、`manifest.json` の `knn` と2つのファイルとして書き出します。ブラウザでの UMAP の再計算（近傍探索を省いて最適化だけを行う）や、元の空間での近傍の表示に使います。データセットごとに、作るかどうかと k を `scripts/precompute/datasets.py` の `knn_k` で決めます（`None` で作らない）。
+
+```json
+"knn": { "k": 50, "metric": "euclidean", "includesSelf": false, "exact": true,
+         "indices": { "file": "knn-indices.u16", "dtype": "uint16" },
+         "distances": { "file": "knn-distances.f32", "dtype": "float32" } }
+```
+
+| 項目 | 内容 |
+|---|---|
+| `k` | 点ごとの近傍の数 |
+| `metric` | 距離の種類。そのデータセットの `umap.metric` と同じ（`"euclidean"` または `"cosine"`）。コサイン距離は `1 − コサイン類似度` |
+| `includesSelf` | 近傍に自分自身を含むか。常に `false`（自分自身は含めない） |
+| `exact` | 厳密な kNN なら `true`。近似の手法を使ったときは `false` とし、手法の名前を `method` に書く（現在の1万点は、すべて厳密） |
+| `indices` | 近傍の番号。長さ `count × k`、行優先で、点 `i` の近傍は `[i*k, (i+1)*k)` に、近い順に入る。点数が 65536 以下なら `uint16`（拡張子 `.u16`）、超えるなら `uint32`（`.u32`）。`dtype` とファイルの拡張子で示す |
+| `distances` | `indices` と同じ並びの距離（`float32`）。`metric` の距離 |
+
+- 並びは `(距離, 番号)` の辞書順です。距離が（ファイルに書く float32 の値で）等しい点は、番号の小さい順に並びます。結果が決定的になり、ファイルの値だけで検証できます。行の中で距離は非減少で、自分自身の番号は含まれず、番号は `[0, count)` に収まります。
+- 計算は、全点との距離を、まとまり（512 点）ごとに行列積で求めて候補を絞り、候補との距離を差（コサインは単位ベクトルの内積）から直接求め直す方法です（距離行列を全点分は持たない）。候補の外に同じ距離の点が残りうる行は、全点を直接計算し直します。1 万点・k=50 で、MNIST が約 9 秒、word2vec が約 3 秒です。
+- 大きさは、1 万点・k=50 で、番号が 1,000,000 バイト、距離が 2,000,000 バイトです。gzip -9 では、番号が約 0.91MB、距離が約 1.70MB です（距離は float32 の仮数部が乱れて、ほとんど圧縮されません）。
+
+`quality` は、元の空間の k 近傍（`knn` のグラフ）と、3次元座標（`positions.f32`）でのユークリッド距離の k 近傍が重なる割合（点ごとに `|A∩B| / k`、全点平均）です。`knn` があり、k が `knn.k` 以下のものだけを書きます。
+
+```json
+"quality": { "neighborOverlap": [ { "k": 10, "mean": 0.3513 }, { "k": 50, "mean": 0.427276 } ] }
+```
+
+1 に近いほど、3次元の埋め込みが元の近傍を保っています。MNIST 1 万点は k=10 で 0.3513、k=50 で 0.4273、word2vec 1 万語は k=10 で 0.2553、k=50 で 0.2542 です（3次元への圧縮では、元の近傍のうち 7 割前後が入れ替わります）。
 
 ## データの出典
 

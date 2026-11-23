@@ -1,7 +1,7 @@
 """事前計算するデータセットの設定。
 
 データセットごとの違い（入力ファイルと SHA-256、点数と次元、距離の種類、ラベル・スプライト・単語の有無、
-出力先、クラスタのパラメータの上書き）をここに集める。取得・UMAP・正規化・検証・書き出しなどの共通処理は
+出力先、クラスタのパラメータの上書き、kNN グラフを作るかどうかと k）をここに集める。取得・UMAP・正規化・検証・書き出しなどの共通処理は
 build_dataset.py にあり、設定だけを読む。
 """
 
@@ -76,6 +76,8 @@ class DatasetConfig:
     cluster_overrides: dict[str, dict] = field(default_factory=dict)
     # 検証の表示で、3次元での近傍 10 点を出す単語（kind が text のデータセットのみ）
     probe_words: tuple[str, ...] = ()
+    # 元の高次元空間での厳密な kNN グラフ（knn-indices / knn-distances）の近傍数。None で kNN グラフを作らない
+    knn_k: int | None = 50
 
 
 # UMAP の共通パラメータ（metric はデータセットごと）

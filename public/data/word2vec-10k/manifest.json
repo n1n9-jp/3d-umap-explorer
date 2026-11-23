@@ -6,6 +6,20 @@
   "text": {"file": "text.json"},
   "umap": {"library": "umap-learn 0.6.0", "nComponents": 3, "nNeighbors": 15, "minDist": 0.1, "metric": "cosine", "randomState": 42, "compatibilityLayout": true},
   "source": {"url": "https://github.com/tensorflow/embedding-projector-standalone", "commit": "6ff71f7233ac5947450409e7938b58ec14d1e24c"},
+  "knn": {
+    "k": 50,
+    "metric": "cosine",
+    "includesSelf": false,
+    "exact": true,
+    "indices": {"file": "knn-indices.u16", "dtype": "uint16"},
+    "distances": {"file": "knn-distances.f32", "dtype": "float32"}
+  },
+  "quality": {
+    "neighborOverlap": [
+      {"k": 10, "mean": 0.25526},
+      {"k": 50, "mean": 0.254156}
+    ]
+  },
   "bounds": {"center": [0.0, 0.0, 0.0], "radius": 1.210627},
   "density": {"k": 8, "knnDistP05": 0.01374, "knnDistP50": 0.037867, "knnDistP95": 0.074016},
   "overview": {"axes": [[0.91892, 0.060236, -0.389817], [0.341415, 0.373465, 0.862531], [0.197538, -0.925687, 0.322619]]},
