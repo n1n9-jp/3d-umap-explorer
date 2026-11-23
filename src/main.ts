@@ -7,6 +7,8 @@ import { fogForCamera } from './render/fog';
 import { formatView, parsePositiveNumber, parseView, type ViewSpec } from './render/view';
 import { CameraRig, type CameraState } from './app/cameraRig';
 import { formatHud } from './app/hud';
+import { GpuPicker, type PickResult } from './picking/GpuPicker';
+import { createPickingDebug, type PickingDebug } from './picking/debug';
 
 interface FrameStats { frames: number; meanMs: number; medianMs: number; p95Ms: number; maxMs: number }
 
@@ -20,6 +22,10 @@ declare global {
       getState(): CameraState;
       measureFrames(n: number): Promise<FrameStats>;
       pointCloud: PointCloud;
+      /** 画面上の位置（CSS ピクセル）に見えている点 */
+      pick(clientX: number, clientY: number): Promise<PickResult | null>;
+      /** ピッキングの検証用の補助 */
+      picking: PickingDebug;
     };
   }
 }
@@ -147,8 +153,15 @@ async function start(): Promise<void> {
   requestAnimationFrame(tick);
   updateHud();
 
+  // ---- ピッキング（src/picking/）----
+  const picker = new GpuPicker(renderer, cloud);
+  const picking = createPickingDebug(renderer, scene, camera, cloud, picker);
+  // ---- ここまで ----
+
   window.__explorer = {
     ready: true,
+    pick: (x, y) => picker.pick(camera, x, y),
+    picking,
     setView: (v) => controller.setView(v),
     getState: () => controller.getState(),
     measureFrames: (n) =>

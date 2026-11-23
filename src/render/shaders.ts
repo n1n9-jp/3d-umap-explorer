@@ -8,6 +8,11 @@
  *   遷移を作り、alphaToCoverage（MSAA）で滑らかにする。
  * - 数字の線の外側に背景色の縁取りを付け、重なった数字どうしを切り分ける。
  * - カメラのごく近くの点は、線を細らせながら消す。距離に応じて背景色へ溶かす。
+ *
+ * PICKING を define すると、同じ形の判定のまま「点の番号」を出力する（GPU ピッキング用）。
+ * 出力は index + 1 を RGB の24ビットに入れたもの（R が下位8ビット）で、0 は点なし。
+ * 判定は、MSAA の半分以上のサンプルが覆われるかどうかに相当する「アルファ 0.5 以上」とする。
+ * 縁取りは背景色で描かれて背後を隠すので、番号 0 のまま深度だけを書く。
  */
 
 export const MAX_LABELS = 32;
@@ -35,6 +40,9 @@ out float vDigit;
 out float vFade;
 out float vFog;
 out float vPx;
+#ifdef PICKING
+flat out int vPickId;
+#endif
 
 void main() {
   vec4 mv = modelViewMatrix * vec4(instancePosition, 1.0);
@@ -64,6 +72,9 @@ void main() {
   vPx = shownPx;
   vFade = fade;
   vFog = uFog.z * (1.0 - exp(-max(dist - uFog.x, 0.0) / uFog.y));
+#ifdef PICKING
+  vPickId = gl_InstanceID + 1;
+#endif
 }
 `;
 
@@ -83,6 +94,9 @@ in float vDigit;
 in float vFade;
 in float vFog;
 in float vPx;
+#ifdef PICKING
+flat in int vPickId;
+#endif
 
 out vec4 fragColor;
 
@@ -107,11 +121,22 @@ void main() {
 
   float body = coverage(field, t);
   float alpha = coverage(field, t - outline);
-  alpha *= smoothstep(0.0, 0.35, vFade);
+  float fadeAlpha = smoothstep(0.0, 0.35, vFade);
+
+#ifdef PICKING
+  if (alpha * fadeAlpha < 0.5) discard;
+  if (body * fadeAlpha < 0.5) {
+    fragColor = vec4(0.0);  // 縁取り：背後を隠すが、点としては選ばない
+  } else {
+    fragColor = vec4(float(vPickId & 255), float((vPickId >> 8) & 255), float((vPickId >> 16) & 255), 255.0) / 255.0;
+  }
+#else
+  alpha *= fadeAlpha;
   if (alpha < 0.02) discard;
 
   vec3 color = mix(uBackground, vColor, body);
   color = mix(color, uBackground, vFog);
   fragColor = vec4(color, alpha);
+#endif
 }
 `;
