@@ -65,6 +65,9 @@ vi.mock('../labels/ClusterLabels', () => ({
     setEnabled(v: boolean) { if (this.available) this.on = v; }
     toggle() { this.setEnabled(!this.on); }
     update() {}
+    /** 単語の文字が避ける目印の矩形（src/labels/ の同名の入口の代わり） */
+    readonly insideCluster = false;
+    visibleRects() { return []; }
     dispose() { h.log.push('dispose ClusterLabels'); }
   },
 }));
@@ -92,6 +95,8 @@ vi.mock('../text/WordLabels', () => ({
     setEnabled() {}
     getState() { return { enabled: true }; }
     update() {}
+    setObstacles() {}
+    shownRects() { return []; }
     dispose() { h.log.push('dispose WordLabels'); }
   },
 }));
