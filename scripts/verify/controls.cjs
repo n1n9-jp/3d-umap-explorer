@@ -333,9 +333,10 @@ async function testInertiaFly(page, inside) {
   const steps = yawSteps(dirs);
   const last = a[a.length - 1];
   const total = wrapPi(yawOf(s0.direction) - yawOf(last.direction));
+  // 1 回の標本（measureFrames(1)）は、ソフトウェア描画では複数フレーム（約 0.4 秒）にあたるので、慣性は数標本で終わる
   const afterRelease = steps.slice(1).filter((d) => d > 1e-4).length;
   check('動かしながら離すと、離したあとも回り続ける（rotating が true で、向きが同じ向きへ変わり続ける）',
-    a.some((s) => s.rotating) && afterRelease >= 4 && steps.every((d) => d > -1e-9),
+    a.some((s) => s.rotating) && afterRelease >= 2 && steps.every((d) => d > -1e-9),
     `回転のあった標本 ${afterRelease}、1 フレームごとの回転量 ${steps.map((d) => d.toFixed(3)).join(' ')}`);
   check('やがて止まる（rotating が false になり、そのあと向きが変わらない）', !last.rotating && a.length < 80 && (await staysStill(page)), `${a.length} フレーム`);
   // ドラッグ 150px = 0.375 rad。離す直前の速さ ≈ 940 px/s = 2.3 rad/s、時定数 0.3 秒 → 慣性の総回転量 ≈ 0.7 rad
@@ -515,9 +516,10 @@ async function testInertiaOverview(page, center) {
   const az = [azimuth(s0), ...a.map(azimuth)];
   const steps = az.slice(1).map((v, i) => wrapPi(v - az[i]));
   const last = a[a.length - 1];
+  // 1 回の標本（measureFrames(1)）は、ソフトウェア描画では複数フレーム（約 0.4 秒）にあたるので、慣性は数標本で終わる
   const afterRelease = steps.slice(1).filter((d) => Math.abs(d) > 1e-4).length;
   check('俯瞰モード: 離したあとも中心のまわりを同じ向きへ回り続け、やがて止まる',
-    a.some((s) => s.rotating) && afterRelease >= 4 && steps.every((d) => d < 1e-9) && !last.rotating && a.length < 80 && (await staysStill(page)),
+    a.some((s) => s.rotating) && afterRelease >= 2 && steps.every((d) => d < 1e-9) && !last.rotating && a.length < 80 && (await staysStill(page)),
     `回転のあった標本 ${afterRelease}、1 フレームごとの回転量 ${steps.map((d) => d.toFixed(3)).join(' ')}`);
   check('俯瞰モード: 慣性の間も中心までの距離は変わらない', [s0, ...a].every((s) => Math.abs(dist(s) - dist(s0)) < 1e-4), `距離 ${dist(s0).toFixed(4)} → ${dist(last).toFixed(4)}`);
   check('俯瞰モード: 慣性の総回転量が見込める範囲に入る（ドラッグ 0.6 rad に、慣性が加わる）', Math.abs(wrapPi(azimuth(last) - azimuth(s0))) > 0.6 + 0.3, `総回転 ${Math.abs(wrapPi(azimuth(last) - azimuth(s0))).toFixed(3)} rad`);
