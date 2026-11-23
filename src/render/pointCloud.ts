@@ -44,6 +44,11 @@ export interface PointCloudData {
 
 export class PointCloud {
   readonly mesh: THREE.Mesh<THREE.InstancedBufferGeometry, THREE.ShaderMaterial>;
+  /**
+   * GPU ピッキング用のマテリアル。描画用と同じシェーダを PICKING で分岐させ、点の番号を出力する。
+   * ユニフォームは描画用と同じオブジェクトを共有する（uViewportHeight だけはピッキング側が描く領域に合わせて持つ）。
+   */
+  readonly pickingMaterial: THREE.ShaderMaterial;
   readonly params: PointCloudParams;
   private readonly texture: THREE.Texture;
 
@@ -101,6 +106,23 @@ export class PointCloud {
       side: THREE.DoubleSide,
     });
 
+    this.pickingMaterial = new THREE.ShaderMaterial({
+      glslVersion: THREE.GLSL3,
+      vertexShader,
+      fragmentShader,
+      defines: { PICKING: '' },
+      uniforms: { ...material.uniforms, uViewportHeight: { value: 1 } },
+      transparent: false,
+      blending: THREE.NoBlending,
+      depthTest: true,
+      depthWrite: true,
+      alphaToCoverage: false,
+      dithering: false,
+      fog: false,
+      toneMapped: false,
+      side: THREE.DoubleSide,
+    });
+
     this.mesh = new THREE.Mesh(geometry, material);
     this.mesh.frustumCulled = false;
     this.applyParams();
@@ -114,6 +136,11 @@ export class PointCloud {
 
   setViewportHeight(pixels: number): void {
     this.mesh.material.uniforms.uViewportHeight!.value = pixels;
+  }
+
+  /** ピッキング用マテリアルの描画先の高さ（画素）。画面上の大きさの計算に使う。 */
+  setPickingViewportHeight(pixels: number): void {
+    this.pickingMaterial.uniforms.uViewportHeight!.value = pixels;
   }
 
   private applyParams(): void {
@@ -131,6 +158,7 @@ export class PointCloud {
   dispose(): void {
     this.mesh.geometry.dispose();
     this.mesh.material.dispose();
+    this.pickingMaterial.dispose();
     this.texture.dispose();
   }
 }
