@@ -61,4 +61,21 @@ describe('screenVisibility', () => {
     expect(screenVisibility(pt, 1000, 600, 0)).toBe('ok');
     expect(screenVisibility(pt, 1000, 600, 10)).toBe('offscreen');
   });
+  it('目印の大きさを考慮して、矩形の全体が収まるものだけを ok にする', () => {
+    // 中心は画面の内側（x = 30）でも、幅 80 の目印は左へはみ出す
+    const pt = { x: 30, y: 300, depth: 1, inFront: true };
+    expect(screenVisibility(pt, 1000, 600, 0, 0, 0)).toBe('ok');
+    expect(screenVisibility(pt, 1000, 600, 0, 40, 10)).toBe('offscreen');
+    expect(screenVisibility(pt, 1000, 600, 0, 30, 10)).toBe('ok'); // ちょうど接する
+  });
+  it('4 辺のどれからはみ出しても offscreen。margin は矩形の外側に取る', () => {
+    expect(screenVisibility({ x: 970, y: 300, depth: 1, inFront: true }, 1000, 600, 0, 40, 10)).toBe('offscreen');
+    expect(screenVisibility({ x: 500, y: 5, depth: 1, inFront: true }, 1000, 600, 0, 40, 10)).toBe('offscreen');
+    expect(screenVisibility({ x: 500, y: 595, depth: 1, inFront: true }, 1000, 600, 0, 40, 10)).toBe('offscreen');
+    expect(screenVisibility({ x: 50, y: 300, depth: 1, inFront: true }, 1000, 600, 12, 40, 10)).toBe('offscreen');
+    expect(screenVisibility({ x: 52, y: 300, depth: 1, inFront: true }, 1000, 600, 12, 40, 10)).toBe('ok');
+  });
+  it('カメラの後ろは、大きさに関わらず behind', () => {
+    expect(screenVisibility({ x: NaN, y: NaN, depth: -1, inFront: false }, 1000, 600, 0, 40, 10)).toBe('behind');
+  });
 });

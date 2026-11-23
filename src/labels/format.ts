@@ -21,19 +21,14 @@ export interface LocationView {
 /**
  * 現在地の表示。
  * - 内部: `現在地: 3 のクラスタ`
- * - 外: `最寄り: 7 のクラスタ  ↗ 右上 · 縁まで 0.42`（方向はカメラから見た向き、距離は縁までの距離）
+ * - 外: `最寄り: 7 のクラスタ ↗ 右上`（方向はカメラから見た向き）
+ *
+ * 距離は文面に入れない（座標の単位そのままで、利用者には意味が伝わりにくく、移動のたびに文面が変わる）。
+ * 距離は `Location` が持つ値を、検証用の状態として返す。
  */
 export function formatLocation(loc: Location, name: string, direction: Direction | null): LocationView | null {
   if (loc.kind === 'none') return null;
   if (loc.kind === 'inside') return { kind: 'inside', text: `現在地: ${clusterTitle(name)}` };
-  const dir = direction ? `  ${direction.arrow} ${direction.word} · ` : '  ';
-  return { kind: 'nearest', text: `最寄り: ${clusterTitle(name)}${dir}縁まで ${loc.distance.toFixed(2)}` };
-}
-
-/** HUD の操作説明の行（3 行目）の末尾へ、L キーの説明を足す。行が足りなければそのまま返す。 */
-export function appendHudHelp(hudText: string, hint: string, helpLine = 2): string {
-  const lines = hudText.split('\n');
-  if (helpLine >= lines.length) return hudText;
-  lines[helpLine] = `${lines[helpLine]} / ${hint}`;
-  return lines.join('\n');
+  const dir = direction ? ` ${direction.arrow} ${direction.word}` : '';
+  return { kind: 'nearest', text: `最寄り: ${clusterTitle(name)}${dir}` };
 }

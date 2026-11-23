@@ -35,9 +35,14 @@ export function projectPoint(viewProjection: ArrayLike<number>, p: Vec3, width: 
 
 export type Visibility = 'ok' | 'behind' | 'offscreen';
 
-/** 投影した点が表示できるか。カメラの後ろは 'behind'、画面の外（`margin` ピクセル内側の矩形の外）は 'offscreen'。 */
-export function screenVisibility(pt: ScreenPoint, width: number, height: number, margin = 0): Visibility {
+/**
+ * 投影した点に、半分の大きさ（`halfWidth`・`halfHeight`）の目印を置いたとき、全体が画面に収まるか。
+ * 収まる範囲は、画面を `margin` ピクセル内側へ縮めた矩形。カメラの後ろは 'behind'、はみ出すものは 'offscreen'。
+ * 半分の大きさを省くと、点（中心）だけで判定する。
+ */
+export function screenVisibility(pt: ScreenPoint, width: number, height: number, margin = 0, halfWidth = 0, halfHeight = 0): Visibility {
   if (!pt.inFront) return 'behind';
-  if (!(pt.x >= margin && pt.x <= width - margin && pt.y >= margin && pt.y <= height - margin)) return 'offscreen';
-  return 'ok';
+  const fits = pt.x - halfWidth >= margin && pt.x + halfWidth <= width - margin
+    && pt.y - halfHeight >= margin && pt.y + halfHeight <= height - margin;
+  return fits ? 'ok' : 'offscreen';
 }

@@ -7,7 +7,7 @@ import { INTERIOR_FOG, fogForCamera } from './render/fog';
 import { clipPlanesForCamera, type ClipPlanes } from './render/clip';
 import { formatView, parsePositiveNumber, parseView, type ViewSpec } from './render/view';
 import { CameraRig, type CameraState } from './app/cameraRig';
-import { formatHud } from './app/hud';
+import { renderHud } from './app/hud';
 import { GpuPicker, type PickResult } from './picking/GpuPicker';
 import { createPickingDebug, type PickingDebug } from './picking/debug';
 import { SpatialIndex } from './spatial/SpatialIndex';
@@ -21,7 +21,6 @@ import type { StopDistance } from './interaction/stopDistance';
 import { labelColors } from './render/palette';
 import { ClusterLabels, type ClusterLabelsState } from './labels/ClusterLabels';
 import { Minimap, type MinimapDebug } from './minimap/Minimap';
-import { withMinimapHelp } from './minimap/geometry';
 
 interface FrameStats { frames: number; meanMs: number; medianMs: number; p95Ms: number; maxMs: number }
 
@@ -164,6 +163,7 @@ async function start(): Promise<void> {
     document,
     container: document.getElementById('cluster-labels')!,
     locationEl: document.getElementById('cluster-location')!,
+    pointerTarget: renderer.domElement, // 目印の上のホイールとドラッグは、目印のない場所と同じようにカメラへ届ける
     hud,
     camera,
     clusters: arrays.manifest.clusters?.levels[0]?.clusters ?? [],
@@ -175,7 +175,7 @@ async function start(): Promise<void> {
 
   const updateHud = () => {
     const s = controller.getState();
-    hud.textContent = withMinimapHelp(clusterLabels.decorateHud(formatHud({
+    renderHud(hud, {
       datasetName: arrays.manifest.name,
       pointCount: arrays.manifest.count,
       pointSize: cloud.params.pointSize,
@@ -183,7 +183,9 @@ async function start(): Promise<void> {
       speed: s.speed,
       autoSpeed: { available: s.autoSpeed.available, enabled: s.autoSpeed.enabled, effectiveSpeed: s.effectiveSpeed },
       viewParams: formatView({ pos: s.position, look: s.lookAt }),
-    })));
+      labels: clusterLabels.available, // L キー（クラスタのないデータセットでは使えない）
+      minimap: true, // M キー
+    });
   };
   controller.onChange(() => updateHud()); // モードと速度の変化はすぐに見せる
 
