@@ -23,6 +23,23 @@ describe('formatHud', () => {
   });
 });
 
+describe('formatHud の自動調整', () => {
+  it('飛行モードでは、ホイールで決めた速度に続けて、自動調整の入切と実速度を出す', () => {
+    const lines = formatHud({ ...base, mode: 'fly', autoSpeed: { available: true, enabled: true, effectiveSpeed: 0.027 } }).split('\n');
+    expect(lines[1]).toBe('モード 飛行  飛行速度 0.150  自動調整 入  実速度 0.0270');
+    expect(lines[2]).toContain('T 速度の自動調整');
+    const off = formatHud({ ...base, mode: 'fly', autoSpeed: { available: true, enabled: false, effectiveSpeed: 0.15 } }).split('\n');
+    expect(off[1]).toBe('モード 飛行  飛行速度 0.150  自動調整 切  実速度 0.150');
+  });
+
+  it('俯瞰モードでは実速度を出さない。density がないデータセットでは「なし」', () => {
+    const ov = formatHud({ ...base, mode: 'overview', autoSpeed: { available: true, enabled: true, effectiveSpeed: 0.027 } }).split('\n');
+    expect(ov[1]).toBe('モード 俯瞰  飛行速度 0.150  自動調整 入');
+    const none = formatHud({ ...base, mode: 'fly', autoSpeed: { available: false, enabled: false, effectiveSpeed: 0.15 } }).split('\n');
+    expect(none[1]).toBe('モード 飛行  飛行速度 0.150  自動調整 なし');
+  });
+});
+
 describe('formatSpeed', () => {
   it('3 桁の有効数字にする', () => {
     expect(formatSpeed(0.005)).toBe('0.00500');

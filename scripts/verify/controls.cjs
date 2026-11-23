@@ -8,6 +8,7 @@
  * ソフトウェア描画では 1 フレームが約 200 ミリ秒かかる。待ち時間は壁時計ではなくフレーム数で数え、
  * 移動量は「向き」と「動いたこと」で判定する。失敗があれば終了コード 1 で終わる。
  * 飛行でクラスタの内部へ進んだ位置と、俯瞰モードのスクリーンショットも保存する。
+ * 移動量は速度の係数 1 を前提にするので、始めに T キーで速度の自動調整を無効にする。
  */
 const { execSync } = require('node:child_process');
 const fs = require('node:fs');
@@ -285,6 +286,13 @@ async function main() {
     browser = await chromium.launch({ args: CHROMIUM_ARGS });
     const page = await openPage(browser, base);
     await frames(page, 3);
+
+    // 移動量・速度の検証は係数 1 を前提にしているので、速度の自動調整を T キーで無効にしておく
+    // （自動調整そのものは autospeed.cjs で検証する）
+    await page.keyboard.press('KeyT');
+    await frames(page, 2);
+    const auto = (await state(page)).autoSpeed;
+    check('T キーで速度の自動調整を無効にする（以降の検証の前提）', auto.available && !auto.enabled && (await state(page)).speedScale === 1, JSON.stringify(auto));
 
     await testMovement(page, inside);
     await testDrag(page);
