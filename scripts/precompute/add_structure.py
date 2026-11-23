@@ -10,6 +10,8 @@
 
     python scripts/precompute/add_structure.py public/data/mnist
 
+manifest.json に labels がなくても動く（クラスタの majorityLabel と purity は null、name は C1, C2, ...）。
+階層ごとの HDBSCAN のパラメータは、--coarse-max-cluster-size などの引数でデータセットごとに上書きできる。
 同じ入力からは同じ出力になる（HDBSCAN・PCA・medoid のどれも乱数を使わない）。
 """
 
@@ -18,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
 from collections import Counter
 from pathlib import Path
@@ -52,6 +55,17 @@ LEVELS = [
 
 STRUCTURE_KEYS = ("bounds", "density", "overview", "clusters")
 
+# 上限（maxClusterSize）を超えた塊が消えたとみなす基準:
+# 上限なしでは1つのクラスタだった点のうち、上限ありでノイズになった点の割合がこれを超えたとき警告する。
+LOST_NOISE_RATIO = 0.5
+
+# コマンドライン引数で上書きできるパラメータ（manifest の params のキー → (引数名の末尾, 下限)）
+OVERRIDABLE = {
+    "minClusterSize": ("min-cluster-size", 2),
+    "minSamples": ("min-samples", 1),
+    "maxClusterSize": ("max-cluster-size", 0),  # 0 は「上限なし」（manifest では null）
+}
+
 
 # ---------- 読み込み ----------
 
@@ -69,7 +83,9 @@ def load_dataset(ds: Path):
     if not np.isfinite(pos).all():
         raise SystemExit("positions に有限でない値があります")
 
-    lab_info = manifest["labels"]
+    lab_info = manifest.get("labels")
+    if lab_info is None:  # ラベルのないデータセット
+        return manifest, pos, None, None
     if lab_info["dtype"] != "uint8":
         raise SystemExit("labels は uint8 のみ対応しています")
     labels = np.fromfile(ds / lab_info["file"], dtype=np.uint8)
@@ -98,10 +114,17 @@ def floor6(x: float) -> float:
 # ---------- 全体の範囲・密度・主成分 ----------
 
 def compute_bounds(pos: np.ndarray) -> dict:
-    """バウンディングボックスの中心を中心とし、最も遠い点までを半径とする球（丸めても全点を含む）。"""
-    center = (pos.min(axis=0) + pos.max(axis=0)) / 2
-    radius = np.linalg.norm(pos - center, axis=1).max()
-    return {"center": [r(c) for c in center], "radius": ceil6(radius)}
+    """バウンディングボックスの中心を中心とし、最も遠い点までを半径とする球。
+
+    半径は、manifest へ書く丸めた中心から最も遠い点までの距離を切り上げた値なので、
+    書き出した中心と半径で全点が球に含まれる。
+    """
+    center = np.array([r(c) for c in (pos.min(axis=0) + pos.max(axis=0)) / 2])
+    farthest = np.linalg.norm(pos - center, axis=1).max()
+    radius = ceil6(farthest)
+    if radius < farthest:  # 浮動小数の誤差で切り上げが足りなかったとき
+        radius = r(radius + 10**-DIGITS)
+    return {"center": [float(c) for c in center], "radius": radius}
 
 
 def compute_density(pos: np.ndarray) -> dict:
@@ -142,22 +165,68 @@ def medoid_index(points: np.ndarray, chunk: int = 512) -> int:
     return int(np.argmin(totals))
 
 
-def run_hdbscan(pos: np.ndarray, level: dict) -> tuple[np.ndarray, dict]:
-    count = len(pos)
+def level_params(level: dict, count: int, overrides: dict | None) -> dict:
+    """階層の既定値（点数に対する割合）から実際に使う整数のパラメータを作り、overrides で上書きする。
+
+    maxClusterSize が None のときは上限なし。
+    """
     params = {
         "minClusterSize": max(2, round(level["minClusterSizeRatio"] * count)),
         "minSamples": level["minSamples"],
         "maxClusterSize": round(level["maxClusterSizeRatio"] * count),
         "selectionMethod": level["selectionMethod"],
     }
-    raw = HDBSCAN(
+    for key, value in (overrides or {}).items():
+        if value is not None:
+            params[key] = value
+    if params["maxClusterSize"] == 0:
+        params["maxClusterSize"] = None
+    if params["maxClusterSize"] is not None and params["maxClusterSize"] < params["minClusterSize"]:
+        raise SystemExit(
+            f"[{level['name']}] maxClusterSize ({params['maxClusterSize']}) が "
+            f"minClusterSize ({params['minClusterSize']}) より小さくなっています"
+        )
+    return params
+
+
+def run_hdbscan(pos: np.ndarray, params: dict) -> np.ndarray:
+    return HDBSCAN(
         min_cluster_size=params["minClusterSize"],
         min_samples=params["minSamples"],
         max_cluster_size=params["maxClusterSize"],
         cluster_selection_method=params["selectionMethod"],
         copy=True,
     ).fit_predict(pos)
-    return raw, params
+
+
+def find_lost_blobs(pos: np.ndarray, level_name: str, params: dict, raw: np.ndarray) -> list[str]:
+    """maxClusterSize を超えたために採用されず、点がノイズになった塊を検出し、警告文のリストを返す。
+
+    HDBSCAN（eom 方式）は上限を超えるクラスタを採用せず、採用できる子もなければ、その点をすべてノイズにする。
+    そこで同じ階層を上限なしでも計算し、上限なしで上限を超える1つのクラスタだった点のうち、
+    上限ありでノイズになった点が LOST_NOISE_RATIO を超える塊を報告する。
+    上限を超えない（上限の有無で変わらない）クラスタは対象にならない。
+    """
+    cap = params["maxClusterSize"]
+    if cap is None:
+        return []
+    unlimited = run_hdbscan(pos, {**params, "maxClusterSize": None})
+    flag = f"--{level_name}-max-cluster-size"
+    lost = []
+    for uid in np.unique(unlimited[unlimited >= 0]):
+        members = np.flatnonzero(unlimited == uid)
+        if len(members) <= cap:
+            continue
+        noise = int((raw[members] < 0).sum())
+        if noise / len(members) > LOST_NOISE_RATIO:
+            lost.append((len(members), noise, pos[members].mean(axis=0)))
+    lost.sort(key=lambda t: -t[0])
+    return [
+        f"[{level_name}] 点数 {size} の塊（重心 {[r(c) for c in center]}）が maxClusterSize={cap} を超えるため"
+        f"採用されず、{noise} 点（{noise / size:.0%}）がノイズになっています。"
+        f"{flag} を {size} 以上にする（0 で上限なし）と、1つのクラスタとして採用されます。"
+        for size, noise, center in lost
+    ]
 
 
 def renumber(raw: np.ndarray) -> np.ndarray:
@@ -174,7 +243,10 @@ def renumber(raw: np.ndarray) -> np.ndarray:
     return out
 
 
-def describe_clusters(pos: np.ndarray, labels: np.ndarray, names: list[str], assign: np.ndarray) -> list[dict]:
+def describe_clusters(
+    pos: np.ndarray, labels: np.ndarray | None, names: list[str] | None, assign: np.ndarray
+) -> list[dict]:
+    """クラスタの一覧。labels がないときは、majorityLabel と purity が null、name は C1, C2, ...（id の順）。"""
     clusters = []
     for cid in range(int(assign[assign != NOISE].max()) + 1 if (assign != NOISE).any() else 0):
         members = np.flatnonzero(assign == cid)
@@ -182,26 +254,30 @@ def describe_clusters(pos: np.ndarray, labels: np.ndarray, names: list[str], ass
         m = members[medoid_index(pts)]
         center = pos[m]
         dist = np.linalg.norm(pts - center, axis=1)
-        counts = np.bincount(labels[members], minlength=len(names))
-        majority = int(np.argmax(counts))  # 同数なら番号の小さいラベル
+        if labels is None:
+            name, majority, purity = f"C{cid + 1}", None, None
+        else:
+            counts = np.bincount(labels[members], minlength=len(names))
+            majority = int(np.argmax(counts))  # 同数なら番号の小さいラベル
+            name, purity = names[majority], r(counts[majority] / len(members))
         clusters.append(
             {
                 "id": cid,
-                "name": names[majority],
+                "name": name,
                 "size": int(len(members)),
                 "medoid": int(m),
                 "center": [r(c) for c in center],
                 "radius": ceil6(np.percentile(dist, 90)),
                 "bbox": [[floor6(v) for v in pts.min(axis=0)], [ceil6(v) for v in pts.max(axis=0)]],
                 "majorityLabel": majority,
-                "purity": r(counts[majority] / len(members)),
+                "purity": purity,
                 "parent": None,
             }
         )
     # 同じ階層で多数派ラベルが同じクラスタが複数あるとき、点数が最大のものをそのままの名前にし、
     # 以降を点数の多い順（id の順）に「3 (2)」「3 (3)」とする
     seen: Counter = Counter()
-    for c in clusters:
+    for c in clusters if labels is not None else []:
         seen[c["majorityLabel"]] += 1
         if seen[c["majorityLabel"]] > 1:
             c["name"] = f"{c['name']} ({seen[c['majorityLabel']]})"
@@ -260,12 +336,49 @@ def dump_json(obj, level: int = 0) -> str:
     return json.dumps(obj, ensure_ascii=False)
 
 
+# ---------- ファイルの書き出し ----------
+
+def write_atomically(ds: Path, files: dict[str, bytes], last: str, stale_glob: str) -> None:
+    """files（ファイル名 → 内容）を ds へ書く。すべて一時ファイルへ書き終えてから名前を変えて置き換え、last を最後に置く。
+
+    一時ファイルへの書き込みの途中で失敗しても、ds のファイルは実行前のまま残る
+    （一時ファイルは消える）。last の置き換えのあと、files に含まれない stale_glob に一致する
+    古いファイル（階層の構成が変わって使われなくなった pointFile）を削除する。
+    """
+    temps: dict[str, Path] = {}
+    try:
+        for name, data in files.items():
+            tmp = ds / f".{name}.{os.getpid()}.tmp"
+            temps[name] = tmp
+            with open(tmp, "xb") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+        for name in [n for n in files if n != last] + [last]:
+            os.replace(temps[name], ds / name)
+            del temps[name]
+    finally:
+        for tmp in temps.values():
+            tmp.unlink(missing_ok=True)
+    for old in sorted(ds.glob(stale_glob)):
+        if old.name not in files:
+            old.unlink()
+
+
 # ---------- 実行 ----------
 
-def add_structure(ds: Path) -> None:
-    """ds の manifest.json へ空間の構造を書き加え、クラスタ番号のファイルを ds へ書き出す。"""
+def add_structure(ds: Path, overrides: dict[str, dict] | None = None) -> None:
+    """ds の manifest.json へ空間の構造を書き加え、クラスタ番号のファイルを ds へ書き出す。
+
+    overrides は、階層名 → {"minClusterSize": ..., "minSamples": ..., "maxClusterSize": ...} の辞書
+    （HDBSCAN のパラメータの上書き。maxClusterSize が 0 のときは上限なし）。
+    """
     manifest, pos, labels, names = load_dataset(ds)
     count = len(pos)
+    overrides = overrides or {}
+    unknown = set(overrides) - {lv["name"] for lv in LEVELS}
+    if unknown:
+        raise SystemExit(f"未知の階層名です: {sorted(unknown)}")
 
     structure = {
         "bounds": compute_bounds(pos),
@@ -273,9 +386,11 @@ def add_structure(ds: Path) -> None:
         "overview": compute_overview(pos),
     }
 
-    level_assigns, level_clusters = [], []
+    level_assigns, level_clusters, warnings = [], [], []
     for level in LEVELS:
-        raw, params = run_hdbscan(pos, level)
+        params = level_params(level, count, overrides.get(level["name"]))
+        raw = run_hdbscan(pos, params)
+        warnings += find_lost_blobs(pos, level["name"], params, raw)
         assign = renumber(raw)
         clusters = describe_clusters(pos, labels, names, assign)
         verify_level(count, assign, clusters)
@@ -287,16 +402,17 @@ def add_structure(ds: Path) -> None:
         if any(c["parent"] is not None and c["parent"] >= len(level_clusters[i - 1][1]) for c in level_clusters[i][1]):
             raise SystemExit("parent が上位階層のクラスタ id の範囲外です")
 
-    levels_out = []
+    levels_out, files = [], {}
     for level, assign, (params, clusters) in zip(LEVELS, level_assigns, level_clusters):
         point_file = f"clusters-{level['name']}.u16"
-        assign.astype("<u2").tofile(ds / point_file)
+        files[point_file] = assign.astype("<u2").tobytes()
         levels_out.append({"name": level["name"], "params": params, "pointFile": point_file, "clusters": clusters})
     structure["clusters"] = {"method": "hdbscan", "noise": NOISE, "levels": levels_out}
 
     out = {k: v for k, v in manifest.items() if k not in STRUCTURE_KEYS}
     out.update(structure)
-    (ds / "manifest.json").write_text(dump_json(out) + "\n")
+    files["manifest.json"] = (dump_json(out) + "\n").encode("utf-8")
+    write_atomically(ds, files, last="manifest.json", stale_glob="clusters-*.u16")
 
     print(f"{ds}: count={count}")
     print("bounds:", structure["bounds"])
@@ -308,13 +424,38 @@ def add_structure(ds: Path) -> None:
         print(f"{'id':>3} {'name':<8} {'size':>6} {'purity':>7} {'radius':>8} {'parent':>6}")
         for c in lv["clusters"]:
             parent = "-" if c["parent"] is None else c["parent"]
-            print(f"{c['id']:>3} {c['name']:<8} {c['size']:>6} {c['purity']:>7.3f} {c['radius']:>8.4f} {parent!s:>6}")
+            purity = "-" if c["purity"] is None else f"{c['purity']:.3f}"
+            print(f"{c['id']:>3} {c['name']:<8} {c['size']:>6} {purity:>7} {c['radius']:>8.4f} {parent!s:>6}")
+    for w in warnings:
+        print(f"警告: {w}", file=sys.stderr)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("dataset", type=Path, help="manifest.json を含むデータセットのディレクトリ（例: public/data/mnist）")
-    add_structure(ap.parse_args().dataset)
+    for level in LEVELS:
+        for key, (flag, _) in OVERRIDABLE.items():
+            ratio = f"点数の {level[key + 'Ratio']:.1%}".replace("%", "%%") if key + "Ratio" in level else f"{level[key]}"
+            note = "。0 で上限なし" if key == "maxClusterSize" else ""
+            ap.add_argument(
+                f"--{level['name']}-{flag}",
+                dest=f"{level['name']}.{key}",
+                type=int,
+                metavar="N",
+                help=f"{level['name']} 階層の {key}（既定: {ratio}）{note}",
+            )
+    args = ap.parse_args()
+
+    overrides: dict[str, dict] = {}
+    for level in LEVELS:
+        for key, (flag, lower) in OVERRIDABLE.items():
+            value = getattr(args, f"{level['name']}.{key}")
+            if value is None:
+                continue
+            if value < lower:
+                ap.error(f"--{level['name']}-{flag} は {lower} 以上にしてください")
+            overrides.setdefault(level["name"], {})[key] = value
+    add_structure(args.dataset, overrides)
 
 
 if __name__ == "__main__":

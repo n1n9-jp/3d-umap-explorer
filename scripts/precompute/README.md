@@ -28,8 +28,10 @@ python3 -m venv .venv
 .venv/bin/python scripts/precompute/add_structure.py public/data/mnist
 ```
 
-- 引数は、`manifest.json`・`positions.f32`・`labels.u8` があるデータセットのディレクトリです。`positions.f32` と `labels.u8` は読むだけで、書き換えません。
+- 引数は、`manifest.json`・`positions.f32` があるデータセットのディレクトリです。`manifest.json` に `labels` があるときは `labels.u8` も読みます。`positions.f32` と `labels.u8` は読むだけで、書き換えません。
+- ラベルのないデータセット（`manifest.json` に `labels` がない）でも動きます。クラスタの `majorityLabel` と `purity` は `null`、`name` は階層ごとの連番（`C1`、`C2`、…。`id` の順）になります。
 - `manifest.json` へ `bounds` / `density` / `overview` / `clusters` を書き加え、点ごとのクラスタ番号を `clusters-coarse.u16`・`clusters-fine.u16` として同じディレクトリへ書き出します。再実行すると、これらの項目を計算し直して置き換えます（他の項目はそのまま）。
+- 書き出しは、すべてのファイルを一時ファイル（同じディレクトリの `.<名前>.<pid>.tmp`）へ書き終えてから名前を変えて置き換え、`manifest.json` を最後に置き換えます。一時ファイルへの書き込み中に失敗しても、ディレクトリのファイルは実行前のまま残ります（一時ファイルは消えます）。階層の構成が変わって使われなくなった `clusters-*.u16` は、`manifest.json` の置き換えのあとに削除します。
 - 結果は決定的です。同じ入力で 2 回実行すると、書き出したファイルがすべて一致します。
 - クラスタリングは scikit-learn の HDBSCAN（`requirements.txt` の scikit-learn で動きます）を 3 次元座標に適用します。階層ごとのパラメータは `add_structure.py` の `LEVELS` にあり、点数に依存する値は全点数に対する割合で持つので、同じ形式の別のデータセットにも使えます。MNIST 1 万点では次の値を使います。
 
@@ -39,5 +41,17 @@ python3 -m venv .venv
   | fine | 40（0.4%） | 2 | 500（5%） | eom | 67 クラスタ、ノイズ 25.2% |
 
   `maxClusterSize` を置くのは、3 次元UMAPの座標では隣り合う数字が 1 つの塊につながり、既定のままでは粗い階層が 7 クラスタになり、最も混ざったクラスタの純度が 0.35 まで下がるためです。上限を数字 1 つ分程度にすると、数字ごとの塊に分かれます。
+- **パラメータの上書き**: 階層ごとのパラメータは、次の引数でデータセットごとに上書きできます。値は整数（点数に対する割合ではなく、実際の点数）で、指定しなかったものは上の既定値（点数に対する割合から計算）のままです。実際に使った値は `manifest.json` の `clusters.levels[].params` に残ります。
+
+  | 引数 | 内容 |
+  |---|---|
+  | `--coarse-min-cluster-size N` / `--fine-min-cluster-size N` | `minClusterSize`（2 以上） |
+  | `--coarse-min-samples N` / `--fine-min-samples N` | `minSamples`（1 以上） |
+  | `--coarse-max-cluster-size N` / `--fine-max-cluster-size N` | `maxClusterSize`。`0` で上限なし（`params` では `null`） |
+
+  ```sh
+  .venv/bin/python scripts/precompute/add_structure.py public/data/<dataset> --coarse-max-cluster-size 4000 --fine-min-cluster-size 100
+  ```
+- **上限による塊の消失の警告**: HDBSCAN（eom 方式）は、`maxClusterSize` を超えるクラスタを採用せず、そのクラスタに採用できる子がなければ、点をすべてノイズにします。点数の割合で決めた上限は、塊の大きさが違うデータセットでは大きな塊を丸ごと消すことがあるため、各階層で同じ階層を上限なしでも計算し、上限なしでは上限を超える 1 つのクラスタだった点のうち、上限ありでノイズになった点が半分を超える塊を、標準エラー出力へ警告します（実行の最後に表示。終了コードは 0 のままで、書き出す内容は変わりません）。警告には、その塊の点数・重心・ノイズになった点数と、上限を上書きする引数が含まれます。警告が出たら、`--<階層名>-max-cluster-size` を警告の点数以上にするか `0` にして実行し直してください。上限を超えるクラスタの点が半分以下しかノイズにならず、残りが子クラスタに分かれた場合は、上限が意図どおり塊を分けているものとして警告しません。
 - 最後に、全体の範囲・密度・主成分軸と、階層ごとのクラスタ一覧（`id`、`name`、`size`、`purity`、`radius`、`parent`）、ノイズの割合を表示します。medoid が自分のクラスタに属すること、`parent` と `pointFile` の値が範囲内であることは、スクリプトの中で確かめ、満たさなければ異常終了します。
 - 距離の合計で求める medoid は、クラスタ内の点数の 2 乗に比例する計算量です（1 クラスタ数万点まで想定）。
