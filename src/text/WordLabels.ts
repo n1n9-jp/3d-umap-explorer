@@ -9,6 +9,7 @@
  * - 選び直しは、カメラ（と点の大きさ・画面の大きさ・障害物）が変わったときだけ、`minIntervalMs` に 1 回まで行う。
  *   新しく入る単語と抜ける単語は、`fadeSeconds` 秒で不透明度を変える。
  * - 文字を出している点の丸い点は縮めて消し（不透明度に合わせる）、ホバー・選択の強調は単語を囲む矩形にする。
+ *   表示中の単語の矩形の近くの丸い点は小さくして（clearance.ts）、同じ色の点の塊が文字を読みにくくしないようにする。
  * - ピッキング（src/picking/GpuPicker.ts）の層として、文字の本体の画素をその点の番号で描く。
  */
 import * as THREE from 'three';
@@ -20,6 +21,7 @@ import {
   DEFAULT_SELECT_PARAMS, selectWords, stepOpacities, textSizePx, type PlacedWord, type ScreenRect, type WordBox, type WordSelectParams,
 } from './selection';
 import { wordFragmentShader, wordVertexShader } from './shaders';
+import { DOT_CLEARANCE_MARGIN_PX, DOT_CLEARANCE_SCALE, pointsNearRects } from './clearance';
 
 /** 文字の大きさ: 1 em = TEXT_SCALE × 点の大きさ（ワールド単位）。 */
 export const TEXT_SCALE = 0.4;
@@ -64,6 +66,8 @@ export interface WordLabelsState {
   shown: { index: number; text: string; rect: PlacedWord['rect']; anchorX: number; anchorY: number; textPx: number; naturalPx: number; distance: number; opacity: number }[];
   /** 単語を重ねない領域（UI の要素・目印。CSS ピクセル） */
   obstacles: ScreenRect[];
+  /** 単語の矩形の近くにあって、丸い点を小さくしている点の数（clearance.ts） */
+  cleared: number;
   /** 描いている単語（表示中と、消えていく途中のもの）の数と文字の数 */
   drawnWords: number;
   drawnGlyphs: number;
@@ -104,6 +108,10 @@ export class WordLabels {
   private shownSet = new Set<number>();
   private readonly opacity = new Map<number, number>();
   private readonly dotScaled = new Set<number>();
+  /** 単語の矩形の近くにあって、丸い点を小さくする点（最後に選んだとき） */
+  private clearTargets = new Set<number>();
+  /** 丸い点を小さくする量（0..1。0 で元の大きさ、1 で DOT_CLEARANCE_SCALE 倍）。単語の不透明度と同じ速さで切り替える */
+  private readonly clearance = new Map<number, number>();
   private sinceSelectMs = Infinity;
   private dirtyLayout = true;
   private drawnWords = 0;
@@ -217,6 +225,8 @@ export class WordLabels {
     this.shown = [];
     this.shownSet = new Set();
     this.opacity.clear();
+    this.clearTargets = new Set();
+    this.clearance.clear();
     this.viewDirty = true;
     this.sinceSelectMs = Infinity;
     this.dirtyLayout = true;
@@ -265,7 +275,9 @@ export class WordLabels {
       }
     }
     if (stepOpacities(this.opacity, this.shownSet, dt, FADE_SECONDS)) this.dirtyLayout = true;
+    const clearing = stepOpacities(this.clearance, this.clearTargets, dt, FADE_SECONDS);
     if (this.dirtyLayout) this.rebuild();
+    else if (clearing) this.updateDots();
     this.updateHighlights();
   }
 
@@ -280,6 +292,7 @@ export class WordLabels {
         textPx: w.textPx, naturalPx: w.naturalPx, distance: w.distance, opacity: this.opacity.get(w.index) ?? 0,
       })),
       obstacles: this.obstacles.map((r) => ({ ...r })),
+      cleared: this.clearTargets.size,
       drawnWords: this.drawnWords,
       drawnGlyphs: this.drawnGlyphs,
       fading,
@@ -324,10 +337,11 @@ export class WordLabels {
     const p = cam.position;
     const cloud = this.deps.cloud.params;
     const candidates = this.deps.nearest(p.x, p.y, p.z, this.params.maxWords * CANDIDATE_FACTOR);
+    const view = { view: cam.matrixWorldInverse.elements, projection: cam.projectionMatrix.elements, width, height };
     const res = selectWords({
       candidates,
       positions: this.deps.positions,
-      view: { view: cam.matrixWorldInverse.elements, projection: cam.projectionMatrix.elements, width, height },
+      view,
       emWorld: this.textScale * cloud.pointSize,
       nearLimit: cloud.nearFadeFactors[1] * cloud.pointSize,
       box: (i) => this.box(i),
@@ -337,6 +351,10 @@ export class WordLabels {
     });
     this.shown = res.words;
     this.shownSet = new Set(res.words.map((w) => w.index));
+    // 単語の矩形の近くの丸い点を小さくする（近くの点だけが大きく描かれるので、候補の範囲で足りる）
+    this.clearTargets = this.deps.cloud.dotScales
+      ? pointsNearRects(candidates, this.deps.positions, view, res.words.map((w) => w.rect), DOT_CLEARANCE_MARGIN_PX, this.shownSet)
+      : new Set();
     this.dirtyLayout = true;
     const ms = performance.now() - t0;
     const s = this.stats;
@@ -384,16 +402,24 @@ export class WordLabels {
     this.updateDots();
   }
 
-  /** 文字を出している点の丸い点を、不透明度に合わせて縮める（1 − 不透明度）。 */
+  /**
+   * 丸い点の倍率を合わせる。文字を出している点は不透明度に合わせて縮め（1 − 不透明度）、単語の矩形の近くの点は
+   * DOT_CLEARANCE_SCALE 倍まで小さくする（両方に当たるときは小さいほう）。
+   */
   private updateDots(): void {
     const scales = this.deps.cloud.dotScales;
     if (!scales) return;
     let changed = false;
+    const target = (i: number): number => {
+      const a = this.opacity.get(i);
+      const c = this.clearance.get(i) ?? 0;
+      return Math.min(a === undefined ? 1 : 1 - a, 1 - (1 - DOT_CLEARANCE_SCALE) * c);
+    };
     for (const i of this.dotScaled) {
-      if (!this.opacity.has(i)) { scales[i] = 1; this.dotScaled.delete(i); changed = true; }
+      if (!this.opacity.has(i) && !this.clearance.has(i)) { scales[i] = 1; this.dotScaled.delete(i); changed = true; }
     }
-    for (const [i, a] of this.opacity) {
-      const s = 1 - a;
+    for (const i of [...this.opacity.keys(), ...this.clearance.keys()]) {
+      const s = target(i);
       if (scales[i] !== s) { scales[i] = s; changed = true; }
       this.dotScaled.add(i);
     }

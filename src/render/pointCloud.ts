@@ -33,11 +33,17 @@ export const DEFAULT_PARAMS: PointCloudParams = {
 };
 
 /**
+ * 画像のないデータセット（すべて丸い点）での丸い点の半径の上限（CSS ピクセル）。直径 10 は、単語の文字の高さの下限（12、src/text/）より小さい。
+ * 近くの点が大きな円盤の塊になって、その間の単語の文字より目立つことがないようにする。
+ */
+export const DOTS_ONLY_MAX_RADIUS_PX = 5;
+
+/**
  * 画像のないデータセット（すべて丸い点）での既定値の差分。丸い点がビルボードの全体（半径 = 1 辺の半分）を占め、
- * 近くの点は画面上で半径 10 CSS ピクセル（直径 20）までの円になる（遠くの点は最小サイズ 3 ピクセルの点）。
+ * 近くの点は画面上で半径 5 CSS ピクセル（直径 10）までの円になる（遠くの点は最小サイズ 3 ピクセルの点。その間は近いほど大きい）。
  */
 export const DOTS_ONLY_PARAMS: Partial<PointCloudParams> = {
-  dotRadius: [0.5, 10],
+  dotRadius: [0.5, DOTS_ONLY_MAX_RADIUS_PX],
 };
 
 /** 強調表示の種類。 */

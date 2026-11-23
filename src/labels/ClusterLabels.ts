@@ -3,6 +3,7 @@ import type { PerspectiveCamera } from 'three';
 import type { FlyToOptions } from '../controls/FlyCameraControls';
 import type { ClusterInfo } from '../data/manifest';
 import { appearanceParamsForBounds, insideAppearance, labelAppearance, type AppearanceParams } from './appearance';
+import { DEFAULT_BUDGET, cloudProximity, labelBudget, selectWithinBudget } from './budget';
 import { clusterViewDistance } from './flyDistance';
 import { focusFallback } from './focus';
 import { chipText, clusterColor, clusterTitle, formatLocation } from './format';
@@ -26,7 +27,7 @@ export const WORD_GAP_PX = 4;
 /** 目印の上で押したまま、これを超えて動いたら、カメラの操作（視点を回す）として扱う（CSS ピクセル） */
 export const DRAG_THRESHOLD_PX = 4;
 
-export type HiddenReason = 'behind' | 'offscreen' | 'inside' | 'overlap' | 'words' | 'disabled';
+export type HiddenReason = 'behind' | 'offscreen' | 'inside' | 'distant' | 'overlap' | 'words' | 'disabled';
 
 export interface LabelState {
   id: number;
@@ -68,6 +69,10 @@ export interface ClusterLabelsState {
   frame: number;
   labels: LabelState[];
   location: LocationState;
+  /** カメラから点群までの近さ（点群の半径に対する割合。src/labels/budget.ts）。クラスタの内部では 0 */
+  proximity: number;
+  /** 画面に出す目印の数の上限（点群の近くで控えめにする。上限なしなら null） */
+  budget: number | null;
 }
 
 export interface ClusterLabelsDeps {
@@ -88,6 +93,8 @@ export interface ClusterLabelsDeps {
   clusters: readonly ClusterInfo[];
   /** 点群を含む球の半径（距離に応じた見せ方の基準） */
   boundsRadius: number;
+  /** 点群を含む球の中心（点群への近さの基準）。省略時は原点 */
+  boundsCenter?: Vec3;
   /** 点の色分けの方法（目印の色を点の色にそろえる）。省略時は 'label' */
   colorSource?: ColorSource;
   /** クラスタへ飛ぶ（俯瞰モードなら飛行モードへ切り替えてから） */
@@ -128,6 +135,9 @@ export class ClusterLabels {
   private _enabled = true;
   private frame = 0;
   private insideId = -1;
+  private proximity = Infinity;
+  /** 前のフレームの目印の数の上限（上限なしなら null） */
+  private budget: number | null = null;
   private labelStates: LabelState[] = [];
   private locationState: LocationState = EMPTY_LOCATION;
   private location: { swatch: HTMLElement; text: HTMLElement } | null = null;
@@ -207,6 +217,8 @@ export class ClusterLabels {
       frame: this.frame,
       labels: this.labelStates.map((s) => ({ ...s })),
       location: { ...this.locationState },
+      proximity: this.proximity,
+      budget: this.budget,
     };
   }
 
@@ -282,17 +294,35 @@ export class ClusterLabels {
       if (reason === null) candidates.push({ id: c.id, x: pt.x, y: pt.y, width: w, height: h, distance });
     }
 
-    // 2. 画面上で重なるものは、近いほうを残して遠いほうを隠す。前のフレームで出ていたものは、距離の順位や間隔の閾値の付近でも残す
     const shown = new Set<number>();
     for (const chip of this.chips) if (chip.shown) shown.add(chip.cluster.id);
-    const kept = resolveOverlaps(candidates, LABEL_GAP_PX, { shown, stayGap: LABEL_STAY_GAP_PX, pinned: focused?.cluster.id ?? null });
+    const pinned = focused?.cluster.id ?? null;
+
+    // 2. クラスタの外でも点群のすぐ近くでは、出す目印の数を控えめにする（近いものから数個。src/labels/budget.ts）。
+    //    全体が見える遠い視点では上限なし。内部では、単語と重なる目印を隠す（4.）ので、上限は設けない
+    const total = this.chips.length;
+    this.proximity = insideId >= 0 ? 0
+      : cloudProximity(camPos, this.deps.boundsCenter ?? [0, 0, 0], this.deps.boundsRadius, location.kind === 'nearest' ? location.distance : Infinity);
+    const budget = insideId >= 0 || !this.enabled ? total : labelBudget(this.proximity, total, DEFAULT_BUDGET, this.budget ?? total);
+    this.budget = budget < total ? budget : null;
+    let allowed = candidates;
+    if (budget < total) {
+      const within = selectWithinBudget(candidates, budget, shown, pinned);
+      allowed = candidates.filter((c) => within.has(c.id));
+      for (const s of states) {
+        if (s.visible && !within.has(s.id)) { s.visible = false; s.reason = 'distant'; }
+      }
+    }
+
+    // 3. 画面上で重なるものは、近いほうを残して遠いほうを隠す。前のフレームで出ていたものは、距離の順位や間隔の閾値の付近でも残す
+    const kept = resolveOverlaps(allowed, LABEL_GAP_PX, { shown, stayGap: LABEL_STAY_GAP_PX, pinned });
     for (const s of states) {
       if (s.visible && !kept.has(s.id)) { s.visible = false; s.reason = 'overlap'; }
     }
-    // 3. クラスタの内部では、単語の文字と重なる目印を隠す（目印は HTML なので、奥行きによらず文字の上に重なるため）
+    // 4. クラスタの内部では、単語の文字と重なる目印を隠す（目印は HTML なので、奥行きによらず文字の上に重なるため）
     if (insideId >= 0 && this.deps.wordRects) {
       const words = this.deps.wordRects();
-      const covering = labelsCoveringWords(candidates.filter((c) => kept.has(c.id)), words, WORD_GAP_PX, focused?.cluster.id ?? null);
+      const covering = labelsCoveringWords(allowed.filter((c) => kept.has(c.id)), words, WORD_GAP_PX, pinned);
       for (const s of states) {
         if (s.visible && covering.has(s.id)) { s.visible = false; s.reason = 'words'; }
       }
@@ -300,7 +330,7 @@ export class ClusterLabels {
     this.insideId = insideId;
     this.labelStates = states;
 
-    // 4. 要素へ反映する
+    // 5. 要素へ反映する
     this.moveFocusIfHidden(focused, states);
     this.chips.forEach((chip, i) => this.applyChip(chip, states[i]!));
     this.updateLocation(location, camPos);
