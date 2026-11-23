@@ -191,6 +191,16 @@ async function testOverview(page, ds, clusters, size) {
   const nearL = byDist[0], farL = byDist[byDist.length - 1];
   check('近い目印ほど大きく濃い（距離に対して単調）', mono && nearL.scale > farL.scale && nearL.opacity > farL.opacity,
     `最近 ${nearL.distance.toFixed(2)}: 倍率 ${nearL.scale.toFixed(3)}・濃さ ${nearL.opacity.toFixed(3)} / 最遠 ${farL.distance.toFixed(2)}: ${farL.scale.toFixed(3)}・${farL.opacity.toFixed(3)}`);
+  // 全体が見える視点の見せ方は、内部の規則（小さく薄く・単語と重なる目印を隠す）の影響を受けない:
+  // 倍率と不透明度が、距離だけから決まる式（0.6R〜3R で 1→0.75 倍、1→0.6）と一致する（R は manifest の bounds.radius）
+  const R = ds.manifest.bounds.radius;
+  let lookErr = 0;
+  for (const l of shown) {
+    const t = Math.min(1, Math.max(0, (l.distance - 0.6 * R) / (2.4 * R)));
+    lookErr = Math.max(lookErr, Math.abs(l.scale - (1 - 0.25 * t)), Math.abs(l.opacity - (1 - 0.4 * t)));
+  }
+  check('全体が見える視点の目印の大きさと不透明度が、距離だけから決まる式のまま（内部の見せ方の影響がない）', lookErr < 1e-9 && shown.every((l) => l.reason === null),
+    `式との差の最大 ${lookErr.toExponential(2)}`);
   const farRect = rects.find((r) => r.id === farL.id), nearRect = rects.find((r) => r.id === nearL.id);
   check('見た目の大きさと不透明度も、遠いほうが小さく薄い', farRect.w < nearRect.w && farRect.opacity < nearRect.opacity,
     `近い ${nearRect.w.toFixed(1)}px・${nearRect.opacity.toFixed(2)} / 遠い ${farRect.w.toFixed(1)}px・${farRect.opacity.toFixed(2)}`);
@@ -239,7 +249,7 @@ async function testBehindAndOffscreen(page, clusters, size) {
   }
 }
 
-async function testInside(page, clusters, size) {
+async function testInside(page, ds, clusters, size) {
   console.log('\n[クラスタの内部と現在地]');
   // 十分に離れた 3 つのクラスタで試す: 中心の少し手前（radius の 0.3 倍）
   for (const id of [2, 4, 7]) {
@@ -257,6 +267,16 @@ async function testInside(page, clusters, size) {
     check(`クラスタ ${id}（${c.name}）の内部: 画面に「現在地: ${c.name} のクラスタ」が出る`, !loc.hidden && loc.text === `現在地: ${c.name} のクラスタ`, JSON.stringify(loc));
     const domVis = await elementCenter(page, id);
     check(`クラスタ ${id}（${c.name}）の内部: 目印の要素も見えない`, domVis.hidden);
+    // 内部では、ほかのクラスタの目印を小さく薄くする（距離の式 × 0.85 倍・× 0.6）。単語のない MNIST では、単語との重なりでは隠さない
+    const R = ds.manifest.bounds.radius;
+    const others = st.labels.filter((x) => x.visible);
+    let err = 0;
+    for (const o of others) {
+      const t = Math.min(1, Math.max(0, (o.distance - 0.6 * R) / (2.4 * R)));
+      err = Math.max(err, Math.abs(o.scale - 0.85 * (1 - 0.25 * t)), Math.abs(o.opacity - 0.6 * (1 - 0.4 * t)));
+    }
+    check(`クラスタ ${id}（${c.name}）の内部: ほかのクラスタの目印は出たまま、小さく薄くなる（単語との重なりで隠れる目印はない）`,
+      others.length > 0 && err < 1e-9 && st.labels.every((x) => x.reason !== 'words'), `出ている ${others.length} 個、式との差 ${err.toExponential(2)}`);
     // 外へ: 同じ向きで中心から離れる（ほかのクラスタの内部になることもあるので、そのクラスタの外であることだけを見る）
     const s = await goTo(page, outside, c.center);
     const st2 = await labelState(page);
@@ -907,7 +927,7 @@ async function main() {
 
     if (wanted('overview')) await testOverview(page, ds, clusters, size);
     if (wanted('offscreen')) await testBehindAndOffscreen(page, clusters, size);
-    if (wanted('inside')) await testInside(page, clusters, size);
+    if (wanted('inside')) await testInside(page, ds, clusters, size);
     if (wanted('toggle')) await testToggle(page);
     if (wanted('keyboard')) await testKeyboard(page, clusters);
     if (wanted('click')) await testClickToFly(page, ds, clusters, coarse, size);

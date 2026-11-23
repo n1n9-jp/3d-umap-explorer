@@ -39,3 +39,15 @@ export function labelAppearance(distance: number, params: AppearanceParams): App
 export function appearanceParamsForBounds(boundsRadius: number): AppearanceParams {
   return { near: 0.6 * boundsRadius, far: 3 * boundsRadius };
 }
+
+/**
+ * カメラがいずれかのクラスタの内部にいるときの、ほかのクラスタの目印の見せ方の倍率。
+ * 内部で読みたいのは近くの単語や点なので、遠くのクラスタの目印は小さく薄くして、方向の手がかりにとどめる。
+ */
+export const INSIDE_SCALE = 0.85;
+export const INSIDE_OPACITY = 0.6;
+
+/** クラスタの内部にいるときの見せ方（`labelAppearance` の結果に倍率を掛ける）。 */
+export function insideAppearance(a: Appearance): Appearance {
+  return { t: a.t, scale: a.scale * INSIDE_SCALE, opacity: a.opacity * INSIDE_OPACITY };
+}

@@ -2,13 +2,13 @@ import { Matrix4, Vector3 } from 'three';
 import type { PerspectiveCamera } from 'three';
 import type { FlyToOptions } from '../controls/FlyCameraControls';
 import type { ClusterInfo } from '../data/manifest';
-import { appearanceParamsForBounds, labelAppearance, type AppearanceParams } from './appearance';
+import { appearanceParamsForBounds, insideAppearance, labelAppearance, type AppearanceParams } from './appearance';
 import { clusterViewDistance } from './flyDistance';
 import { focusFallback } from './focus';
 import { chipText, clusterColor, clusterTitle, formatLocation } from './format';
 import type { ColorSource } from '../render/colorScheme';
 import { describeDirection, locateCamera, type ClusterSphere, type Location } from './location';
-import { resolveOverlaps, type OverlapItem } from './overlap';
+import { labelsCoveringWords, resolveOverlaps, type OverlapItem, type ScreenBox } from './overlap';
 import { projectPoint, screenVisibility, type Vec3 } from './projection';
 
 /** 目印をクリックして飛ぶ所要時間 */
@@ -21,10 +21,12 @@ export const LABEL_STAY_GAP_PX = 1;
 export const EDGE_MARGIN_PX = 8;
 /** 出ている目印が、出し続けるために、画面の端から離れていなければならない距離。新しく出す距離より小さくして、切り替えに幅を持たせる */
 export const EDGE_STAY_MARGIN_PX = 0.5;
+/** クラスタの内部で、目印と単語の文字の矩形の間に空ける間隔（CSS ピクセル） */
+export const WORD_GAP_PX = 4;
 /** 目印の上で押したまま、これを超えて動いたら、カメラの操作（視点を回す）として扱う（CSS ピクセル） */
 export const DRAG_THRESHOLD_PX = 4;
 
-export type HiddenReason = 'behind' | 'offscreen' | 'inside' | 'overlap' | 'disabled';
+export type HiddenReason = 'behind' | 'offscreen' | 'inside' | 'overlap' | 'words' | 'disabled';
 
 export interface LabelState {
   id: number;
@@ -38,9 +40,12 @@ export interface LabelState {
   y: number | null;
   /** カメラからクラスタの中心までの距離 */
   distance: number;
-  /** 距離に応じた大きさの倍率と不透明度 */
+  /** 距離に応じた大きさの倍率と不透明度（クラスタの内部にいるときは、さらに小さく薄くしたもの） */
   scale: number;
   opacity: number;
+  /** 画面上の矩形の大きさ（拡大縮小を反映。CSS ピクセル） */
+  width: number;
+  height: number;
 }
 
 export interface LocationState {
@@ -87,6 +92,11 @@ export interface ClusterLabelsDeps {
   colorSource?: ColorSource;
   /** クラスタへ飛ぶ（俯瞰モードなら飛行モードへ切り替えてから） */
   flyTo(target: Vector3, options: FlyToOptions): void;
+  /**
+   * 表示中の単語の文字の画面上の矩形（CSS ピクセル）。クラスタの内部にいるときは、これと重なる目印を隠す
+   * （近くの単語の読み取りを優先する）。省略時は単語を考えない
+   */
+  wordRects?: () => readonly ScreenBox[];
 }
 
 const EMPTY_LOCATION: LocationState = { kind: 'none', clusterId: null, name: null, text: '', direction: null, distance: null };
@@ -117,6 +127,7 @@ export class ClusterLabels {
   private readonly position = new Vector3();
   private _enabled = true;
   private frame = 0;
+  private insideId = -1;
   private labelStates: LabelState[] = [];
   private locationState: LocationState = EMPTY_LOCATION;
   private location: { swatch: HTMLElement; text: HTMLElement } | null = null;
@@ -199,6 +210,26 @@ export class ClusterLabels {
     };
   }
 
+  /** 最後の `update` で、カメラがいずれかのクラスタの内部にいたか。 */
+  get insideCluster(): boolean {
+    return this.insideId >= 0;
+  }
+
+  /**
+   * 最後の `update` で出した目印の画面上の矩形（CSS ピクセル）。`focusedOnly` なら、キーボードのフォーカスがあるものだけ。
+   * 単語の文字の選び方（src/text/）が、目印と重ねないために使う。
+   */
+  visibleRects(focusedOnly = false): ScreenBox[] {
+    const active = this.deps.document.activeElement;
+    const out: ScreenBox[] = [];
+    this.labelStates.forEach((s, i) => {
+      if (!s.visible || s.x === null || s.y === null) return;
+      if (focusedOnly && this.chips[i]?.el !== active) return;
+      out.push({ x: s.x, y: s.y, width: s.width, height: s.height });
+    });
+    return out;
+  }
+
   /** 目印のクラスタへ、クラスタ全体が視野に収まる距離まで飛ぶ。 */
   flyToCluster(cluster: ClusterInfo): void {
     const cam = this.deps.camera;
@@ -231,7 +262,9 @@ export class ClusterLabels {
       const c = chip.cluster;
       const pt = projectPoint(this.viewProj.elements, c.center, width, height);
       const distance = Math.hypot(camPos[0] - c.center[0], camPos[1] - c.center[1], camPos[2] - c.center[2]);
-      const look = labelAppearance(distance, this.appearance);
+      const base = labelAppearance(distance, this.appearance);
+      // 内部にいる間は、ほかのクラスタの目印を小さく薄くする（方向の手がかりにとどめる）
+      const look = insideId >= 0 ? insideAppearance(base) : base;
       const w = chip.width * look.scale;
       const h = chip.height * look.scale;
       let reason: HiddenReason | null = null;
@@ -244,7 +277,7 @@ export class ClusterLabels {
       states.push({
         id: c.id, name: c.name, visible: reason === null, reason,
         x: pt.inFront ? pt.x : null, y: pt.inFront ? pt.y : null,
-        distance, scale: look.scale, opacity: look.opacity,
+        distance, scale: look.scale, opacity: look.opacity, width: w, height: h,
       });
       if (reason === null) candidates.push({ id: c.id, x: pt.x, y: pt.y, width: w, height: h, distance });
     }
@@ -256,9 +289,18 @@ export class ClusterLabels {
     for (const s of states) {
       if (s.visible && !kept.has(s.id)) { s.visible = false; s.reason = 'overlap'; }
     }
+    // 3. クラスタの内部では、単語の文字と重なる目印を隠す（目印は HTML なので、奥行きによらず文字の上に重なるため）
+    if (insideId >= 0 && this.deps.wordRects) {
+      const words = this.deps.wordRects();
+      const covering = labelsCoveringWords(candidates.filter((c) => kept.has(c.id)), words, WORD_GAP_PX, focused?.cluster.id ?? null);
+      for (const s of states) {
+        if (s.visible && covering.has(s.id)) { s.visible = false; s.reason = 'words'; }
+      }
+    }
+    this.insideId = insideId;
     this.labelStates = states;
 
-    // 3. 要素へ反映する
+    // 4. 要素へ反映する
     this.moveFocusIfHidden(focused, states);
     this.chips.forEach((chip, i) => this.applyChip(chip, states[i]!));
     this.updateLocation(location, camPos);

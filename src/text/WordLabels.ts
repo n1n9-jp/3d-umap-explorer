@@ -4,7 +4,9 @@
  * - 全点は点群（src/render/）が丸い点として描き、カメラに近い最大 N 個の単語だけを、ここで文字として描く。
  * - 文字は、データセットの単語に出てくる文字だけで作った SDF のグリフアトラス（glyphAtlas.ts）から、
  *   文字 1 つを 1 インスタンスとして描く（shaders.ts）。単語の組み立ては layout.ts、選び方は selection.ts。
- * - 選び直しは、カメラ（と点の大きさ・画面の大きさ）が変わったときだけ、`minIntervalMs` に 1 回まで行う。
+ * - 画面上の文字の高さは、透視投影のままの高さを、下限と上限のある緩やかな変化に写す（selection.ts の textSizePx）。
+ * - UI の領域や目印（`setObstacles`）と重なる単語は出さない。
+ * - 選び直しは、カメラ（と点の大きさ・画面の大きさ・障害物）が変わったときだけ、`minIntervalMs` に 1 回まで行う。
  *   新しく入る単語と抜ける単語は、`fadeSeconds` 秒で不透明度を変える。
  * - 文字を出している点の丸い点は縮めて消し（不透明度に合わせる）、ホバー・選択の強調は単語を囲む矩形にする。
  * - ピッキング（src/picking/GpuPicker.ts）の層として、文字の本体の画素をその点の番号で描く。
@@ -15,7 +17,7 @@ import type { GpuPicker } from '../picking/GpuPicker';
 import { buildGlyphAtlas, type GlyphAtlas } from './glyphAtlas';
 import { collectChars, layoutWord, MAX_WORD_CHARS, type WordLayout } from './layout';
 import {
-  DEFAULT_SELECT_PARAMS, selectWords, stepOpacities, type PlacedWord, type WordBox, type WordSelectParams,
+  DEFAULT_SELECT_PARAMS, selectWords, stepOpacities, textSizePx, type PlacedWord, type ScreenRect, type WordBox, type WordSelectParams,
 } from './selection';
 import { wordFragmentShader, wordVertexShader } from './shaders';
 
@@ -29,6 +31,11 @@ export const SELECT_INTERVAL_MS = 100;
 export const FADE_SECONDS = 0.2;
 /** 空間索引から取る候補の数（表示する数の上限 N に対する倍率） */
 export const CANDIDATE_FACTOR = 6;
+/**
+ * クラスタに属さない点の文字の色。点の灰色（src/render/colorScheme.ts の NOISE_COLOR #686d78）のままでは、
+ * 霧の中で暗い背景に沈むので、文字だけ明るくする（点の色は変えない）。
+ */
+export const NOISE_TEXT_COLOR = '#a3a9b5';
 /** 単語を囲む強調表示に切り替える不透明度 */
 const BOX_HIGHLIGHT_OPACITY = 0.5;
 
@@ -54,7 +61,9 @@ export interface WordLabelsOptions {
 export interface WordLabelsState {
   enabled: boolean;
   /** 表示中（選ばれている）の単語。矩形は最後に選んだときの画面上の位置（CSS ピクセル） */
-  shown: { index: number; text: string; rect: PlacedWord['rect']; anchorX: number; anchorY: number; textPx: number; distance: number; opacity: number }[];
+  shown: { index: number; text: string; rect: PlacedWord['rect']; anchorX: number; anchorY: number; textPx: number; naturalPx: number; distance: number; opacity: number }[];
+  /** 単語を重ねない領域（UI の要素・目印。CSS ピクセル） */
+  obstacles: ScreenRect[];
   /** 描いている単語（表示中と、消えていく途中のもの）の数と文字の数 */
   drawnWords: number;
   drawnGlyphs: number;
@@ -62,7 +71,7 @@ export interface WordLabelsState {
   fading: number;
   atlas: { width: number; height: number; glyphs: number; buildMs: number };
   select: { count: number; lastMs: number; meanMs: number; maxMs: number; candidates: number; eligible: number };
-  params: { maxWords: number; textScale: number; outlineEm: number; intervalMs: number; fadeSeconds: number; select: WordSelectParams };
+  params: { maxWords: number; textScale: number; outlineEm: number; intervalMs: number; fadeSeconds: number; noiseTextColor: string; select: WordSelectParams };
 }
 
 export class WordLabels {
@@ -85,6 +94,10 @@ export class WordLabels {
   private readonly params: WordSelectParams;
   private readonly textScale: number;
   private readonly textScaleUniform: { value: number };
+  private readonly pixelRatioUniform = { value: 1 };
+  private obstacles: ScreenRect[] = [];
+  private obstacleKey = '';
+  private viewHeight = 1;
 
   private enabled = true;
   private shown: PlacedWord[] = [];
@@ -153,6 +166,9 @@ export class WordLabels {
       uNoiseColor: cu.uNoiseColor!,
       uBackground: cu.uBackground!,
       uTextScale: this.textScaleUniform,
+      uTextSize: { value: new THREE.Vector4(this.params.size.referencePx, this.params.size.exponent, this.params.size.minPx, Math.min(this.params.size.maxPx, 1e9)) },
+      uPixelRatio: this.pixelRatioUniform,
+      uNoiseTextColor: { value: new THREE.Color(NOISE_TEXT_COLOR) },
       uAtlas: { value: tex },
       uEdge: { value: 1 - o.cutoff },
       uOutline: { value: (OUTLINE_EM * o.fontSize) / o.radius },
@@ -207,14 +223,35 @@ export class WordLabels {
     this.rebuild();
   }
 
+  /**
+   * 単語を重ねない画面上の領域（CSS ピクセル）。UI の要素や目印の矩形を、毎フレーム（update の前）渡す。
+   * 1 ピクセル単位で変わったときだけ選び直す。
+   */
+  setObstacles(rects: readonly ScreenRect[]): void {
+    const key = rects.map((r) => `${Math.round(r.x)},${Math.round(r.y)},${Math.round(r.width)},${Math.round(r.height)}`).join(';');
+    if (key === this.obstacleKey) return;
+    this.obstacleKey = key;
+    this.obstacles = rects.map((r) => ({ ...r }));
+    this.viewDirty = true;
+  }
+
+  /** 表示中（選ばれている）の単語の画面上の矩形（最後に選んだときの位置。CSS ピクセル）。無効なら空。 */
+  shownRects(): readonly ScreenRect[] {
+    return this.shown.map((w) => w.rect);
+  }
+
   /** 毎フレーム（描画の前）。width・height は画面の大きさ（CSS ピクセル）。 */
   update(dt: number, width: number, height: number): void {
     if (this.disposed) return;
     this.sinceSelectMs += dt * 1000;
+    this.viewHeight = height;
+    // 描画の画素 / CSS ピクセル（文字の高さの写し方は CSS ピクセルで決める）
+    const bufferHeight = this.deps.cloud.mesh.material.uniforms.uViewportHeight!.value as number;
+    this.pixelRatioUniform.value = height > 0 && bufferHeight > 0 ? bufferHeight / height : 1;
     if (this.enabled) {
       const cam = this.deps.camera;
       cam.updateMatrixWorld();
-      const key = `${width}x${height}:${this.deps.cloud.params.pointSize}:${this.deps.cloud.params.nearFadeFactors.join(',')}`;
+      const key = `${width}x${height}:${this.deps.cloud.params.pointSize}:${this.deps.cloud.params.nearFadeFactors.join(',')}:${this.obstacleKey}`;
       if (!cam.matrixWorld.equals(this.lastView) || !cam.projectionMatrix.equals(this.lastProjection) || key !== this.lastKey) {
         this.viewDirty = true;
       }
@@ -240,14 +277,15 @@ export class WordLabels {
       enabled: this.enabled,
       shown: this.shown.map((w) => ({
         index: w.index, text: this.deps.text[w.index] ?? '', rect: { ...w.rect }, anchorX: w.anchorX, anchorY: w.anchorY,
-        textPx: w.textPx, distance: w.distance, opacity: this.opacity.get(w.index) ?? 0,
+        textPx: w.textPx, naturalPx: w.naturalPx, distance: w.distance, opacity: this.opacity.get(w.index) ?? 0,
       })),
+      obstacles: this.obstacles.map((r) => ({ ...r })),
       drawnWords: this.drawnWords,
       drawnGlyphs: this.drawnGlyphs,
       fading,
       atlas: { width: this.atlas.width, height: this.atlas.height, glyphs: this.atlas.glyphs.size, buildMs: this.atlas.buildMs },
       select: { count: s.count, lastMs: s.lastMs, meanMs: s.count ? s.totalMs / s.count : 0, maxMs: s.maxMs, candidates: s.candidates, eligible: s.eligible },
-      params: { maxWords: this.params.maxWords, textScale: this.textScale, outlineEm: OUTLINE_EM, intervalMs: SELECT_INTERVAL_MS, fadeSeconds: FADE_SECONDS, select: { ...this.params } },
+      params: { maxWords: this.params.maxWords, textScale: this.textScale, outlineEm: OUTLINE_EM, intervalMs: SELECT_INTERVAL_MS, fadeSeconds: FADE_SECONDS, noiseTextColor: NOISE_TEXT_COLOR, select: { ...this.params, size: { ...this.params.size } } },
     };
   }
 
@@ -294,6 +332,7 @@ export class WordLabels {
       nearLimit: cloud.nearFadeFactors[1] * cloud.pointSize,
       box: (i) => this.box(i),
       shown: this.shownSet,
+      obstacles: this.obstacles,
       params: this.params,
     });
     this.shown = res.words;
@@ -369,14 +408,29 @@ export class WordLabels {
     this.deps.cloud.commitDotScales();
   }
 
+  /**
+   * 点 i の 1 em のワールドでの大きさ（文字の高さを写したあと。シェーダと同じ式）。
+   * 奥行きで変わるので、強調の矩形は毎フレーム合わせ直す。
+   */
+  private effectiveEm(i: number): number {
+    const em = this.textScale * this.deps.cloud.params.pointSize;
+    const cam = this.deps.camera;
+    const m = cam.matrixWorldInverse.elements, pos = this.deps.positions;
+    const x = pos[3 * i]!, y = pos[3 * i + 1]!, z = pos[3 * i + 2]!;
+    const depth = -(m[2]! * x + m[6]! * y + m[10]! * z + m[14]!);
+    if (!(depth > 0)) return em;
+    const natural = em * 0.5 * this.viewHeight * cam.projectionMatrix.elements[5]! / depth;
+    return natural > 0 ? em * textSizePx(natural, this.params.size) / natural : em;
+  }
+
   /** ホバー・選択中の点が文字を出していれば、強調表示を単語を囲む矩形にする。 */
   private updateHighlights(): void {
     const cloud = this.deps.cloud;
-    const em = this.textScale * cloud.params.pointSize;
     for (const kind of ['hover', 'selected'] as const) {
       const i = cloud.getHighlight(kind);
       const a = i === null ? 0 : this.opacity.get(i) ?? 0;
       const b = i !== null && a >= BOX_HIGHLIGHT_OPACITY ? this.box(i) : null;
+      const em = b ? this.effectiveEm(i!) : 0;
       cloud.setHighlightBox(kind, b
         ? [(b.right - b.left) / 2 * em, (b.top - b.bottom) / 2 * em, (b.left + b.right) / 2 * em, (b.top + b.bottom) / 2 * em]
         : null);
