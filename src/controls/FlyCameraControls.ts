@@ -2,6 +2,7 @@ import { EventDispatcher, Euler, Vector3 } from 'three';
 import type { PerspectiveCamera } from 'three';
 import { FlyMotion, createMoveInput } from './FlyMotion';
 import type { FlyMotionOptions, FlyPose, FlyToOptions, MoveInput } from './FlyMotion';
+import { WheelGestureLimiter } from './WheelGesture';
 
 export type { FlyPose, FlyToOptions } from './FlyMotion';
 
@@ -21,6 +22,9 @@ export interface FlyCameraControlsEventMap {
 const PIXELS_PER_NOTCH = 100;
 const LINES_PER_NOTCH = 3;
 
+/** keydown / keyup が届かなくなる（macOS で Cmd を押している間など）ので、押下状態を信用できなくなるキー。 */
+const META_CODES = new Set(['MetaLeft', 'MetaRight']);
+
 const KEY_MAP: Record<string, keyof MoveInput | undefined> = {
   KeyW: 'forward',
   ArrowUp: 'forward',
@@ -35,6 +39,20 @@ const KEY_MAP: Record<string, keyof MoveInput | undefined> = {
   ShiftLeft: 'boost',
   ShiftRight: 'boost',
 };
+
+/**
+ * キーイベントの発生元の要素。シャドウDOM 内で発生したイベントは、外側のリスナーから見ると
+ * `target` がシャドウホストに付け替えられるので、`composedPath()` の先頭（実際の発生元）を使う。
+ * `composedPath` が無い・空のときは `target` を使う。
+ */
+function eventOrigin(e: Event): EventTarget | null {
+  const path = typeof e.composedPath === 'function' ? e.composedPath() : [];
+  return path[0] ?? e.target ?? null;
+}
+
+function isMetaKey(e: KeyboardEvent): boolean {
+  return META_CODES.has(e.code) || e.key === 'Meta';
+}
 
 function isEditableTarget(target: EventTarget | null): boolean {
   const el = target as Partial<HTMLElement> | null;
@@ -51,7 +69,8 @@ function isEditableTarget(target: EventTarget | null): boolean {
  *
  * - 移動: W/S 前後、A/D 左右、E/Q 上下（ワールド）、矢印キーは WASD と同じ、Shift で加速
  * - 視点: 左ボタンのドラッグ（ドラッグした向きへ視線が動く）
- * - 速度: ホイール（乗算的）
+ * - 速度: ホイール（乗算的。1 ノッチ ≈ 1.1 倍。連続したイベントは 1 回の払いとみなし、
+ *   1 回の払いで変わる倍率は約 2 倍までに抑える。ピンチ（ctrlKey つき）は速度を変えない）
  * - 自動移動: `flyTo`
  *
  * カメラは親を持たない（ワールド座標で直接動かせる）ものとする。
@@ -68,6 +87,7 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
   private readonly win: Window;
   private readonly euler = new Euler(0, 0, 0, 'YXZ');
   private readonly dirTmp = new Vector3();
+  private readonly wheelGesture = new WheelGestureLimiter();
 
   private _enabled = true;
   private dragPointerId: number | null = null;
@@ -126,6 +146,19 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
     const before = this.motion.speed;
     this.motion.speed = value;
     if (this.motion.speed !== before) this.dispatchSpeedChange();
+  }
+
+  /**
+   * 実際の移動速度に掛ける係数（既定 1、正の有限値）。密度に応じた自動調整など、外部が使う。
+   * ユーザーが決める `speed` とは別に持ち、`speed`・`speedchange` には影響しない。
+   * 正の有限値以外を代入しても無視する。`flyTo` の所要時間には影響しない。
+   */
+  get speedScale(): number {
+    return this.motion.speedScale;
+  }
+
+  set speedScale(value: number) {
+    this.motion.speedScale = value;
   }
 
   get minSpeed(): number {
@@ -188,7 +221,10 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
 
   // ---- 毎フレーム ----
 
-  /** `dtSeconds` だけ進めてカメラへ反映する。カメラが動いたら true。 */
+  /**
+   * `dtSeconds` だけ進めてカメラへ反映する。カメラが動いたら true。
+   * `dtSeconds` が NaN・負・無限大なら、何も変えずに false を返す。
+   */
   update(dtSeconds: number): boolean {
     if (!this._enabled || this.disposed) return false;
     const moved = this.motion.step(dtSeconds, this.input);
@@ -233,8 +269,9 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
 
   /** キー押下状態・ドラッグ・速度・自動移動を捨てる。 */
   private releaseInputs(): void {
-    Object.assign(this.input, createMoveInput());
+    this.clearKeys();
     this.endDrag();
+    this.wheelGesture.reset();
     this.motion.stop();
   }
 
@@ -282,6 +319,8 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
   private readonly onWheel = (e: WheelEvent): void => {
     if (!this._enabled) return;
     e.preventDefault();
+    // ピンチ操作（ctrlKey つきのホイール）はページのズームに当たる操作で、速度の変更ではない。
+    if (e.ctrlKey) return;
     // deltaMode: 0 = ピクセル、1 = 行、2 = ページ。1 ノッチ = 100 ピクセル = 3 行 = 1 ページ分。
     let notches: number;
     switch (e.deltaMode) {
@@ -294,14 +333,20 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
       default: // DOM_DELTA_PIXEL
         notches = e.deltaY / PIXELS_PER_NOTCH;
     }
-    if (this.motion.applyWheel(notches)) this.dispatchSpeedChange();
+    const timeMs = typeof e.timeStamp === 'number' ? e.timeStamp : performance.now();
+    const effective = this.wheelGesture.consume(notches, timeMs);
+    if (effective !== 0 && this.motion.applyWheel(effective)) this.dispatchSpeedChange();
   };
 
   private readonly onKeyDown = (e: KeyboardEvent): void => {
     if (!this._enabled) return;
+    if (isMetaKey(e)) {
+      this.clearKeys();
+      return;
+    }
     const action = KEY_MAP[e.code];
     if (!action) return;
-    if (isEditableTarget(e.target)) return;
+    if (isEditableTarget(eventOrigin(e))) return;
     if (action === 'boost') {
       this.input.boost = true;
       return;
@@ -314,6 +359,10 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
   };
 
   private readonly onKeyUp = (e: KeyboardEvent): void => {
+    if (isMetaKey(e)) {
+      this.clearKeys();
+      return;
+    }
     // 入力欄にフォーカスが移っていても、離したキーは必ず解除する。
     const action = KEY_MAP[e.code];
     if (!action) return;
@@ -322,7 +371,12 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
   };
 
   private readonly onBlur = (): void => {
-    Object.assign(this.input, createMoveInput());
+    this.clearKeys();
     this.endDrag();
   };
+
+  /** 移動キーと Shift の押下状態をすべて消す。 */
+  private clearKeys(): void {
+    Object.assign(this.input, createMoveInput());
+  }
 }

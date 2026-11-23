@@ -268,11 +268,19 @@ describe('FlyCameraControls: 視点', () => {
 
 describe('FlyCameraControls: 速度とイベント', () => {
   let r: Rig;
+  let clock: number;
   beforeEach(() => {
     r = createRig();
+    clock = 0;
   });
 
-  const wheel = (deltaY: number, deltaMode = 0) => r.el.emit('wheel', { deltaY, deltaMode });
+  // 1 回の呼び出しを 1 回の独立したホイール操作（マウスホイールの 1 ノッチ）として扱うため、
+  // 呼び出しごとに 500 ミリ秒進める。ホイールの「払い」の判定は連続したイベントの間隔で決まり、
+  // 時刻を渡さないと全イベントが 1 つの払いにまとまって上限（約 2 倍）に当たるため。
+  const wheel = (deltaY: number, deltaMode = 0) => {
+    clock += 500;
+    return r.el.emit('wheel', { deltaY, deltaMode, timeStamp: clock });
+  };
 
   it('既定値は speed 0.15 / minSpeed 0.005 / maxSpeed 2', () => {
     expect(r.controls.speed).toBe(0.15);
@@ -464,5 +472,338 @@ describe('FlyCameraControls: enabled と dispose', () => {
     expect(r.el.capturedPointers.has(7)).toBe(true);
     r.controls.dispose();
     expect(r.el.capturedPointers.size).toBe(0);
+  });
+});
+
+describe('FlyCameraControls: speedScale', () => {
+  it('既定は 1。速度の係数で、speed・speedchange には影響しない', () => {
+    const r = createRig();
+    expect(r.controls.speedScale).toBe(1);
+    const speeds: number[] = [];
+    r.controls.addEventListener('speedchange', (e) => speeds.push(e.speed));
+    r.controls.speedScale = 0.2;
+    r.controls.speedScale = 5;
+    expect(r.controls.speedScale).toBe(5);
+    expect(r.controls.speed).toBe(0.15);
+    expect(speeds).toHaveLength(0);
+  });
+
+  it('実際の移動量にだけ掛かる', () => {
+    const a = createRig();
+    const b = createRig();
+    a.controls.timeConstant = 0;
+    b.controls.timeConstant = 0;
+    b.controls.speedScale = 0.5;
+    keydown(a, 'KeyW');
+    keydown(b, 'KeyW');
+    frames(a.controls, 1);
+    frames(b.controls, 1);
+    expect(b.camera.position.length() / a.camera.position.length()).toBeCloseTo(0.5, 9);
+    expect(b.controls.speed).toBe(0.15);
+  });
+
+  it('ユーザーのホイール操作で決めた speed は、係数を変えても上書きされない', () => {
+    const r = createRig();
+    r.el.emit('wheel', { deltaY: -100, deltaMode: 0, timeStamp: 0 });
+    const userSpeed = r.controls.speed;
+    expect(userSpeed).toBeCloseTo(0.165, 12);
+    r.controls.speedScale = 0.3;
+    r.controls.speedScale = 3;
+    r.controls.speedScale = 1;
+    expect(r.controls.speed).toBe(userSpeed);
+  });
+
+  it('maxSpeed を越える係数も効く（制限は speed にだけ働く）', () => {
+    const r = createRig();
+    r.controls.timeConstant = 0;
+    r.controls.speed = 2;
+    r.controls.speedScale = 2;
+    expect(r.controls.speed).toBe(2);
+    keydown(r, 'KeyW');
+    frames(r.controls, 1);
+    expect(r.camera.position.length()).toBeCloseTo(4, 9);
+  });
+
+  it('正の有限値以外は無視する。コンストラクタのオプションでも指定できる', () => {
+    const r = createRig();
+    for (const bad of [0, -2, NaN, Infinity]) {
+      r.controls.speedScale = bad;
+      expect(r.controls.speedScale).toBe(1);
+    }
+    const camera = new PerspectiveCamera();
+    const win = new FakeTarget();
+    const el = new FakeTarget();
+    el.ownerDocument = { defaultView: win };
+    const c = new FlyCameraControls(camera, el as unknown as HTMLElement, { speedScale: 0.25 });
+    expect(c.speedScale).toBe(0.25);
+  });
+});
+
+describe('FlyCameraControls: ホイールの払い（マウスとタッチパッド）', () => {
+  let r: Rig;
+  beforeEach(() => {
+    r = createRig();
+  });
+
+  const send = (deltaY: number, timeStamp: number, extra: object = {}) =>
+    r.el.emit('wheel', { deltaY, deltaMode: 0, timeStamp, ...extra });
+
+  /**
+   * タッチパッドの 2 本指スクロールを模した列。小さな移動量が一定の比率で減衰しながら続き、
+   * 合計が `total` ピクセルになる（慣性つき）。
+   */
+  function touchpadFlick(total: number, startMs = 0, count = 100, decay = 0.97, intervalMs = 16) {
+    const first = (total * (1 - decay)) / (1 - decay ** count);
+    return Array.from({ length: count }, (_, i) => ({ deltaY: first * decay ** i, timeStamp: startMs + i * intervalMs }));
+  }
+
+  it('マウスホイール: deltaY=100 を 1 回で約 1.1 倍に減速し、-100 で約 1.1 倍に加速する', () => {
+    send(100, 0);
+    expect(r.controls.speed / 0.15).toBeCloseTo(1 / 1.1, 12);
+    const r2 = createRig();
+    r2.el.emit('wheel', { deltaY: -100, deltaMode: 0, timeStamp: 0 });
+    expect(r2.controls.speed / 0.15).toBeCloseTo(1.1, 12);
+  });
+
+  it('マウスホイール: 間をあけた 1 ノッチずつは、毎回 1.1 倍ずつ効く', () => {
+    for (let i = 0; i < 10; i++) send(-100, i * 400);
+    expect(r.controls.speed / 0.15).toBeCloseTo(1.1 ** 10, 9);
+  });
+
+  it('マウスホイール: 素早く回した数ノッチ（上限以内）は、そのまま 1.1^n 倍', () => {
+    for (let i = 0; i < 4; i++) send(-100, i * 30);
+    expect(r.controls.speed / 0.15).toBeCloseTo(1.1 ** 4, 9);
+  });
+
+  it('タッチパッド: 合計 2000 ピクセルの 1 回の払いで、速度の変化が 2 倍以内（加速・減速とも）', () => {
+    const flick = touchpadFlick(2000);
+    expect(flick.reduce((a, e) => a + e.deltaY, 0)).toBeCloseTo(2000, 9);
+    expect(Math.max(...flick.map((e) => e.deltaY))).toBeLessThan(100); // 1 イベントは小さい
+
+    // 減速（下へ払う）
+    for (const e of flick) send(e.deltaY, e.timeStamp);
+    const slowRatio = r.controls.speed / 0.15;
+    expect(slowRatio).toBeLessThanOrEqual(1);
+    expect(1 / slowRatio).toBeLessThanOrEqual(2);
+    expect(1 / slowRatio).toBeGreaterThan(1.5); // 払いはちゃんと効く
+
+    // 加速（上へ払う）
+    const up = createRig();
+    for (const e of flick) up.el.emit('wheel', { deltaY: -e.deltaY, deltaMode: 0, timeStamp: e.timeStamp });
+    const fastRatio = up.controls.speed / 0.15;
+    expect(fastRatio).toBeLessThanOrEqual(2);
+    expect(fastRatio).toBeGreaterThan(1.5);
+  });
+
+  it('タッチパッド: 合計 1000〜3000 ピクセルの払いはどれも 2 倍以内', () => {
+    for (const total of [1000, 1500, 2000, 2500, 3000]) {
+      const rig = createRig();
+      for (const e of touchpadFlick(total)) rig.el.emit('wheel', { deltaY: -e.deltaY, deltaMode: 0, timeStamp: e.timeStamp });
+      const ratio = rig.controls.speed / 0.15;
+      expect(ratio, `${total}px`).toBeLessThanOrEqual(2);
+      expect(ratio, `${total}px`).toBeGreaterThan(1.4);
+    }
+  });
+
+  it('タッチパッド: 慣性が長く続いても、払いの途中で変化が 2 倍を越えない', () => {
+    // 5 秒続く慣性（間隔 16 ミリ秒）。
+    const rig = createRig();
+    let max = 0;
+    for (let i = 0; i < 312; i++) {
+      rig.el.emit('wheel', { deltaY: -12, deltaMode: 0, timeStamp: i * 16 });
+      max = Math.max(max, rig.controls.speed / 0.15);
+    }
+    expect(max).toBeLessThanOrEqual(2);
+  });
+
+  it('タッチパッド: 間をあけた別の払いは、それぞれ別に 2 倍以内で効く', () => {
+    for (const e of touchpadFlick(2000, 0)) send(-e.deltaY, e.timeStamp);
+    const afterFirst = r.controls.speed;
+    for (const e of touchpadFlick(2000, 5000)) send(-e.deltaY, e.timeStamp);
+    const secondRatio = r.controls.speed / afterFirst;
+    expect(secondRatio).toBeLessThanOrEqual(2);
+    expect(secondRatio).toBeGreaterThan(1.5);
+  });
+
+  it('払いが上限に達したあとの逆向きの入力は、すぐ反映される', () => {
+    for (const e of touchpadFlick(2000)) send(-e.deltaY, e.timeStamp);
+    const saturated = r.controls.speed;
+    send(100, 100 * 16 + 20);
+    expect(r.controls.speed / saturated).toBeCloseTo(1 / 1.1, 12);
+  });
+
+  it('ピンチ（ctrlKey つき）は速度を変えず、speedchange も出さず、ページのズームは止める', () => {
+    let count = 0;
+    r.controls.addEventListener('speedchange', () => count++);
+    const ev = send(-100, 0, { ctrlKey: true });
+    expect(ev.defaultPrevented).toBe(true);
+    for (const e of touchpadFlick(2000)) send(-e.deltaY, e.timeStamp + 1000, { ctrlKey: true });
+    expect(r.controls.speed).toBe(0.15);
+    expect(count).toBe(0);
+    // ピンチは払いの累積にも数えない
+    send(-100, 5000);
+    expect(r.controls.speed / 0.15).toBeCloseTo(1.1, 12);
+  });
+
+  it('ホイール操作は飛行を中断しない（払いの制限を入れても変わらない）', () => {
+    r.controls.flyTo(new Vector3(0, 0, -1), { distance: 0.1 });
+    for (const e of touchpadFlick(2000)) send(-e.deltaY, e.timeStamp);
+    expect(r.controls.isFlying).toBe(true);
+  });
+});
+
+describe('FlyCameraControls: 不正な dt', () => {
+  it('NaN・負・無限大の dt は、カメラも状態も変えずに false を返す', () => {
+    for (const bad of [NaN, -1 / 60, Infinity, -Infinity]) {
+      const r = createRig();
+      keydown(r, 'KeyW');
+      frames(r.controls, 0.3);
+      const pos = r.camera.position.clone();
+      const dir = viewDirection(r.camera);
+      let changes = 0;
+      r.controls.addEventListener('change', () => changes++);
+      expect(r.controls.update(bad), String(bad)).toBe(false);
+      expect(changes).toBe(0);
+      expect(r.camera.position.distanceTo(pos)).toBe(0);
+      expect(viewDirection(r.camera).distanceTo(dir)).toBe(0);
+      expect(Number.isFinite(r.camera.position.length())).toBe(true);
+    }
+  });
+
+  it('不正な dt のあとも通常どおり動く', () => {
+    const a = createRig();
+    const b = createRig();
+    keydown(a, 'KeyW');
+    keydown(b, 'KeyW');
+    frames(a.controls, 0.5);
+    frames(b.controls, 0.25);
+    b.controls.update(NaN);
+    b.controls.update(-1);
+    frames(b.controls, 0.25);
+    expect(b.camera.position.distanceTo(a.camera.position)).toBeLessThan(1e-12);
+  });
+
+  it('ドラッグによる未反映の回転は、不正な dt では消えず、次の有効な update で反映される', () => {
+    const r = createRig();
+    r.el.emit('pointerdown', { button: 0, pointerId: 1, clientX: 0, clientY: 0 });
+    r.el.emit('pointermove', { pointerId: 1, clientX: 100, clientY: 0 });
+    expect(r.controls.update(NaN)).toBe(false);
+    expect(viewDirection(r.camera).x).toBeCloseTo(0, 12);
+    expect(r.controls.update(1 / 60)).toBe(true);
+    expect(viewDirection(r.camera).x).toBeGreaterThan(0.1);
+  });
+
+  it('dt = 0 は有効', () => {
+    const r = createRig();
+    r.el.emit('pointerdown', { button: 0, pointerId: 1, clientX: 0, clientY: 0 });
+    r.el.emit('pointermove', { pointerId: 1, clientX: 100, clientY: 0 });
+    expect(r.controls.update(0)).toBe(true);
+  });
+});
+
+describe('FlyCameraControls: Meta キー', () => {
+  /** 慣性が収まってから、位置がもう動かないことを確かめる。 */
+  function expectStopped(r: Rig): void {
+    frames(r.controls, 3);
+    const p = r.camera.position.clone();
+    frames(r.controls, 1);
+    expect(r.camera.position.distanceTo(p)).toBe(0);
+  }
+
+  it('移動キーを押したまま Meta の keydown が来たら、押下状態をすべて消す', () => {
+    const r = createRig();
+    keydown(r, 'KeyW');
+    keydown(r, 'KeyD');
+    keydown(r, 'KeyE');
+    keydown(r, 'ShiftLeft', { shiftKey: true });
+    frames(r.controls, 0.2);
+    keydown(r, 'MetaLeft', { metaKey: true });
+    // Cmd を押している間に離したキーの keyup は届かない
+    expectStopped(r);
+  });
+
+  it('Meta の keyup でも消す（Meta の keydown を取り逃がしていた場合）', () => {
+    for (const code of ['MetaLeft', 'MetaRight']) {
+      const r = createRig();
+      keydown(r, 'KeyW');
+      keydown(r, 'KeyA');
+      frames(r.controls, 0.2);
+      keyup(r, code);
+      expectStopped(r);
+    }
+  });
+
+  it('code が空でも key が "Meta" なら Meta として扱う', () => {
+    const r = createRig();
+    keydown(r, 'KeyW');
+    r.win.emit('keydown', { code: '', key: 'Meta', target: null, metaKey: true });
+    expectStopped(r);
+  });
+
+  it('Meta を離したあと、移動キーを押し直せばまた動く', () => {
+    const r = createRig();
+    keydown(r, 'KeyW');
+    keydown(r, 'MetaLeft', { metaKey: true });
+    keyup(r, 'MetaLeft');
+    expectStopped(r);
+    const p = r.camera.position.clone();
+    keydown(r, 'KeyW');
+    frames(r.controls, 0.5);
+    expect(r.camera.position.distanceTo(p)).toBeGreaterThan(0.01);
+  });
+
+  it('Meta 以外の修飾キー（Ctrl・Alt）の keyup では消さない', () => {
+    const r = createRig();
+    keydown(r, 'KeyW');
+    keyup(r, 'ControlLeft');
+    keyup(r, 'AltLeft');
+    frames(r.controls, 0.5);
+    expect(r.camera.position.z).toBeLessThan(-0.01);
+  });
+});
+
+describe('FlyCameraControls: シャドウDOM内の入力欄', () => {
+  const host = { tagName: 'MY-FORM' };
+  const shadowRoot = {};
+
+  /** シャドウDOM 内で発生したキーイベント: target はホストに付け替えられ、composedPath() の先頭が実際の発生元。 */
+  const inShadow = (inner: object) => ({ target: host, composedPath: () => [inner, shadowRoot, host] });
+
+  it('シャドウDOM内の input・textarea・contenteditable では反応しない', () => {
+    const inners = [
+      { tagName: 'INPUT' },
+      { tagName: 'TEXTAREA' },
+      { tagName: 'DIV', isContentEditable: true },
+      { tagName: 'DIV', getAttribute: (n: string) => (n === 'contenteditable' ? 'true' : null) },
+    ];
+    for (const inner of inners) {
+      const r = createRig();
+      const ev = keydown(r, 'KeyW', inShadow(inner));
+      expect(ev.defaultPrevented, JSON.stringify(inner)).toBe(false);
+      frames(r.controls, 0.2);
+      expect(r.camera.position.length(), JSON.stringify(inner)).toBe(0);
+    }
+  });
+
+  it('シャドウDOM内の入力欄以外（canvas など）では反応する', () => {
+    const r = createRig();
+    const ev = keydown(r, 'KeyW', inShadow({ tagName: 'CANVAS' }));
+    expect(ev.defaultPrevented).toBe(true);
+    frames(r.controls, 0.2);
+    expect(r.camera.position.z).toBeLessThan(0);
+  });
+
+  it('composedPath() の先頭を判定に使う（target がホストでも入力欄を見つける）', () => {
+    const r = createRig();
+    expect(keydown(r, 'KeyW', { target: { tagName: 'DIV' }, composedPath: () => [{ tagName: 'INPUT' }] }).defaultPrevented).toBe(false);
+    expect(r.camera.position.length()).toBe(0);
+  });
+
+  it('composedPath が空・無いときは target で判定する', () => {
+    const r = createRig();
+    expect(keydown(r, 'KeyW', { target: { tagName: 'INPUT' }, composedPath: () => [] }).defaultPrevented).toBe(false);
+    expect(keydown(r, 'KeyW', { target: { tagName: 'INPUT' } }).defaultPrevented).toBe(false);
+    frames(r.controls, 0.2);
+    expect(r.camera.position.length()).toBe(0);
   });
 });
