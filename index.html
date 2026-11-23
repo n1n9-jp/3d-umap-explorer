@@ -11,12 +11,15 @@
       #hud {
         position: fixed; left: 12px; bottom: 10px; z-index: 1;
         font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-        color: #b4bccb; pointer-events: none; white-space: pre-wrap;
+        color: #b4bccb; pointer-events: none; white-space: pre-wrap; overflow-wrap: anywhere;
         max-width: calc(100vw - 48px - var(--minimap-reserve, 0px)); padding: 6px 10px; border-radius: 6px;
         background: rgba(7, 8, 12, 0.72);
         text-shadow: 0 0 4px #000;
       }
       #hud.error { color: #ff8080; }
+      /* 操作説明の 1 項目。幅が足りないときは、項目の途中ではなく項目の切れ目で折り返す */
+      #hud .hud-item { white-space: nowrap; }
+      #hud .hud-view { word-break: break-all; }
       #cluster-labels { position: fixed; inset: 0; z-index: 0; overflow: hidden; pointer-events: none; }
       #cluster-labels[hidden] { display: none; }
       .cluster-label {

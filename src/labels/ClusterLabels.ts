@@ -4,17 +4,24 @@ import type { FlyToOptions } from '../controls/FlyCameraControls';
 import type { ClusterInfo } from '../data/manifest';
 import { appearanceParamsForBounds, labelAppearance, type AppearanceParams } from './appearance';
 import { clusterViewDistance } from './flyDistance';
-import { appendHudHelp, clusterColor, clusterTitle, formatLocation } from './format';
+import { focusFallback } from './focus';
+import { clusterColor, clusterTitle, formatLocation } from './format';
 import { describeDirection, locateCamera, type ClusterSphere, type Location } from './location';
 import { resolveOverlaps, type OverlapItem } from './overlap';
 import { projectPoint, screenVisibility, type Vec3 } from './projection';
 
 /** 目印をクリックして飛ぶ所要時間 */
 export const FLY_TO_CLUSTER_MS = 1000;
-/** 目印どうしの最小の間隔（CSS ピクセル） */
+/** 目印を新しく出すときに、すでに出ている目印との間に空ける最小の間隔（CSS ピクセル） */
 export const LABEL_GAP_PX = 4;
-/** 目印の中心が画面の端からこの距離（CSS ピクセル）より内側にあるものだけを出す（端で切れた目印を出さない） */
-export const EDGE_MARGIN_PX = 16;
+/** 出ている目印どうしが、出し続けるために保つ最小の間隔。新しく出す間隔より小さくして、切り替えに幅を持たせる */
+export const LABEL_STAY_GAP_PX = 1;
+/** 目印を新しく出すときに、目印の矩形の全体が画面の端から離れていなければならない距離（CSS ピクセル） */
+export const EDGE_MARGIN_PX = 8;
+/** 出ている目印が、出し続けるために、画面の端から離れていなければならない距離。新しく出す距離より小さくして、切り替えに幅を持たせる */
+export const EDGE_STAY_MARGIN_PX = 0.5;
+/** 目印の上で押したまま、これを超えて動いたら、カメラの操作（視点を回す）として扱う（CSS ピクセル） */
+export const DRAG_THRESHOLD_PX = 4;
 
 export type HiddenReason = 'behind' | 'offscreen' | 'inside' | 'overlap' | 'disabled';
 
@@ -63,6 +70,11 @@ export interface ClusterLabelsDeps {
   container: HTMLElement;
   /** 現在地を出す要素 */
   locationEl: HTMLElement;
+  /**
+   * カメラの操作とホバー・選択を受ける要素（canvas）。目印の上のホイールとドラッグは、この要素へ渡す。
+   * 目印の上でも、目印のない場所と同じように働くようにするため。
+   */
+  pointerTarget: HTMLElement;
   /** HUD の要素（現在地を HUD の上へ置くために高さを見る）。なければ固定の位置 */
   hud?: HTMLElement | null;
   camera: PerspectiveCamera;
@@ -79,7 +91,7 @@ const EMPTY_LOCATION: LocationState = { kind: 'none', clusterId: null, name: nul
 interface Chip {
   cluster: ClusterInfo;
   el: HTMLButtonElement;
-  /** 拡大縮小前の大きさ（CSS ピクセル） */
+  /** 拡大縮小前の大きさ（CSS ピクセル。小数のまま） */
   width: number;
   height: number;
   transform: string;
@@ -104,8 +116,11 @@ export class ClusterLabels {
   private frame = 0;
   private labelStates: LabelState[] = [];
   private locationState: LocationState = EMPTY_LOCATION;
+  private location: { swatch: HTMLElement; text: HTMLElement } | null = null;
   private locationText = '';
   private locationKind = '';
+  private locationClusterId: number | null = null;
+  private locationHidden = true;
   private resizeObserver: ResizeObserver | null = null;
 
   constructor(deps: ClusterLabelsDeps) {
@@ -129,18 +144,16 @@ export class ClusterLabels {
       name.className = 'cluster-label-name';
       name.textContent = cluster.name;
       el.append(swatch, name);
-      el.addEventListener('click', (e) => {
-        this.flyToCluster(cluster);
-        if (e.detail > 0) el.blur(); // マウスで押したあとはフォーカスを残さない（キーボードの操作はそのまま）
-      });
+      this.bindPointer(el, cluster);
       deps.container.appendChild(el);
       this.chips.push({ cluster, el, width: 0, height: 0, transform: '', opacity: '', shown: false });
     }
     deps.container.hidden = false;
     // 大きさは名前が決まれば変わらないので、一度だけ測る（visibility: hidden でもレイアウトは残る）
     for (const chip of this.chips) {
-      chip.width = chip.el.offsetWidth;
-      chip.height = chip.el.offsetHeight;
+      const rect = chip.el.getBoundingClientRect();
+      chip.width = rect.width;
+      chip.height = rect.height;
     }
     if (deps.hud && typeof ResizeObserver !== 'undefined') {
       const hud = deps.hud;
@@ -159,16 +172,11 @@ export class ClusterLabels {
     if (!this.available || value === this._enabled) return;
     this._enabled = value;
     this.deps.container.hidden = !this.enabled;
-    if (!this.enabled) this.deps.locationEl.hidden = true;
+    if (!this.enabled) this.setLocationHidden(true);
   }
 
   toggle(): void {
     this.setEnabled(!this._enabled);
-  }
-
-  /** HUD の本文の操作説明に L キーを足す（クラスタがなければそのまま）。 */
-  decorateHud(hudText: string): string {
-    return this.available ? appendHudHelp(hudText, 'L 目印の表示') : hudText;
   }
 
   getState(): ClusterLabelsState {
@@ -202,7 +210,11 @@ export class ClusterLabels {
     const location = locateCamera(camPos, this.spheres);
     const insideId = location.kind === 'inside' ? location.id : -1;
 
-    // 1. 投影と表示の可否、距離に応じた見せ方
+    // フォーカス中の目印は、重なりでは隠さない（隠れるとフォーカスが何も知らされずに body へ移るため）
+    const doc = this.deps.document;
+    const focused = this.chips.find((chip) => chip.el === doc.activeElement) ?? null;
+
+    // 1. 投影と表示の可否、距離に応じた見せ方。出ていたものは、画面の端の判定を緩くして、境目での切り替わりを防ぐ
     const states: LabelState[] = [];
     const candidates: OverlapItem[] = [];
     for (const chip of this.chips) {
@@ -210,11 +222,13 @@ export class ClusterLabels {
       const pt = projectPoint(this.viewProj.elements, c.center, width, height);
       const distance = Math.hypot(camPos[0] - c.center[0], camPos[1] - c.center[1], camPos[2] - c.center[2]);
       const look = labelAppearance(distance, this.appearance);
+      const w = chip.width * look.scale;
+      const h = chip.height * look.scale;
       let reason: HiddenReason | null = null;
       if (!this.enabled) reason = 'disabled';
       else if (c.id === insideId) reason = 'inside';
       else {
-        const v = screenVisibility(pt, width, height, EDGE_MARGIN_PX);
+        const v = screenVisibility(pt, width, height, chip.shown ? EDGE_STAY_MARGIN_PX : EDGE_MARGIN_PX, w / 2, h / 2);
         if (v !== 'ok') reason = v;
       }
       states.push({
@@ -222,19 +236,20 @@ export class ClusterLabels {
         x: pt.inFront ? pt.x : null, y: pt.inFront ? pt.y : null,
         distance, scale: look.scale, opacity: look.opacity,
       });
-      if (reason === null) {
-        candidates.push({ id: c.id, x: pt.x, y: pt.y, width: chip.width * look.scale, height: chip.height * look.scale, distance });
-      }
+      if (reason === null) candidates.push({ id: c.id, x: pt.x, y: pt.y, width: w, height: h, distance });
     }
 
-    // 2. 画面上で重なるものは、近いほうを残して遠いほうを隠す
-    const kept = resolveOverlaps(candidates, LABEL_GAP_PX);
+    // 2. 画面上で重なるものは、近いほうを残して遠いほうを隠す。前のフレームで出ていたものは、距離の順位や間隔の閾値の付近でも残す
+    const shown = new Set<number>();
+    for (const chip of this.chips) if (chip.shown) shown.add(chip.cluster.id);
+    const kept = resolveOverlaps(candidates, LABEL_GAP_PX, { shown, stayGap: LABEL_STAY_GAP_PX, pinned: focused?.cluster.id ?? null });
     for (const s of states) {
       if (s.visible && !kept.has(s.id)) { s.visible = false; s.reason = 'overlap'; }
     }
     this.labelStates = states;
 
     // 3. 要素へ反映する
+    this.moveFocusIfHidden(focused, states);
     this.chips.forEach((chip, i) => this.applyChip(chip, states[i]!));
     this.updateLocation(location, camPos);
   }
@@ -257,10 +272,75 @@ export class ClusterLabels {
     }
   }
 
+  /**
+   * キーボードでフォーカスしている目印が出なくなるときは、Tab の順で次に出ている目印へフォーカスを移す
+   * （ほかに出ているものがなければ外す）。L キーで全体を隠すときは、隠した本人の操作なので何もしない。
+   */
+  private moveFocusIfHidden(focused: Chip | null, states: readonly LabelState[]): void {
+    if (!focused) return;
+    const state = states[this.chips.indexOf(focused)]!;
+    if (state.visible || state.reason === 'disabled') return;
+    const visible = new Set(states.filter((s) => s.visible).map((s) => s.id));
+    const next = focusFallback(this.chips.map((chip) => chip.cluster.id), visible, state.id);
+    const target = next === null ? null : this.chips.find((chip) => chip.cluster.id === next)!;
+    if (target) target.el.focus({ preventScroll: true });
+    else focused.el.blur();
+  }
+
+  /**
+   * 目印の上のポインタの操作を、目印のない場所と同じように働かせる。
+   * - ホイール: canvas へ同じ内容の wheel を渡す。ページのズーム（Ctrl＋ホイール、ピンチ）は目印の上でも止める。
+   * - ドラッグ: 押したままの移動が `DRAG_THRESHOLD_PX` を超えたら、押した位置からの pointerdown と現在位置の pointermove を
+   *   canvas へ渡す。以降の移動と離す操作は、canvas が capture して受ける（視点の回転、ドラッグとしての扱い）。
+   *   動かさずに離したときの click は、目印が受ける（クリックとしては canvas へ渡さないので、背後の点は選ばれない）。
+   */
+  private bindPointer(el: HTMLButtonElement, cluster: ClusterInfo): void {
+    const target = this.deps.pointerTarget;
+    let press: { pointerId: number; x: number; y: number } | null = null;
+    let dragged = false;
+
+    el.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      target.dispatchEvent(new WheelEvent('wheel', {
+        bubbles: true, cancelable: true, composed: true,
+        clientX: e.clientX, clientY: e.clientY, screenX: e.screenX, screenY: e.screenY,
+        deltaX: e.deltaX, deltaY: e.deltaY, deltaZ: e.deltaZ, deltaMode: e.deltaMode,
+        ctrlKey: e.ctrlKey, shiftKey: e.shiftKey, altKey: e.altKey, metaKey: e.metaKey,
+      }));
+    }, { passive: false });
+
+    el.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0 || press) return;
+      dragged = false;
+      press = { pointerId: e.pointerId, x: e.clientX, y: e.clientY };
+      try { el.setPointerCapture(e.pointerId); } catch { /* 合成イベントなどでは無視 */ }
+    });
+    el.addEventListener('pointermove', (e) => {
+      if (!press || e.pointerId !== press.pointerId) return;
+      if (Math.hypot(e.clientX - press.x, e.clientY - press.y) <= DRAG_THRESHOLD_PX) return;
+      const { x, y } = press;
+      press = null;
+      dragged = true;
+      try { el.releasePointerCapture(e.pointerId); } catch { /* すでに解放済み */ }
+      const init = { pointerId: e.pointerId, pointerType: e.pointerType, isPrimary: e.isPrimary, bubbles: true, cancelable: true, composed: true };
+      target.dispatchEvent(new PointerEvent('pointerdown', { ...init, button: 0, buttons: 1, clientX: x, clientY: y }));
+      target.dispatchEvent(new PointerEvent('pointermove', { ...init, button: -1, buttons: e.buttons, clientX: e.clientX, clientY: e.clientY }));
+    });
+    const end = (e: PointerEvent) => { if (press && e.pointerId === press.pointerId) press = null; };
+    el.addEventListener('pointerup', end);
+    el.addEventListener('pointercancel', end);
+
+    el.addEventListener('click', (e) => {
+      if (dragged) { dragged = false; return; } // ドラッグの終わりはクリックではない
+      this.flyToCluster(cluster);
+      if (e.detail > 0) el.blur(); // マウスで押したあとはフォーカスを残さない（キーボードの操作はそのまま）
+    });
+  }
+
   private updateLocation(location: Location, camPos: Vec3): void {
     const el = this.deps.locationEl;
     if (!this.enabled || location.kind === 'none') {
-      el.hidden = true;
+      this.setLocationHidden(true);
       this.locationState = { ...EMPTY_LOCATION, kind: location.kind };
       return;
     }
@@ -279,21 +359,34 @@ export class ClusterLabels {
     this.locationState = {
       kind: location.kind, clusterId: cluster.id, name: cluster.name, text: view.text, direction, distance: location.distance,
     };
-    if (view.text !== this.locationText) {
-      this.locationText = view.text;
-      el.textContent = '';
+    // 要素は一度だけ作り、変わった部分（文面・色・種類）だけを書き換える
+    if (!this.location) {
       const swatch = this.deps.document.createElement('span');
       swatch.className = 'cluster-location-swatch';
-      swatch.style.background = clusterColor(cluster);
       swatch.setAttribute('aria-hidden', 'true');
       const text = this.deps.document.createElement('span');
-      text.textContent = view.text;
+      el.textContent = '';
       el.append(swatch, text);
-    } else if (this.locationKind === location.kind && !el.hidden) {
-      return;
+      this.location = { swatch, text };
     }
-    this.locationKind = location.kind;
-    el.dataset.kind = location.kind;
-    el.hidden = false;
+    if (view.text !== this.locationText) {
+      this.location.text.textContent = view.text;
+      this.locationText = view.text;
+    }
+    if (cluster.id !== this.locationClusterId) {
+      this.location.swatch.style.background = clusterColor(cluster);
+      this.locationClusterId = cluster.id;
+    }
+    if (location.kind !== this.locationKind) {
+      el.dataset.kind = location.kind;
+      this.locationKind = location.kind;
+    }
+    this.setLocationHidden(false);
+  }
+
+  private setLocationHidden(hidden: boolean): void {
+    if (hidden === this.locationHidden) return;
+    this.locationHidden = hidden;
+    this.deps.locationEl.hidden = hidden;
   }
 }

@@ -3,7 +3,7 @@
  * クラスタの目印と現在地（src/labels/）の検証。
  * ビルドしてプレビューサーバーを起動し、ヘッドレス Chromium へ実際のマウス・キーの入力を送る。
  *
- *   node scripts/verify/labels.cjs [--no-build] [--port 4330] [--out artifacts/labels]
+ *   node scripts/verify/labels.cjs [--no-build] [--port 4330] [--out artifacts/labels] [--only pointer,stability,...]
  *
  * 確かめること:
  *   - 全体が見える視点で、粗い階層の 10 個の目印がすべて表示され、画面上の位置がクラスタの中心の投影と一致する
@@ -16,6 +16,15 @@
  *   - 目印をクリックすると、そのクラスタの手前へ移動し、移動後にそのクラスタの点の大半が画面内に入る。クリックで点の選択が変わらない。
  *     俯瞰モードからは飛行モードへ切り替えて移動する
  *   - 目印をキーボード（Tab でフォーカス・Enter）で実行できる
+ *   - 目印の上でも、ホイールとドラッグが目印のない場所と同じように働く: ホイールで飛行速度（俯瞰モードでは距離）が変わる。
+ *     Ctrl＋ホイールはページのズームにならない（既定の動作を止める）。目印の上から始めたドラッグで視点が回り、
+ *     目印のクリックとしては扱われない（回る量は目印のない場所のドラッグと同じ）。そのあとの動かさないクリックでは飛ぶ
+ *   - カメラを小さく往復させても、重なり・画面の端の境目で目印の表示と非表示が切り替わり続けない
+ *   - 画面の端では、目印の矩形が画面に収まるものだけが出る（中心が画面内でも、矩形がはみ出すものは出ない）
+ *   - キーボードでフォーカスした目印が出なくなるときは、フォーカスが次に出ている目印へ移る（body へ落ちない）。
+ *     フォーカス中の目印は、ほかの目印との重なりでは隠れない
+ *   - 現在地の表示に距離の数値が出ない。移動で文面が変わらない間は、要素を書き換えない（DOM の変更が 0 件）
+ *   - 幅の狭い画面で、HUD の操作説明が項目の切れ目で折り返し、画面からはみ出さない
  *   - L キーで目印と現在地が消え、もう一度押すと戻る。HUD の操作説明に L キーがある
  *   - 画面の大きさを変えても、目印の位置が合っている（横長・縦長）
  *   - クラスタのないデータセットでは、機能が無効になり、エラーにならない
@@ -37,6 +46,8 @@ const port = Number(opt('port', '4330'));
 const dataPath = 'data/mnist/';
 const FOV = 60; // src/main.ts の PerspectiveCamera の縦の視野角
 const LABEL_PX_TOLERANCE = 1.0; // 投影位置の許容誤差（CSS ピクセル）
+const only = opt('only', null);
+const wanted = (name) => !only || only.split(',').includes(name);
 
 const results = [];
 function check(name, ok, detail = '') {
@@ -188,6 +199,8 @@ async function testOverview(page, ds, clusters, size) {
   const ls = st.location;
   check('全体が見える視点では、どのクラスタの内部でもなく「最寄り: …」と方向が出る', ls.kind === 'nearest' && /^最寄り: .+ のクラスタ/.test(loc.text) && ls.direction && loc.text.includes(ls.direction.word),
     `${JSON.stringify(loc.text)}`);
+  check('現在地の表示に距離の数値は出ない（名前と方向だけ）。距離は検証用の状態が返す', ls.name !== null && loc.text === `最寄り: ${ls.name} のクラスタ ${ls.direction.arrow} ${ls.direction.word}` && typeof ls.distance === 'number' && ls.distance > 0,
+    `${JSON.stringify(loc.text)}、状態の距離 ${ls.distance}`);
   await page.screenshot({ path: path.join(outDir, '1-overview.png') });
   console.log(`  全体が見える視点 → ${path.relative(root, path.join(outDir, '1-overview.png'))}`);
 }
@@ -335,23 +348,6 @@ async function testClickToFly(page, ds, clusters, coarse, size) {
     check('選択の検証に使う点が見つかる', false);
   }
 
-  // 目印の上で押して、外へドラッグしても、視点は回らず選択も変わらない（目印の上の操作はカメラ・ピッキングに届かない）
-  await goTo(page, home.pos, home.look);
-  const stD = await labelState(page);
-  const lD = stD.labels.filter((x) => x.visible)[0];
-  const dBefore = await state(page);
-  const selBefore = await ix(page);
-  await page.mouse.move(lD.x, lD.y);
-  await page.mouse.down();
-  await page.mouse.move(lD.x + 120, lD.y + 90, { steps: 6 });
-  await page.mouse.up();
-  await frames(page, 3);
-  const dAfter = await state(page);
-  const selAfter = await ix(page);
-  check('目印の上で押して外へドラッグしても、視点は回らず、点の選択も変わらず、飛びもしない',
-    len(sub(dAfter.direction, dBefore.direction)) < 1e-9 && len(sub(dAfter.position, dBefore.position)) < 1e-9 && selAfter.selected === selBefore.selected,
-    `向きの変化 ${len(sub(dAfter.direction, dBefore.direction)).toExponential(2)}、選択 ${selAfter.selected}`);
-
   // 俯瞰モード: 飛行モードへ切り替えてから移動する
   console.log('\n[俯瞰モードでの目印のクリック]');
   await goTo(page, home.pos, home.look);
@@ -435,6 +431,367 @@ async function testToggle(page) {
   check('Ctrl+L では切り替わらない', (await labelState(page)).enabled);
 }
 
+// ---------- 目印の上のホイールとドラッグ ----------
+
+/** 目印のない場所（canvas が最前面）の点。 */
+async function emptyPoint(page) {
+  return page.evaluate(() => {
+    for (const [x, y] of [[640, 70], [300, 320], [900, 380], [200, 500], [1000, 250]]) {
+      if (x < innerWidth && y < innerHeight && document.elementFromPoint(x, y)?.tagName === 'CANVAS') return { x, y };
+    }
+    return null;
+  });
+}
+
+/** 画面に出ていて、中心が最前面にある目印（その位置でホイールとドラッグを試せる）。 */
+async function topVisibleChip(page, nth = 0) {
+  const st = await labelState(page);
+  const ids = [];
+  for (const l of st.labels.filter((x) => x.visible).sort((a, b) => a.distance - b.distance)) {
+    const ok = await page.evaluate(([x, y, id]) => document.elementFromPoint(x, y)?.closest?.('.cluster-label')?.dataset.clusterId === String(id), [l.x, l.y, l.id]);
+    if (ok) ids.push(l);
+  }
+  return ids[nth] ?? null;
+}
+
+async function wheelAt(page, x, y, dy, { ctrl = false } = {}) {
+  await page.mouse.move(x, y);
+  if (ctrl) await page.keyboard.down('Control');
+  await page.mouse.wheel(0, dy);
+  if (ctrl) await page.keyboard.up('Control');
+  await frames(page, 3);
+}
+
+async function dragBy(page, x, y, dx, dy) {
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.mouse.move(x + dx, y + dy, { steps: 8 });
+  await page.mouse.up();
+  await frames(page, 3);
+}
+
+async function testPointerOnLabel(page, clusters) {
+  console.log('\n[目印の上のホイールとドラッグ]');
+  const home = await overviewView(page);
+  await goTo(page, home.pos, home.look);
+  // ホイールの記録（ページのズームを止めているか: 本物の入力の wheel が、ウィンドウに届いた時点で defaultPrevented か）
+  await page.evaluate(() => {
+    window.__wheels = [];
+    window.addEventListener('wheel', (e) => window.__wheels.push({ trusted: e.isTrusted, ctrl: e.ctrlKey, prevented: e.defaultPrevented, onLabel: !!e.target.closest?.('.cluster-label') }));
+  });
+  const empty = await emptyPoint(page);
+  const chip = await topVisibleChip(page, 0);
+  check('前提: 目印のない場所と、中心が最前面の目印がある', !!empty && !!chip);
+  if (!empty || !chip) return;
+
+  // ---- 飛行モードのホイール: 目印の上と、ない場所で、同じだけ速度が変わる ----
+  const sp0 = (await state(page)).speed;
+  await wheelAt(page, empty.x, empty.y, -100);
+  const sp1 = (await state(page)).speed;
+  await page.waitForTimeout(700); // 払いの継続（ホイールの連続操作）を終わらせる
+  await wheelAt(page, chip.x, chip.y, -100);
+  const sp2 = (await state(page)).speed;
+  check('目印の上のホイールで、飛行速度が変わる（目印のない場所と同じ倍率）', sp1 > sp0 && sp2 > sp1 && Math.abs(sp2 / sp1 - sp1 / sp0) < 1e-6,
+    `速度 ${sp0.toPrecision(4)} → ${sp1.toPrecision(4)}（目印のない場所）→ ${sp2.toPrecision(4)}（目印の上）`);
+  await page.waitForTimeout(700);
+  const dprBefore = await page.evaluate(() => devicePixelRatio);
+  await wheelAt(page, chip.x, chip.y, -100, { ctrl: true });
+  const sp3 = (await state(page)).speed;
+  const log = await page.evaluate(() => window.__wheels.filter((w) => w.trusted && w.ctrl));
+  check('目印の上の Ctrl＋ホイールは、ページのズームにならない（既定の動作が止められ、速度も変わらない）',
+    log.length > 0 && log.every((w) => w.prevented && w.onLabel) && sp3 === sp2 && (await page.evaluate(() => devicePixelRatio)) === dprBefore,
+    JSON.stringify(log));
+  await page.waitForTimeout(700);
+  await wheelAt(page, empty.x, empty.y, 100); // 速度を戻す
+  await page.waitForTimeout(700);
+  await wheelAt(page, chip.x, chip.y, 100);
+
+  // ---- 目印の上から始めたドラッグ: 目印のない場所のドラッグと同じだけ視点が回り、飛ばず、点の選択も変えない ----
+  const home2 = await overviewView(page);
+  await goTo(page, home2.pos, home2.look);
+  const chip2 = await topVisibleChip(page, 0);
+  const selBefore = await ix(page);
+  const posBefore = await state(page);
+  await dragBy(page, chip2.x, chip2.y, 120, 90);
+  const afterChip = await state(page);
+  await page.waitForTimeout(300);
+  await frames(page, 2);
+  const afterChipLater = await state(page);
+  await goTo(page, home2.pos, home2.look);
+  const e2 = await emptyPoint(page);
+  await dragBy(page, e2.x, e2.y, 120, 90);
+  const afterEmpty = await state(page);
+  const turned = len(sub(afterChip.direction, posBefore.direction));
+  check('目印の上から始めたドラッグで、視点が回る（目印のない場所のドラッグと同じ量）', turned > 0.05 && len(sub(afterChip.direction, afterEmpty.direction)) < 1e-6,
+    `回転 ${turned.toFixed(4)}、目印のない場所との差 ${len(sub(afterChip.direction, afterEmpty.direction)).toExponential(2)}`);
+  check('目印の上から始めたドラッグは、目印のクリックにならない（クラスタへ飛ばない）・点の選択も変えない',
+    len(sub(afterChip.position, posBefore.position)) < 1e-9 && len(sub(afterChipLater.position, posBefore.position)) < 1e-9 && (await ix(page)).selected === selBefore.selected && afterChipLater.mode === 'fly',
+    `位置の変化 ${len(sub(afterChipLater.position, posBefore.position)).toExponential(2)}、選択 ${(await ix(page)).selected}`);
+
+  // ---- ドラッグのあとでも、動かさないクリックでは飛ぶ ----
+  await goTo(page, home2.pos, home2.look);
+  const chip3 = await topVisibleChip(page, 1);
+  const s0 = await state(page);
+  await page.mouse.move(chip3.x, chip3.y);
+  await page.mouse.down();
+  await page.mouse.move(chip3.x + 2, chip3.y + 1); // 閾値（4px）未満の揺れはクリック
+  await page.mouse.up();
+  await waitFor(page, async (pg) => ({ ok: len(sub((await state(pg)).position, s0.position)) > 1e-6 }), 12);
+  const s1 = await settle(page, 80);
+  const d1 = len(sub(s1.position, clusters[chip3.id].center));
+  check('目印を動かさずに押して離すと（4px 未満の揺れ）、これまでどおりクラスタの手前へ飛ぶ', Math.abs(d1 - 1.15 * clusters[chip3.id].radius / Math.sin(Math.PI / 6)) < 1e-3, `中心までの距離 ${d1.toFixed(4)}`);
+
+  // ---- 俯瞰モード: ホイールで距離が変わる ----
+  await goTo(page, home2.pos, home2.look);
+  await page.keyboard.press('KeyO');
+  await page.waitForFunction(() => window.__explorer.getState().mode === 'overview');
+  await frames(page, 3);
+  const so = await state(page);
+  const dist = (st) => len(sub(st.position, st.pivot));
+  const oempty = await emptyPoint(page);
+  const ochip = await topVisibleChip(page, 0);
+  check('前提（俯瞰モード）: 目印のない場所と、最前面の目印がある', !!oempty && !!ochip);
+  if (oempty && ochip) {
+    await wheelAt(page, oempty.x, oempty.y, -100);
+    const d_a = dist(await state(page));
+    await page.waitForTimeout(700);
+    const ochip2 = await topVisibleChip(page, 0); // 距離が変わったので位置を取り直す
+    await wheelAt(page, ochip2.x, ochip2.y, -100);
+    const d_b = dist(await state(page));
+    const d_0 = dist(so);
+    check('俯瞰モード: 目印の上のホイールで、点群の中心までの距離が変わる（目印のない場所と同じ倍率）', d_a < d_0 && d_b < d_a && Math.abs(d_b / d_a - d_a / d_0) < 1e-6,
+      `距離 ${d_0.toFixed(4)} → ${d_a.toFixed(4)}（目印のない場所）→ ${d_b.toFixed(4)}（目印の上）`);
+    await page.waitForTimeout(700);
+    const ochip3 = await topVisibleChip(page, 0);
+    const dprO = await page.evaluate(() => devicePixelRatio);
+    await wheelAt(page, ochip3.x, ochip3.y, -100, { ctrl: true });
+    const logO = await page.evaluate(() => window.__wheels.filter((w) => w.trusted && w.ctrl && w.onLabel));
+    check('俯瞰モード: 目印の上の Ctrl＋ホイールもページのズームにならず、距離も変わらない', logO.length > 0 && logO.every((w) => w.prevented) && dist(await state(page)) === d_b && (await page.evaluate(() => devicePixelRatio)) === dprO, JSON.stringify(logO));
+    // 目印の上のドラッグで点群の中心のまわりを回る（目印のない場所のドラッグと同じ量）
+    await goTo(page, so.position, so.lookAt);
+    const before = await state(page);
+    const c4 = await topVisibleChip(page, 0);
+    await dragBy(page, c4.x, c4.y, 100, 60);
+    const aChip = await state(page);
+    await goTo(page, so.position, so.lookAt);
+    const e4 = await emptyPoint(page);
+    await dragBy(page, e4.x, e4.y, 100, 60);
+    const aEmpty = await state(page);
+    check('俯瞰モード: 目印の上から始めたドラッグで、点群の中心のまわりを回る（目印のない場所と同じ量）。飛ばない',
+      len(sub(aChip.position, before.position)) > 0.05 && len(sub(aChip.position, aEmpty.position)) < 1e-6 && aChip.mode === 'overview',
+      `位置の変化 ${len(sub(aChip.position, before.position)).toFixed(4)}、目印のない場所との差 ${len(sub(aChip.position, aEmpty.position)).toExponential(2)}、モード ${aChip.mode}`);
+  }
+  await page.keyboard.press('KeyO');
+  await page.waitForFunction(() => window.__explorer.getState().mode === 'fly');
+  await frames(page, 2);
+}
+
+// ---------- 切り替えの安定（ちらつき）と画面の端 ----------
+
+const visibilityKey = (st) => st.labels.map((l) => (l.visible ? '1' : '0')).join('');
+
+async function viewAt(page, v) {
+  await setView(page, v.pos, v.look);
+  await frames(page, 1); // 要求の次のフレームが、新しい視点で目印を更新する
+  return labelState(page);
+}
+
+/**
+ * 経路 `path(t)`（t の小さい側から大きい側へ）を細かく進め、目印の表示が変わる最初の境目を見つける。
+ * 見つけたら、その直前・直後の t と、変わった目印の id・理由（変わったあとの）を返す。
+ */
+async function findBoundary(page, path, t0, t1, n, wantReason, { vanish = false } = {}) {
+  let prev = await viewAt(page, path(t0));
+  let prevT = t0;
+  for (let k = 1; k <= n; k++) {
+    const t = t0 + ((t1 - t0) * k) / n;
+    const st = await viewAt(page, path(t));
+    for (let i = 0; i < st.labels.length; i++) {
+      const a = prev.labels[i], b = st.labels[i];
+      if (a.visible !== b.visible && (!vanish || a.visible) && wantReason.includes(a.visible ? b.reason : a.reason)) {
+        return { before: prevT, after: t, id: b.id, nowVisible: b.visible, reason: a.visible ? b.reason : a.reason };
+      }
+    }
+    prev = st;
+    prevT = t;
+  }
+  return null;
+}
+
+/** 境目をまたぐ 2 つの視点（`tA` は手前、`tB` は向こう）の間で、カメラを往復させて、表示が切り替わる回数を数える。 */
+async function oscillate(page, path, tA, tB, rounds) {
+  await viewAt(page, path(tB)); // 境目の向こう側で落ち着かせる
+  let last = visibilityKey(await viewAt(page, path(tB)));
+  let toggles = 0;
+  for (let k = 0; k < rounds; k++) {
+    const key = visibilityKey(await viewAt(page, path(k % 2 === 0 ? tA : tB)));
+    if (key !== last) toggles++;
+    last = key;
+  }
+  return toggles;
+}
+
+async function testStability(page) {
+  console.log('\n[目印の表示の安定（重なり・画面の端の境目）]');
+  const home = await overviewView(page);
+  const look = home.look;
+  const dir = norm(sub(home.pos, look));
+  const R = len(sub(home.pos, look));
+  const out = (t) => ({ pos: add(look, mul(dir, R * t)), look }); // t が大きいほど離れる（目印が寄り集まる）
+  const inward = (t) => ({ pos: add(look, mul(dir, R * (1.2 - t))), look }); // t が大きいほど近づく（外側の目印が画面の外へ出る）
+  const paths = [
+    ['離れる', out, 1.0, 2.6, 40, ['overlap']],
+    ['近づく', inward, 0.0, 0.8, 40, ['offscreen']],
+  ];
+  let foundAny = 0;
+  for (const [name, path, t0, t1, n, reasons] of paths) {
+    const b = await findBoundary(page, path, t0, t1, n, reasons);
+    if (!b) { console.log(`  ${name}: 境目が見つからない（${reasons.join('・')}）`); continue; }
+    // 粗い境目の中で、細かく境目を探す（前のフレームの結果に依るので、境目の手前へ戻って落ち着かせてから進める）
+    const step = (b.after - b.before) / 24;
+    let fine = null;
+    await viewAt(page, path(b.before - (b.after - b.before) * 3));
+    let prev = visibilityKey(await viewAt(page, path(b.before)));
+    for (let k = 1; k <= 24; k++) {
+      const t = b.before + step * k;
+      const key = visibilityKey(await viewAt(page, path(t)));
+      if (key !== prev) { fine = t; break; }
+    }
+    if (fine === null) { console.log(`  ${name}: 細かい境目が見つからない`); continue; }
+    foundAny++;
+    // 境目をまたぐ隣り合う 2 つの細かい刻みの間を往復する。目印の画面上の動きが、切り替えの幅（間隔 3px・端 7.5px）に収まることも確かめる
+    const sA = await viewAt(page, path(fine - step));
+    const sB = await viewAt(page, path(fine));
+    const la = sA.labels.find((l) => l.id === b.id), lb = sB.labels.find((l) => l.id === b.id);
+    const motion = la.x !== null && lb.x !== null ? Math.hypot(la.x - lb.x, la.y - lb.y) : 0;
+    const toggles = await oscillate(page, path, fine - step, fine, 16);
+    check(`カメラを小さく往復させても、目印の表示が切り替わり続けない（${name}: クラスタ ${b.id} の ${b.reason}、往復の振れは画面上で ${motion.toFixed(2)}px）`, motion < 2 && toggles === 0, `16 往復で切り替わり ${toggles} 回`);
+  }
+  check('重なりまたは画面の端の境目が、少なくとも 1 つ見つかった', foundAny >= 1, `${foundAny} 個`);
+}
+
+async function testEdges(page, clusters, size) {
+  console.log('\n[画面の端]');
+  const home = await overviewView(page);
+  const dir = norm(sub(home.pos, home.look));
+  const R = len(sub(home.pos, home.look));
+  const side = norm([dir[2], 0, -dir[0]]);
+  let views = 0, protruding = 0, cut = 0, centerInsideRectOut = 0;
+  const bad = [];
+  for (const k of [-0.5, -0.3, -0.15, 0, 0.15, 0.3, 0.5, 0.7]) {
+    for (const zoom of [0.55, 0.8]) {
+      const pos = add(add(home.look, mul(dir, R * zoom)), mul(side, R * k));
+      const s = await goTo(page, pos, add(home.look, mul(side, R * k * 0.35)));
+      const st = await labelState(page);
+      views++;
+      const rects = await page.evaluate(() => [...document.querySelectorAll('.cluster-label')].map((e) => {
+        const r = e.getBoundingClientRect();
+        return { id: Number(e.dataset.clusterId), l: r.left, t: r.top, r: r.right, b: r.bottom, hidden: getComputedStyle(e).visibility === 'hidden', w: innerWidth, h: innerHeight };
+      }));
+      for (const r of rects) {
+        if (r.hidden) continue;
+        if (r.l < 0 || r.t < 0 || r.r > r.w || r.b > r.h) { protruding++; bad.push([k, zoom, r.id, r.l, r.t, r.r, r.b]); }
+      }
+      for (const l of st.labels) {
+        const p = projectIndependent(s, clusters[l.id].center, size.width, size.height);
+        if (p && p.x >= 0 && p.x <= size.width && p.y >= 0 && p.y <= size.height && !l.visible && l.reason === 'offscreen') centerInsideRectOut++;
+        if (l.visible) cut += 0;
+      }
+    }
+  }
+  check(`画面の端で、表示中の目印が画面からはみ出さない（${views} 視点）`, protruding === 0, `はみ出し ${protruding} 件 ${JSON.stringify(bad.slice(0, 3))}`);
+  check('中心は画面の内側にあっても、矩形がはみ出す目印は出さない（理由 offscreen）', centerInsideRectOut > 0, `${centerInsideRectOut} 件`);
+}
+
+// ---------- フォーカス ----------
+
+async function testFocus(page, clusters) {
+  console.log('\n[フォーカス中の目印が出なくなるとき]');
+  const home = await overviewView(page);
+  await goTo(page, home.pos, home.look);
+  const st = await labelState(page);
+  const target = st.labels.filter((l) => l.visible).sort((a, b) => a.distance - b.distance)[0];
+  await page.evaluate((id) => document.querySelector(`.cluster-label[data-cluster-id="${id}"]`).focus(), target.id);
+  const focusedBefore = await page.evaluate(() => Number(document.activeElement.dataset?.clusterId ?? -1));
+  check('前提: 目印にフォーカスしている', focusedBefore === target.id, `フォーカス ${focusedBefore}`);
+  // そのクラスタの内部へ入ると、目印は出なくなる（理由 inside）。ほかの目印は出ている
+  const c = clusters[target.id];
+  await goTo(page, add(c.center, mul(norm(c.center), c.radius * 0.3)), c.center);
+  const st2 = await labelState(page);
+  const hidden = st2.labels.find((l) => l.id === target.id);
+  const others = st2.labels.filter((l) => l.visible);
+  const active = await page.evaluate(() => ({ cls: document.activeElement?.classList?.contains('cluster-label') ? Number(document.activeElement.dataset.clusterId) : null, tag: document.activeElement?.tagName }));
+  check('前提: フォーカス中の目印が出なくなった（クラスタの内部）。ほかの目印は出ている', !hidden.visible && others.length > 0, `理由 ${hidden.reason}、出ている ${others.length} 個`);
+  check('フォーカス中の目印が出なくなると、フォーカスは次に出ている目印へ移る（body へ落ちない）', active.cls !== null && active.cls !== target.id && others.some((l) => l.id === active.cls), JSON.stringify(active));
+  const visibleNow = await page.evaluate(() => getComputedStyle(document.activeElement).visibility);
+  check('移った先の目印は見えている（フォーカスの輪が出る）', visibleNow === 'visible');
+  await page.evaluate(() => document.activeElement && document.activeElement.blur());
+
+  // 出ている目印がほかにないときは、フォーカスを外す（隠れた目印にフォーカスを残さない）
+  await goTo(page, add(c.center, mul(norm(c.center), c.radius * 0.3)), c.center);
+  await page.evaluate((id) => document.querySelector(`.cluster-label[data-cluster-id="${id}"]`)?.focus(), target.id);
+  // 後ろを向けて、すべての目印を出なくする（点群の外から外向きを見る）
+  const away = norm(c.center);
+  await goTo(page, mul(away, 3.5), mul(away, 7));
+  const st3 = await labelState(page);
+  const active3 = await page.evaluate(() => document.activeElement?.tagName);
+  check('すべての目印が出なくなったときは、フォーカスが隠れた目印に残らない', st3.labels.every((l) => !l.visible) && active3 === 'BODY', `出ている ${st3.labels.filter((l) => l.visible).length} 個、フォーカス ${active3}`);
+
+  // 重なりでは隠さない: 重なりが起きる境目で、フォーカス中の遠い目印が残り、近い目印が隠れる
+  const dir = norm(sub(home.pos, home.look));
+  const R = len(sub(home.pos, home.look));
+  const out = (t) => ({ pos: add(home.look, mul(dir, R * t)), look: home.look });
+  const b = await findBoundary(page, out, 1.0, 2.6, 40, ['overlap'], { vanish: true });
+  if (!b) { check('前提: 離れると重なりで隠れる目印がある', false); return; }
+  // 隠れた直前の視点で、隠れる側の目印にフォーカスし、境目の向こうへ進める
+  await viewAt(page, out(b.before - (b.after - b.before) * 3)); // 出ている状態へ戻してから（切り替えに幅があるので）
+  const stB = await viewAt(page, out(b.before));
+  check('前提: 境目の直前では、その目印は出ている', stB.labels.find((l) => l.id === b.id).visible);
+  await page.evaluate((id) => document.querySelector(`.cluster-label[data-cluster-id="${id}"]`).focus(), b.id);
+  const stF = await viewAt(page, out(b.after));
+  const lf = stF.labels.find((l) => l.id === b.id);
+  const act = await page.evaluate(() => (document.activeElement?.classList?.contains('cluster-label') ? Number(document.activeElement.dataset.clusterId) : null));
+  check(`フォーカス中の目印（クラスタ ${b.id}）は、ほかの目印と重なっても隠れず、フォーカスも残る`, lf.visible && act === b.id, `visible ${lf.visible}、reason ${lf.reason}、フォーカス ${act}`);
+  const rects = [];
+  for (const l of stF.labels.filter((x) => x.visible)) { const r = await elementCenter(page, l.id); rects.push({ id: l.id, x: r.x, y: r.y, w: r.w, h: r.h }); }
+  check('そのとき、表示中の目印は画面上で重なっていない', rectsOverlapAny(rects) === null, JSON.stringify(rectsOverlapAny(rects)));
+  await page.evaluate(() => document.activeElement && document.activeElement.blur());
+}
+
+// ---------- 現在地の表示の更新 ----------
+
+async function testLocationDom(page) {
+  console.log('\n[現在地の表示の更新]');
+  await goTo(page, [0, 0, 2.2], [0, 0, 0]);
+  const st0 = await labelState(page);
+  await page.evaluate(() => {
+    const el = document.getElementById('cluster-location');
+    window.__locMutations = [];
+    window.__locNodes = [...el.children];
+    new MutationObserver((rs) => window.__locMutations.push(...rs.map((r) => r.type))).observe(el, { childList: true, characterData: true, attributes: true, subtree: true });
+  });
+  // 向きが変わらない範囲で、少しずつ近づく（縁までの距離だけが変わる）
+  let moved = 0, lastDistance = st0.location.distance;
+  let sameText = true;
+  for (const z of [2.18, 2.16, 2.14, 2.12]) {
+    await goTo(page, [0, 0, z], [0, 0, 0]);
+    const st = await labelState(page);
+    if (st.location.text !== st0.location.text) sameText = false;
+    if (Math.abs(st.location.distance - lastDistance) > 1e-6) moved++;
+    lastDistance = st.location.distance;
+  }
+  const res = await page.evaluate(() => ({ mutations: window.__locMutations.length, same: [...document.getElementById('cluster-location').children].every((c, i) => c === window.__locNodes[i]), n: window.__locNodes.length }));
+  check('距離だけが変わる移動では、現在地の表示の要素を書き換えない（DOM の変更 0 件、要素も作り直さない）', moved >= 3 && sameText && res.mutations === 0 && res.same && res.n === 2,
+    `距離が変わった ${moved} 回、DOM の変更 ${res.mutations} 件、要素 ${res.n} 個`);
+  // 向き（文面）が変わるときは、文字だけを書き換える（要素は同じ）
+  const c0 = (await labelState(page)).location.text;
+  await goTo(page, [0, 0, 2.2], [3, 0, 2.2]);
+  const c1 = (await labelState(page)).location.text;
+  const res2 = await page.evaluate(() => ({ same: [...document.getElementById('cluster-location').children].every((c, i) => c === window.__locNodes[i]), text: document.getElementById('cluster-location').innerText.trim(), types: window.__locMutations.slice() }));
+  check('文面が変わるときは、文字だけを書き換え、要素は作り直さない', c1 !== c0 && res2.same && res2.text === c1 && res2.types.every((t) => t === 'characterData' || t === 'childList' || t === 'attributes'),
+    `${JSON.stringify(c0)} → ${JSON.stringify(c1)}`);
+}
+
 async function testResize(browser, base, clusters) {
   console.log('\n[画面の大きさを変える]');
   const page = await openPage(browser, base, { width: 1280, height: 800 });
@@ -455,7 +812,24 @@ async function testResize(browser, base, clusters) {
       n++;
     }
     check(`${w}x${h}: ${n} 個の目印の位置（報告と要素の見た目）が独立の投影と一致する`, n > 0 && worst <= LABEL_PX_TOLERANCE + 0.5, `最大誤差 ${worst.toFixed(3)}px`);
-    if (w === 600) await page.screenshot({ path: path.join(outDir, '6-portrait.png') });
+    if (w === 600) {
+      await page.screenshot({ path: path.join(outDir, '6-portrait.png') });
+      const hud = await page.evaluate(() => {
+        const el = document.getElementById('hud');
+        const r = el.getBoundingClientRect();
+        const items = [...el.querySelectorAll('.hud-item')];
+        const lines = new Set(items.map((e) => Math.round(e.getBoundingClientRect().top)));
+        const loc = document.getElementById('cluster-location').getBoundingClientRect();
+        return {
+          right: r.right, left: r.left, innerWidth, help: el.innerText.split('\n')[2],
+          brokenItems: items.filter((e) => e.getClientRects().length !== 1).length, helpLines: lines.size, n: items.length,
+          locBottom: loc.bottom, hudTop: r.top,
+        };
+      });
+      check('幅 600 の画面: HUD が画面からはみ出さず、操作説明が複数行に折り返される（項目の途中では折り返さない）',
+        hud.left >= 0 && hud.right <= hud.innerWidth && hud.brokenItems === 0 && hud.helpLines >= 2 && hud.n >= 10, JSON.stringify(hud));
+      check('幅 600 の画面: 操作説明に L キーと M キーがある。現在地の表示は HUD の上にあって重ならない', hud.help.includes('L 目印の表示') && hud.help.includes('M ミニマップ') && hud.locBottom <= hud.hudTop, `現在地の下端 ${hud.locBottom}、HUD の上端 ${hud.hudTop}`);
+    }
   }
   await page.close();
 }
@@ -484,7 +858,7 @@ async function testNoClusters(browser, base) {
       locationHidden: document.getElementById('cluster-location').hidden,
       hud: document.getElementById('hud').innerText.split('\n')[2],
     }));
-    check('目印の要素も現在地の表示も出ない。HUD に L キーの説明もない', dom.chips === 0 && dom.containerHidden && dom.locationHidden && !dom.hud.includes('L 目印'), JSON.stringify(dom));
+    check('目印の要素も現在地の表示も出ない。HUD に L キーの説明がなく、M キーの説明は残る', dom.chips === 0 && dom.containerHidden && dom.locationHidden && !dom.hud.includes('L 目印') && dom.hud.includes('M ミニマップ'), JSON.stringify(dom));
     await page.keyboard.press('KeyL');
     await frames(page, 2);
     check('L キーを押してもエラーにならず、無効のまま', (await labelState(page)).enabled === false);
@@ -531,16 +905,21 @@ async function main() {
     const page = await openPage(browser, base, size);
     await frames(page, 3);
 
-    await testOverview(page, ds, clusters, size);
-    await testBehindAndOffscreen(page, clusters, size);
-    await testInside(page, clusters, size);
-    await testToggle(page);
-    await testKeyboard(page, clusters);
-    await testClickToFly(page, ds, clusters, coarse, size);
-    await takeShots(page, ds, clusters);
+    if (wanted('overview')) await testOverview(page, ds, clusters, size);
+    if (wanted('offscreen')) await testBehindAndOffscreen(page, clusters, size);
+    if (wanted('inside')) await testInside(page, clusters, size);
+    if (wanted('toggle')) await testToggle(page);
+    if (wanted('keyboard')) await testKeyboard(page, clusters);
+    if (wanted('click')) await testClickToFly(page, ds, clusters, coarse, size);
+    if (wanted('pointer')) await testPointerOnLabel(page, clusters);
+    if (wanted('stability')) await testStability(page);
+    if (wanted('edges')) await testEdges(page, clusters, size);
+    if (wanted('focus')) await testFocus(page, clusters);
+    if (wanted('location')) await testLocationDom(page);
+    if (wanted('shots')) await takeShots(page, ds, clusters);
     await page.close();
-    await testResize(browser, base, clusters);
-    await testNoClusters(browser, base);
+    if (wanted('resize')) await testResize(browser, base, clusters);
+    if (wanted('noclusters')) await testNoClusters(browser, base);
 
     check('コンソールエラーがない', consoleErrors.length === 0, consoleErrors.join(' | '));
   } finally {

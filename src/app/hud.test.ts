@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatHud, formatSpeed } from './hud';
+import { formatHud, formatSpeed, hudHelpItems } from './hud';
 
 const base = { datasetName: 'MNIST 10k', pointCount: 10000, pointSize: 0.004, speed: 0.15, viewParams: 'pos=0,0,2.6&look=0,0,2.35' };
 
@@ -46,5 +46,31 @@ describe('formatSpeed', () => {
   it('3 桁の有効数字にする', () => {
     expect(formatSpeed(0.005)).toBe('0.00500');
     expect(formatSpeed(2)).toBe('2.00');
+  });
+});
+
+describe('formatHud の機能の説明（目印・ミニマップ）', () => {
+  it('機能の有無を引数で受け取り、操作説明の行に L・M キーを含める', () => {
+    const lines = formatHud({ ...base, mode: 'fly', labels: true, minimap: true }).split('\n');
+    expect(lines).toHaveLength(4);
+    expect(lines[2].endsWith('O 俯瞰モードへ / L 目印の表示 / M ミニマップ')).toBe(true);
+    expect(lines[3]).toBe('?pos=0,0,2.6&look=0,0,2.35');
+  });
+  it('俯瞰モードでも含める', () => {
+    const lines = formatHud({ ...base, mode: 'overview', labels: true, minimap: true }).split('\n');
+    expect(lines[2].endsWith('O 飛行モードへ / L 目印の表示 / M ミニマップ')).toBe(true);
+  });
+  it('使えない機能（クラスタのないデータセット）は含めない。省略時もどちらも含めない', () => {
+    const noLabels = formatHud({ ...base, mode: 'fly', labels: false, minimap: true }).split('\n')[2]!;
+    expect(noLabels).not.toContain('L 目印');
+    expect(noLabels.endsWith('O 俯瞰モードへ / M ミニマップ')).toBe(true);
+    const none = formatHud({ ...base, mode: 'fly' }).split('\n')[2]!;
+    expect(none).not.toContain('L 目印');
+    expect(none).not.toContain('M ミニマップ');
+  });
+  it('操作説明の項目は ` / ` でつなぐ。項目の中に区切りは含まれない', () => {
+    const items = hudHelpItems({ ...base, mode: 'fly', labels: true, minimap: true });
+    expect(items.every((x) => !x.includes(' / '))).toBe(true);
+    expect(formatHud({ ...base, mode: 'fly', labels: true, minimap: true }).split('\n')[2]).toBe(items.join(' / '));
   });
 });
