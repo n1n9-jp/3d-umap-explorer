@@ -549,12 +549,15 @@ describe('FlyCameraControls: ホイールの払い（マウスとタッチパッ
     r.el.emit('wheel', { deltaY, deltaMode: 0, timeStamp, ...extra });
 
   /**
-   * タッチパッドの 2 本指スクロールを模した列。小さな移動量が一定の比率で減衰しながら続き、
-   * 合計が `total` ピクセルになる（慣性つき）。
+   * タッチパッドの 2 本指スクロールを模した列。小さな移動量から立ち上がり（先頭の `ramp` 個）、
+   * その後は一定の比率で減衰しながら続き（慣性つき）、合計が `total` ピクセルになる。
+   * 実機のタッチパッドは小さな値から始まるので、先頭から大きな値は出さない。
+   * 立ち上がりのあとの最速部分は 50 ピクセルを越えうる（マウスのノッチ相当の大きさになる）。
    */
-  function touchpadFlick(total: number, startMs = 0, count = 100, decay = 0.97, intervalMs = 16) {
-    const first = (total * (1 - decay)) / (1 - decay ** count);
-    return Array.from({ length: count }, (_, i) => ({ deltaY: first * decay ** i, timeStamp: startMs + i * intervalMs }));
+  function touchpadFlick(total: number, startMs = 0, count = 100, decay = 0.97, intervalMs = 16, ramp = 10) {
+    const raw = Array.from({ length: count }, (_, i) => decay ** i * Math.min(1, (i + 1) / ramp));
+    const scale = total / raw.reduce((a, v) => a + v, 0);
+    return raw.map((v, i) => ({ deltaY: v * scale, timeStamp: startMs + i * intervalMs }));
   }
 
   it('マウスホイール: deltaY=100 を 1 回で約 1.1 倍に減速し、-100 で約 1.1 倍に加速する', () => {
@@ -643,6 +646,111 @@ describe('FlyCameraControls: ホイールの払い（マウスとタッチパッ
     // ピンチは払いの累積にも数えない
     send(-100, 5000);
     expect(r.controls.speed / 0.15).toBeCloseTo(1.1, 12);
+  });
+
+  it('マウスホイール: ピクセル単位の ±100 を 50 ミリ秒間隔で 20 回続けても、制限されず 1.1^20 倍になる', () => {
+    for (let i = 0; i < 20; i++) send(-100, i * 50);
+    expect(r.controls.speed / 0.15).toBeCloseTo(1.1 ** 20, 9);
+
+    const down = createRig();
+    for (let i = 0; i < 20; i++) down.el.emit('wheel', { deltaY: 100, deltaMode: 0, timeStamp: i * 50 });
+    expect(down.controls.speed / 0.15).toBeCloseTo(1 / 1.1 ** 20, 9);
+  });
+
+  it('マウスホイール: 行単位（deltaMode=1）の ±3 を連続で 20 回送っても、制限されず 1.1^20 倍になる', () => {
+    for (let i = 0; i < 20; i++) r.el.emit('wheel', { deltaY: -3, deltaMode: 1, timeStamp: i * 50 });
+    expect(r.controls.speed / 0.15).toBeCloseTo(1.1 ** 20, 9);
+
+    const down = createRig();
+    for (let i = 0; i < 20; i++) down.el.emit('wheel', { deltaY: 3, deltaMode: 1, timeStamp: i * 50 });
+    expect(down.controls.speed / 0.15).toBeCloseTo(1 / 1.1 ** 20, 9);
+  });
+
+  it('マウスホイール: ページ単位（deltaMode=2）の ±1 も、連続で送って制限されない', () => {
+    for (let i = 0; i < 20; i++) r.el.emit('wheel', { deltaY: -1, deltaMode: 2, timeStamp: i * 50 });
+    expect(r.controls.speed / 0.15).toBeCloseTo(1.1 ** 20, 9);
+  });
+
+  it('マウスホイール: 1 イベントあたり 3 ノッチの上限は、ノッチ扱いのイベントにも掛かる', () => {
+    send(-1000, 0);
+    expect(r.controls.speed / 0.15).toBeCloseTo(1.1 ** 3, 12);
+    const rig = createRig();
+    rig.el.emit('wheel', { deltaY: -30, deltaMode: 1, timeStamp: 0 });
+    expect(rig.controls.speed / 0.15).toBeCloseTo(1.1 ** 3, 12);
+  });
+
+  it('タッチパッド: 50 ピクセル未満の小さな移動量だけの列（合計約 2000 ピクセル）は、これまでどおり 2 倍以内', () => {
+    const flick = touchpadFlick(2000, 0, 200, 0.985);
+    expect(flick.reduce((a, e) => a + e.deltaY, 0)).toBeCloseTo(2000, 9);
+    expect(Math.max(...flick.map((e) => e.deltaY))).toBeLessThan(50);
+
+    for (const e of flick) send(-e.deltaY, e.timeStamp);
+    const fast = r.controls.speed / 0.15;
+    expect(fast).toBeLessThanOrEqual(2);
+    expect(fast).toBeGreaterThan(1.9); // 上限（1.1^7）まで効く
+
+    const down = createRig();
+    for (const e of flick) down.el.emit('wheel', { deltaY: e.deltaY, deltaMode: 0, timeStamp: e.timeStamp });
+    expect(0.15 / down.controls.speed).toBeLessThanOrEqual(2);
+  });
+
+  it('タッチパッド: 立ち上がりのあとの最速部分が 50 ピクセルを越えても、払い全体は 2 倍以内', () => {
+    const flick = touchpadFlick(3000);
+    expect(Math.max(...flick.map((e) => e.deltaY))).toBeGreaterThan(50);
+    for (const e of flick) send(-e.deltaY, e.timeStamp);
+    expect(r.controls.speed / 0.15).toBeLessThanOrEqual(2);
+  });
+
+  it('マウスのノッチと小さな移動量のイベントが混在しても、小さな移動量の側の累積上限（7 ノッチ）が保たれる', () => {
+    // 払いの頭にあるノッチ 3 つは、そのまま 3 ノッチ反映される。
+    for (let i = 0; i < 3; i++) send(-100, i * 50);
+    expect(r.controls.speed / 0.15).toBeCloseTo(1.1 ** 3, 9);
+    // そのあと小さな移動量が続くと、累積は 7 ノッチで止まる（途中にノッチが混ざっても、その上限を越えない）。
+    for (let i = 0; i < 100; i++) send(i % 5 === 4 ? -100 : -20, 116 + i * 16);
+    expect(r.controls.speed / 0.15).toBeCloseTo(1.1 ** (3 + 7), 9);
+    // 間をあけて払いが変われば、ノッチはまた制限なく効く。
+    for (let i = 0; i < 5; i++) send(-100, 5000 + i * 50);
+    expect(r.controls.speed / 0.15).toBeCloseTo(1.1 ** (3 + 7 + 5), 9);
+  });
+
+  it('マウスのノッチと小さな移動量が交互に届いても、小さな移動量の側だけで 7 ノッチを越えない', () => {
+    // 小さな移動量（0.2 ノッチ）だけで 7 ノッチ分を使い切ったあとは、ノッチを混ぜても増えない。
+    for (let i = 0; i < 100; i++) send(-20, i * 16);
+    const saturated = r.controls.speed;
+    expect(saturated / 0.15).toBeCloseTo(1.1 ** 7, 9);
+    send(-100, 100 * 16);
+    send(-20, 101 * 16);
+    expect(r.controls.speed).toBe(saturated);
+  });
+
+  it('横方向だけのスクロール（deltaY=0）は、速度を変えず、払いの区切りにも影響しない', () => {
+    // 小さな移動量で上限（7 ノッチ）まで使い切る。最後のイベントは 99 * 16 = 1584 ミリ秒。
+    for (let i = 0; i < 100; i++) send(-20, i * 16);
+    const saturated = r.controls.speed;
+    expect(saturated / 0.15).toBeCloseTo(1.1 ** 7, 9);
+
+    // 150 ミリ秒未満の間隔で横スクロールが続く。払いが続いているなら、最後の縦スクロールから 150 ミリ秒を越える。
+    let count = 0;
+    r.controls.addEventListener('speedchange', () => count++);
+    const sideways = [1584 + 100, 1584 + 200];
+    for (const t of sideways) {
+      const ev = r.el.emit('wheel', { deltaY: 0, deltaX: 80, deltaMode: 0, timeStamp: t });
+      expect(ev.defaultPrevented).toBe(true);
+    }
+    expect(r.controls.speed).toBe(saturated);
+    expect(count).toBe(0);
+
+    // 最後の縦スクロールから 260 ミリ秒あいている。横スクロールが払いを延ばしていなければ、新しい払いとして効く。
+    send(-20, 1584 + 260);
+    expect(r.controls.speed / saturated).toBeCloseTo(1.1 ** 0.2, 9);
+  });
+
+  it('横方向のスクロールが間に挟まっても、続いている払いは切れず、累積も保たれる', () => {
+    for (let i = 0; i < 100; i++) {
+      send(-20, i * 16);
+      r.el.emit('wheel', { deltaY: 0, deltaX: 40, deltaMode: 0, timeStamp: i * 16 + 8 });
+    }
+    expect(r.controls.speed / 0.15).toBeCloseTo(1.1 ** 7, 9);
   });
 
   it('ホイール操作は飛行を中断しない（払いの制限を入れても変わらない）', () => {
