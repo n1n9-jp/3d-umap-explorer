@@ -2,7 +2,7 @@ import { EventDispatcher, Euler, Vector3 } from 'three';
 import type { PerspectiveCamera } from 'three';
 import { FlyMotion, createMoveInput } from './FlyMotion';
 import type { FlyMotionOptions, FlyPose, FlyToOptions, MoveInput } from './FlyMotion';
-import { WheelGestureLimiter } from './WheelGesture';
+import { isDiscreteWheelDelta, WheelGestureLimiter } from './WheelGesture';
 
 export type { FlyPose, FlyToOptions } from './FlyMotion';
 
@@ -321,6 +321,8 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
     e.preventDefault();
     // ピンチ操作（ctrlKey つきのホイール）はページのズームに当たる操作で、速度の変更ではない。
     if (e.ctrlKey) return;
+    // 横方向だけのスクロールは、速度の変更ではなく、払いの継続にも数えない。
+    if (e.deltaY === 0) return;
     // deltaMode: 0 = ピクセル、1 = 行、2 = ページ。1 ノッチ = 100 ピクセル = 3 行 = 1 ページ分。
     let notches: number;
     switch (e.deltaMode) {
@@ -334,7 +336,7 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
         notches = e.deltaY / PIXELS_PER_NOTCH;
     }
     const timeMs = typeof e.timeStamp === 'number' ? e.timeStamp : performance.now();
-    const effective = this.wheelGesture.consume(notches, timeMs);
+    const effective = this.wheelGesture.consume(notches, timeMs, isDiscreteWheelDelta(e.deltaMode, e.deltaY));
     if (effective !== 0 && this.motion.applyWheel(effective)) this.dispatchSpeedChange();
   };
 
