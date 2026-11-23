@@ -3,12 +3,19 @@ import type { PerspectiveCamera } from 'three';
 import { FlyMotion, createMoveInput } from './FlyMotion';
 import type { FlyMotionOptions, FlyPose, FlyToOptions, MoveInput } from './FlyMotion';
 import { isDiscreteWheelDelta, WheelGestureLimiter } from './WheelGesture';
+import { eventTimeMs, RotationInertia } from './RotationInertia';
+import type { RotationInertiaOptions } from './RotationInertia';
 
 export type { FlyPose, FlyToOptions } from './FlyMotion';
 
 export interface FlyCameraControlsOptions extends FlyMotionOptions {
   /** ドラッグ 1 ピクセルあたりの回転量（ラジアン）。 */
   rotateSpeed?: number;
+  /**
+   * ドラッグを離したあとの回転の慣性。`timeConstant` を 0 以下にすると無効。
+   * 省略すると、時定数 0.3 秒で、「動きを減らす」設定（`prefers-reduced-motion: reduce`）なら無効。
+   */
+  rotationInertia?: RotationInertiaOptions;
 }
 
 export interface FlyCameraControlsEventMap {
@@ -66,7 +73,8 @@ function isEditableTarget(target: EventTarget | null): boolean {
  * 点群の内部を飛び回るための一人称の飛行カメラ操作。
  *
  * - 移動: W/S 前後、A/D 左右、E/Q 上下（ワールド）、矢印キーは WASD と同じ
- * - 視点: 左ボタンのドラッグ（ドラッグした向きへ視線が動く）
+ * - 視点: 左ボタンのドラッグ（ドラッグした向きへ視線が動く）。離したあとも、離す直前の速さで回り続けて
+ *   指数的に減速する（慣性。`RotationInertia`）。ポインタの押下・`flyTo`・`setPose`・無効化・フォーカスの喪失で止まる
  * - 速度: ホイール（乗算的。1 ノッチ ≈ 1.1 倍。連続したイベントは 1 回の払いとみなし、
  *   1 回の払いで変わる倍率は約 2 倍までに抑える。ピンチ（ctrlKey つき）は速度を変えない）
  * - 自動移動: `flyTo`
@@ -86,6 +94,7 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
   private readonly euler = new Euler(0, 0, 0, 'YXZ');
   private readonly dirTmp = new Vector3();
   private readonly wheelGesture = new WheelGestureLimiter();
+  private readonly inertia: RotationInertia;
 
   private _enabled = true;
   private dragPointerId: number | null = null;
@@ -101,6 +110,7 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
     this.rotateSpeed = options.rotateSpeed ?? 0.0025;
     this.motion = new FlyMotion(options);
     this.win = domElement.ownerDocument?.defaultView ?? window;
+    this.inertia = new RotationInertia(options.rotationInertia, this.win);
 
     camera.updateMatrixWorld();
     this.motion.position.copy(camera.getWorldPosition(new Vector3()));
@@ -111,8 +121,8 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
     this.domElement.addEventListener('pointerdown', this.onPointerDown);
     this.domElement.addEventListener('pointermove', this.onPointerMove);
     this.domElement.addEventListener('pointerup', this.onPointerUp);
-    this.domElement.addEventListener('pointercancel', this.onPointerUp);
-    this.domElement.addEventListener('lostpointercapture', this.onPointerUp);
+    this.domElement.addEventListener('pointercancel', this.onPointerCancel);
+    this.domElement.addEventListener('lostpointercapture', this.onPointerCancel);
     this.domElement.addEventListener('wheel', this.onWheel, { passive: false });
     this.win.addEventListener('keydown', this.onKeyDown);
     this.win.addEventListener('keyup', this.onKeyUp);
@@ -186,6 +196,28 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
     this.motion.timeConstant = value;
   }
 
+  /**
+   * ドラッグを離したあとの回転の慣性の時定数（秒）。0 以下で無効。
+   * 代入しなければ既定の 0.3 秒（「動きを減らす」設定なら無効）。`null` を代入すると、その既定へ戻す。
+   */
+  get rotationTimeConstant(): number {
+    return this.inertia.timeConstant;
+  }
+
+  set rotationTimeConstant(value: number | null) {
+    this.inertia.timeConstant = value;
+  }
+
+  /** 回転の慣性で回っている最中なら true。 */
+  get isRotatingByInertia(): boolean {
+    return this.inertia.active;
+  }
+
+  /** 回転の慣性を止める（向きはそのまま）。 */
+  stopRotationInertia(): void {
+    this.inertia.stop();
+  }
+
   /** 自動移動の最中なら true。 */
   get isFlying(): boolean {
     return this.motion.isFlying;
@@ -194,6 +226,7 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
   // ---- 姿勢 ----
 
   setPose(position: Vector3, lookAt: Vector3): void {
+    this.inertia.stop();
     this.motion.setPose(position, lookAt);
     this.syncCamera();
     this.dispatchEvent({ type: 'change' });
@@ -210,6 +243,7 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
    */
   flyTo(target: Vector3, options?: FlyToOptions): void {
     if (!this._enabled || this.disposed) return;
+    this.inertia.stop();
     this.motion.flyTo(target, options);
   }
 
@@ -225,6 +259,7 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
    */
   update(dtSeconds: number): boolean {
     if (!this._enabled || this.disposed) return false;
+    this.stepInertia(dtSeconds);
     const moved = this.motion.step(dtSeconds, this.input);
     if (moved) {
       this.syncCamera();
@@ -240,8 +275,8 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
     this.domElement.removeEventListener('pointerdown', this.onPointerDown);
     this.domElement.removeEventListener('pointermove', this.onPointerMove);
     this.domElement.removeEventListener('pointerup', this.onPointerUp);
-    this.domElement.removeEventListener('pointercancel', this.onPointerUp);
-    this.domElement.removeEventListener('lostpointercapture', this.onPointerUp);
+    this.domElement.removeEventListener('pointercancel', this.onPointerCancel);
+    this.domElement.removeEventListener('lostpointercapture', this.onPointerCancel);
     this.domElement.removeEventListener('wheel', this.onWheel);
     this.win.removeEventListener('keydown', this.onKeyDown);
     this.win.removeEventListener('keyup', this.onKeyUp);
@@ -253,6 +288,19 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
   }
 
   // ---- 内部 ----
+
+  /** 慣性の回転を進める。移動の積分の前に回すので、同じフレームの移動も新しい向きで行う。 */
+  private stepInertia(dtSeconds: number): void {
+    const inertia = this.inertia;
+    if (!inertia.active) return;
+    // 1 回の update で進める時間は、移動と同じ上限に収める（タブ復帰時の跳躍を防ぐ）
+    const dt = Math.min(dtSeconds, this.motion.maxDeltaTime);
+    if (!inertia.step(dt)) return;
+    const pitchBefore = this.motion.pitch;
+    this.motion.rotateBy(inertia.dYaw, inertia.dPitch);
+    // ピッチが ±89° に当たったら、そのぶんの角速度は捨てる（上下の端で回り続けない）
+    if (inertia.dPitch !== 0 && Math.abs(this.motion.pitch - (pitchBefore + inertia.dPitch)) > 1e-12) inertia.blockPitch();
+  }
 
   private syncCamera(): void {
     this.camera.position.copy(this.motion.position);
@@ -269,6 +317,7 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
   private releaseInputs(): void {
     this.clearKeys();
     this.endDrag();
+    this.inertia.stop();
     this.wheelGesture.reset();
     this.motion.stop();
   }
@@ -286,10 +335,14 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
   }
 
   private readonly onPointerDown = (e: PointerEvent): void => {
-    if (!this._enabled || e.button !== 0 || this.dragPointerId !== null) return;
+    if (!this._enabled) return;
+    // 慣性で回っている間にポインタを押したら止める（どのボタンでも）
+    this.inertia.stop();
+    if (e.button !== 0 || this.dragPointerId !== null) return;
     this.dragPointerId = e.pointerId;
     this.lastX = e.clientX;
     this.lastY = e.clientY;
+    this.inertia.beginDrag(e.clientX, e.clientY, eventTimeMs(e));
     if (typeof this.domElement.setPointerCapture === 'function') {
       try {
         this.domElement.setPointerCapture(e.pointerId);
@@ -305,12 +358,22 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
     const dy = e.clientY - this.lastY;
     this.lastX = e.clientX;
     this.lastY = e.clientY;
+    this.inertia.dragMove(e.clientX, e.clientY, eventTimeMs(e));
     // 右へドラッグで右を向く、下へドラッグで下を向く。
     this.motion.rotateBy(-dx * this.rotateSpeed, -dy * this.rotateSpeed);
   };
 
+  /** 離した。離す直前の動きが速ければ、その速さで回り続ける。 */
   private readonly onPointerUp = (e: PointerEvent): void => {
     if (e.pointerId !== this.dragPointerId) return;
+    this.endDrag();
+    this.inertia.endDrag(eventTimeMs(e), this.rotateSpeed);
+  };
+
+  /** 押下の取り消し（pointercancel・lostpointercapture）。慣性は付けない。 */
+  private readonly onPointerCancel = (e: PointerEvent): void => {
+    if (e.pointerId !== this.dragPointerId) return;
+    this.inertia.cancelDrag();
     this.endDrag();
   };
 
@@ -367,6 +430,8 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
   private readonly onBlur = (): void => {
     this.clearKeys();
     this.endDrag();
+    this.inertia.cancelDrag();
+    this.inertia.stop();
   };
 
   /** 移動キーの押下状態をすべて消す。 */

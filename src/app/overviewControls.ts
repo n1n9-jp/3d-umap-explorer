@@ -1,6 +1,8 @@
 import { Quaternion, Vector3 } from 'three';
 import type { PerspectiveCamera } from 'three';
 import { DEFAULT_WHEEL_GESTURE_LIMIT_NOTCHES, isDiscreteWheelDelta, WheelGestureLimiter } from '../controls/WheelGesture';
+import { eventTimeMs, RotationInertia } from '../controls/RotationInertia';
+import type { RotationInertiaOptions } from '../controls/RotationInertia';
 
 /**
  * 俯瞰モードのカメラ操作。点群の中心（pivot）のまわりを回り、ホイールで中心へ寄り・離れる。
@@ -11,6 +13,8 @@ import { DEFAULT_WHEEL_GESTURE_LIMIT_NOTCHES, isDiscreteWheelDelta, WheelGesture
  * - ドラッグの左右: ワールドの +Y 軸まわりの回転（画面上の点群がドラッグへ追従する向き）
  * - ドラッグの上下: カメラの右軸まわりの回転。視線の仰角は ±MAX_PITCH に収める
  * どちらも視線の横傾き（roll）を生まないので、飛行モードへ戻しても視点は跳ばない。
+ * ドラッグを離したあとは、離す直前の速さで中心のまわりを回り続けて減速する（慣性。`RotationInertia`）。
+ * 毎フレーム `update(dt)` を呼ぶこと。
  */
 
 export const OVERVIEW_MAX_PITCH = (89 * Math.PI) / 180;
@@ -81,6 +85,11 @@ export interface OverviewControlsOptions {
   rotateSpeed?: number;
   /** ホイール 1 ノッチあたりの距離の倍率（正で離れる向きにこの値を掛ける）。 */
   wheelFactor?: number;
+  /**
+   * ドラッグを離したあとの回転の慣性。`timeConstant` を 0 以下にすると無効。
+   * 省略すると、時定数 0.3 秒で、「動きを減らす」設定（`prefers-reduced-motion: reduce`）なら無効。
+   */
+  rotationInertia?: RotationInertiaOptions;
 }
 
 const PIXELS_PER_NOTCH = 100;
@@ -111,6 +120,8 @@ export class OverviewControls {
   private disposed = false;
   /** タッチパッドの 1 回の払いでの距離の変化を、飛行モードの速度と同じ倍率（約 1.95 倍）に制限する。 */
   private readonly wheelGesture: WheelGestureLimiter;
+  private readonly inertia: RotationInertia;
+  private readonly win: Window | null;
 
   constructor(camera: PerspectiveCamera, domElement: HTMLElement, options: OverviewControlsOptions = {}) {
     this.camera = camera;
@@ -118,12 +129,15 @@ export class OverviewControls {
     this.rotateSpeed = options.rotateSpeed ?? 0.005;
     this.wheelFactor = options.wheelFactor ?? 1.15;
     this.wheelGesture = new WheelGestureLimiter({ limitNotches: overviewGestureLimitNotches(this.wheelFactor) });
+    this.win = domElement.ownerDocument?.defaultView ?? (typeof window !== 'undefined' ? window : null);
+    this.inertia = new RotationInertia(options.rotationInertia, this.win);
     domElement.addEventListener('pointerdown', this.onPointerDown);
     domElement.addEventListener('pointermove', this.onPointerMove);
     domElement.addEventListener('pointerup', this.onPointerUp);
-    domElement.addEventListener('pointercancel', this.onPointerUp);
-    domElement.addEventListener('lostpointercapture', this.onPointerUp);
+    domElement.addEventListener('pointercancel', this.onPointerCancel);
+    domElement.addEventListener('lostpointercapture', this.onPointerCancel);
     domElement.addEventListener('wheel', this.onWheel, { passive: false });
+    this.win?.addEventListener('blur', this.onBlur);
   }
 
   get enabled(): boolean {
@@ -135,8 +149,53 @@ export class OverviewControls {
     this._enabled = value;
     if (!value) {
       this.endDrag();
+      this.inertia.cancelDrag();
+      this.inertia.stop();
       this.wheelGesture.reset();
     }
+  }
+
+  /**
+   * ドラッグを離したあとの回転の慣性の時定数（秒）。0 以下で無効。
+   * 代入しなければ既定の 0.3 秒（「動きを減らす」設定なら無効）。`null` を代入すると、その既定へ戻す。
+   */
+  get rotationTimeConstant(): number {
+    return this.inertia.timeConstant;
+  }
+
+  set rotationTimeConstant(value: number | null) {
+    this.inertia.timeConstant = value;
+  }
+
+  /** 回転の慣性で回っている最中なら true。 */
+  get isRotatingByInertia(): boolean {
+    return this.inertia.active;
+  }
+
+  /** 回転の慣性を止める（位置と向きはそのまま）。 */
+  stopRotationInertia(): void {
+    this.inertia.stop();
+  }
+
+  /**
+   * `dtSeconds` だけ進める。慣性で回ってカメラが動いたら true。
+   * 回転は点群の中心（pivot）のまわりで、中心までの距離は変わらない。仰角は ±89° に収まる。
+   */
+  update(dtSeconds: number): boolean {
+    const inertia = this.inertia;
+    if (!this._enabled || this.disposed || !inertia.active) return false;
+    if (!inertia.step(dtSeconds)) return false;
+    const { dYaw, dPitch } = inertia;
+    const pitchBefore = this.pitch();
+    this.apply(orbitPose({ position: this.camera.position, quaternion: this.camera.quaternion }, this.pivot, dYaw, dPitch));
+    // 仰角が ±89° に当たったら、そのぶんの角速度は捨てる（上下の端で回り続けない）
+    if (dPitch !== 0 && Math.abs(this.pitch() - (pitchBefore + dPitch)) > 1e-12) inertia.blockPitch();
+    return true;
+  }
+
+  private pitch(): number {
+    const forward = new Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
+    return Math.asin(Math.min(1, Math.max(-1, forward.y)));
   }
 
   dispose(): void {
@@ -145,10 +204,13 @@ export class OverviewControls {
     this.domElement.removeEventListener('pointerdown', this.onPointerDown);
     this.domElement.removeEventListener('pointermove', this.onPointerMove);
     this.domElement.removeEventListener('pointerup', this.onPointerUp);
-    this.domElement.removeEventListener('pointercancel', this.onPointerUp);
-    this.domElement.removeEventListener('lostpointercapture', this.onPointerUp);
+    this.domElement.removeEventListener('pointercancel', this.onPointerCancel);
+    this.domElement.removeEventListener('lostpointercapture', this.onPointerCancel);
     this.domElement.removeEventListener('wheel', this.onWheel);
+    this.win?.removeEventListener('blur', this.onBlur);
     this.endDrag();
+    this.inertia.cancelDrag();
+    this.inertia.stop();
   }
 
   private apply(pose: OverviewPose): void {
@@ -170,10 +232,14 @@ export class OverviewControls {
   }
 
   private readonly onPointerDown = (e: PointerEvent): void => {
-    if (!this._enabled || e.button !== 0 || this.dragPointerId !== null) return;
+    if (!this._enabled) return;
+    // 慣性で回っている間にポインタを押したら止める（どのボタンでも）
+    this.inertia.stop();
+    if (e.button !== 0 || this.dragPointerId !== null) return;
     this.dragPointerId = e.pointerId;
     this.lastX = e.clientX;
     this.lastY = e.clientY;
+    this.inertia.beginDrag(e.clientX, e.clientY, eventTimeMs(e));
     try {
       this.domElement.setPointerCapture(e.pointerId);
     } catch {
@@ -187,6 +253,7 @@ export class OverviewControls {
     const dy = e.clientY - this.lastY;
     this.lastX = e.clientX;
     this.lastY = e.clientY;
+    this.inertia.dragMove(e.clientX, e.clientY, eventTimeMs(e));
     // 右へドラッグすると点群が右へ回り込み（カメラは左へ）、下へドラッグすると点群の上面がこちらへ傾く。
     this.apply(
       orbitPose(
@@ -198,9 +265,25 @@ export class OverviewControls {
     );
   };
 
+  /** 離した。離す直前の動きが速ければ、その速さで回り続ける。 */
   private readonly onPointerUp = (e: PointerEvent): void => {
     if (e.pointerId !== this.dragPointerId) return;
     this.endDrag();
+    this.inertia.endDrag(eventTimeMs(e), this.rotateSpeed);
+  };
+
+  /** 押下の取り消し（pointercancel・lostpointercapture）。慣性は付けない。 */
+  private readonly onPointerCancel = (e: PointerEvent): void => {
+    if (e.pointerId !== this.dragPointerId) return;
+    this.inertia.cancelDrag();
+    this.endDrag();
+  };
+
+  /** ウィンドウがフォーカスを失った。ドラッグも慣性も捨てる。 */
+  private readonly onBlur = (): void => {
+    this.endDrag();
+    this.inertia.cancelDrag();
+    this.inertia.stop();
   };
 
   private readonly onWheel = (e: WheelEvent): void => {
