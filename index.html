@@ -12,7 +12,7 @@
         position: fixed; left: 12px; bottom: 10px; z-index: 1;
         font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
         color: #b4bccb; pointer-events: none; white-space: pre-wrap;
-        max-width: calc(100vw - 48px); padding: 6px 10px; border-radius: 6px;
+        max-width: calc(100vw - 48px - var(--minimap-reserve, 0px)); padding: 6px 10px; border-radius: 6px;
         background: rgba(7, 8, 12, 0.72);
         text-shadow: 0 0 4px #000;
       }
@@ -42,6 +42,18 @@
         position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0;
         overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
       }
+      /* ミニマップ（src/minimap/）。点群は WebGL で同じ canvas の右下へ描き、枠・印・目盛りをこの SVG で重ねる */
+      #minimap { position: fixed; z-index: 1; cursor: crosshair; touch-action: none; user-select: none; }
+      #minimap[hidden] { display: none; }
+      #minimap svg { display: block; overflow: visible; }
+      #minimap .mm-border { fill: none; stroke: rgba(180, 188, 203, 0.55); stroke-width: 1; }
+      #minimap.outside .mm-border { stroke: rgba(255, 255, 255, 0.9); stroke-dasharray: 4 3; }
+      #minimap .mm-gauge-bg { fill: rgba(26, 33, 49, 0.93); stroke: rgba(180, 188, 203, 0.55); stroke-width: 1; }
+      #minimap .mm-hist rect { fill: rgba(180, 188, 203, 0.32); }
+      #minimap .mm-range { stroke: rgba(180, 188, 203, 0.7); stroke-width: 1; }
+      #minimap .mm-gauge-label { fill: #8a93a6; font: 9px/1 sans-serif; text-anchor: middle; pointer-events: none; }
+      #minimap.outside .mm-fan { stroke-dasharray: 3 2; }
+      #minimap .mm-outside-text { fill: #fff; font: 600 10px/1 sans-serif; paint-order: stroke; stroke: #07080c; stroke-width: 3px; pointer-events: none; }
       #hover-label {
         position: fixed; left: 0; top: 0; z-index: 3; pointer-events: none;
         padding: 1px 7px; border-radius: 4px; border: 1px solid #f2f5fa;
