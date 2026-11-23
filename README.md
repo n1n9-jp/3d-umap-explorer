@@ -169,22 +169,46 @@ node scripts/verify/depth.cjs       # 深度の精度。カメラを少しずつ
 |---|---|
 | `manifest.json` | メタデータ（下記） |
 | `positions.f32` | `Float32Array`、長さ `3 * count`。点 `i` の座標は `[3i, 3i+1, 3i+2]` に x, y, z の順で入る |
-| `labels.u8` | `Uint8Array`、長さ `count`。値は `manifest.labels.names` の添字（`manifest.labels` があるときのみ） |
-| `sprite.png` | 画像アトラス。点 `i` の画像は、列 `i % columns`、行 `floor(i / columns)` のセル（左上が原点） |
+| `labels.u8` | 任意。`Uint8Array`、長さ `count`。値は `manifest.labels.names` の添字（`manifest.labels` があるときのみ）。ないデータセットでは、点はクラスタで色分けされる |
+| `sprite.png` | 任意（`manifest.sprite` があるときのみ）。画像アトラス。点 `i` の画像は、列 `i % columns`、行 `floor(i / columns)` のセル（左上が原点） |
+| `text.json` | 任意（`manifest.text` があるときのみ）。UTF-8 の JSON で、長さ `count` の文字列の配列。点 `i` の表示用の文字列（単語）が `i` 番目に入る |
 | `clusters-coarse.u16`, `clusters-fine.u16` | `Uint16Array`、長さ `count`。点ごとのクラスタ `id`（粗い階層・細かい階層）。どのクラスタにも属さない点は `65535`（`manifest.clusters.noise`） |
 
 座標は、バウンディングボックスの中心が原点、絶対値の最大が 1 になるように、等方スケールで正規化します（全点が `[-1, 1]` の立方体に収まる）。
 
-`manifest.json` の例（空間の構造の計算では、`labels` は任意です。ラベルのないデータセットでは `labels` を書かず、`labels.u8` も置きません）：
+`manifest.json` の例（`labels`・`sprite`・`text` は任意です。ないデータセットでは、その項目を書かず、対応するファイルも置きません）：
 
 ```json
 {
   "name": "MNIST 10k",
+  "kind": "image",
   "count": 10000,
   "positions": { "file": "positions.f32", "dtype": "float32", "components": 3 },
   "labels": { "file": "labels.u8", "dtype": "uint8", "names": ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"] },
   "sprite": { "file": "sprite.png", "cellSize": [28, 28], "columns": 100, "rows": 100 },
   "umap": { "library": "umap-learn 0.6.0", "nComponents": 3, "nNeighbors": 15, "minDist": 0.1, "metric": "euclidean", "randomState": 42, "compatibilityLayout": true },
+  "source": { "url": "https://github.com/tensorflow/embedding-projector-standalone", "commit": "6ff71f7233ac5947450409e7938b58ec14d1e24c" }
+}
+```
+
+| 項目 | 内容 |
+|---|---|
+| `kind` | 点が何を表すかを示す文字列。`"image"`（各点が画像。`sprite` を持つ。MNIST）、`"text"`（各点が単語などの文字列。`text` を持つ。word2vec）。アプリが点の表示（画像か文字列か）を選ぶ手がかり |
+| `labels` | 任意。`labels.u8` の値の名前 `names`。ないとき、点はクラスタで色分けされる |
+| `sprite` | 任意。`sprite.png` のセルの大きさ `cellSize`、列数 `columns`、行数 `rows` |
+| `text` | 任意。`{ "file": "text.json" }`。点ごとの表示用の文字列 |
+| `umap` | UMAP の設定。`metric` は入力ベクトルの距離（MNIST は `"euclidean"`、単語ベクトルは `"cosine"`） |
+
+単語のデータセット（`public/data/word2vec-10k/`）の `manifest.json` は、`labels`・`sprite` がなく、`text` がある形です。
+
+```json
+{
+  "name": "Word2Vec 10k",
+  "kind": "text",
+  "count": 10000,
+  "positions": { "file": "positions.f32", "dtype": "float32", "components": 3 },
+  "text": { "file": "text.json" },
+  "umap": { "library": "umap-learn 0.6.0", "nComponents": 3, "nNeighbors": 15, "minDist": 0.1, "metric": "cosine", "randomState": 42, "compatibilityLayout": true },
   "source": { "url": "https://github.com/tensorflow/embedding-projector-standalone", "commit": "6ff71f7233ac5947450409e7938b58ec14d1e24c" }
 }
 ```
@@ -228,7 +252,8 @@ node scripts/verify/depth.cjs       # 深度の精度。カメラを少しずつ
 | 項目 | 内容 |
 |---|---|
 | `id` | 階層ごとに、点数の多い順（同数なら先頭の点の番号が小さい順）に 0 から振る。`pointFile` の値と一致する |
-| `name` | 多数派ラベルの名前（`labels.names`）。同じ階層で多数派ラベルが同じクラスタが複数あるときは、点数が最大のものをそのままの名前にし、以降を点数の多い順に `3 (2)`、`3 (3)` とする。`manifest.labels` がないときは、階層ごとの連番 `C1`、`C2`、…（`id` の順） |
+| `name` | 多数派ラベルの名前（`labels.names`）。同じ階層で多数派ラベルが同じクラスタが複数あるときは、点数が最大のものをそのままの名前にし、以降を点数の多い順に `3 (2)`、`3 (3)` とする。`manifest.labels` がなく `manifest.text` があるときは、代表の単語（`terms`）を `、` で並べた文字列（例: `austria、finnish、germany`）。どちらもないとき、または代表の単語が選べないときは、階層ごとの連番 `C1`、`C2`、…（`id` の順） |
+| `terms` | `manifest.text` があって `manifest.labels` がないときだけ付く。代表の単語の配列（最大 3 語）。クラスタ内の点のうち、medoid に近い（同じ距離なら番号の小さい）順に、表示に向く単語を選ぶ。記号や数字を含む語、1〜2 文字の語、特殊トークン `UNK` は選ばない |
 | `size` | クラスタの点数 |
 | `medoid` | クラスタ内の他の全点への距離の合計が最小になる、実在の点の番号（同値なら番号の小さい方）。`center` はその点の座標 |
 | `radius` | medoid からクラスタ内の各点までの距離の 90 パーセンタイル |
@@ -238,6 +263,10 @@ node scripts/verify/depth.cjs       # 深度の精度。カメラを少しずつ
 
 MNIST 1 万点では、粗い階層が 10 クラスタ（数字ごとに 1 つ、ノイズ 8.3%）、細かい階層が 67 クラスタ（ノイズ 25.2%）です。細かい階層は、小さな塊を拾う設定のため、塊の周縁の点がノイズになりやすくなっています。
 
+word2vec 1 万語では、粗い階層が 18 クラスタ（ノイズ 31.5%）、細かい階層が 66 クラスタ（ノイズ 30.3%）です。単語ベクトルのUMAPは大きさの揃った塊にならず、密度が連続的に変わるため、粗い階層には MNIST と異なるパラメータ（`minClusterSize` 150、`minSamples` 2）を使います（理由は `scripts/precompute/README.md`）。粗い階層は、MNIST の「数字ごと」と違い、空間の大まかな地域です。
+
 ## データの出典
 
 MNIST 1万点のベクトル・ラベル・スプライト画像は、[tensorflow/embedding-projector-standalone](https://github.com/tensorflow/embedding-projector-standalone) の `oss_data/` にあるファイルを使います。元データは [MNIST database](http://yann.lecun.com/exdb/mnist/)（Yann LeCun, Corinna Cortes, Christopher J.C. Burges）です。
+
+word2vec 1万語の単語ベクトル（200 次元、`word2vec_10000_200d_tensors.bytes`）と単語の一覧（`word2vec_10000_200d_labels.tsv`）も、同じリポジトリの `oss_data/` にあるファイルを使います（どちらも固定コミット `6ff71f7233ac5947450409e7938b58ec14d1e24c`）。単語の一覧は、ヘッダー行 `word<TAB>count` のあとに、1 行 1 語（`単語<TAB>出現数`）が並ぶ TSV で、行の順がベクトルの順です（先頭の語は特殊トークンの `UNK`）。Embedding Projector のデモでは「Word2Vec 10K」（形状 10000×200）として使われているデータです（[`oss_data/oss_demo_projector_config.json`](https://github.com/tensorflow/embedding-projector-standalone/blob/6ff71f7233ac5947450409e7938b58ec14d1e24c/oss_data/oss_demo_projector_config.json)）。ベクトルの学習方法や元のコーパスは、上流のリポジトリに記載がないため、ここでは断定しません。

@@ -1,5 +1,6 @@
 {
   "name": "MNIST 10k",
+  "kind": "image",
   "count": 10000,
   "positions": {"file": "positions.f32", "dtype": "float32", "components": 3},
   "labels": {"file": "labels.u8", "dtype": "uint8", "names": ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]},
