@@ -140,3 +140,66 @@ void main() {
 #endif
 }
 `;
+
+/**
+ * 強調表示（ホバー・選択）の輪のシェーダ。点群とは別のメッシュとして、点群の後に深度テストなしで重ねて描く。
+ * ほかの点に隠れていても輪は見えるので、点の位置が分かる。ピッキングは点群のメッシュだけを描くので、
+ * 輪は選ばれる形に影響しない。
+ *
+ * 輪の半径は、点群のシェーダと同じ式で求めた点の画面上の大きさ（最小サイズで下支え）に合わせ、
+ * 数字を囲む大きさにする（下限 uRing.x ピクセル）。輪は背景色の縁取りの内側に色を付けて、
+ * 明るい点の上でも暗い背景の上でも読み取れるようにする。
+ */
+export const highlightVertexShader = /* glsl */ `
+precision highp float;
+
+uniform vec3 uCenter;
+uniform float uPointSize;
+uniform float uMinPixelSize;
+uniform float uViewportHeight;
+uniform vec3 uRing;        // x: 半径の下限, y: 線の太さ, z: 縁取りの太さ（いずれも描画バッファのピクセル）
+
+out vec2 vPx;              // 中心からのずれ（ピクセル）
+out float vRadius;
+
+void main() {
+  vec4 mv = modelViewMatrix * vec4(uCenter, 1.0);
+  float depth = -mv.z;
+  if (depth <= 1e-6) {
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    return;
+  }
+  float pxPerUnit = 0.5 * uViewportHeight * projectionMatrix[1][1] / depth;
+  float shownPx = max(uPointSize * pxPerUnit, uMinPixelSize);
+  // 数字のセルの外接円（半辺 × √2）より少し外側
+  float radius = max(0.72 * shownPx + 2.0, uRing.x);
+  float halfPx = radius + 0.5 * uRing.y + uRing.z + 2.0;
+
+  vPx = position.xy * 2.0 * halfPx;
+  vRadius = radius;
+  mv.xy += vPx / pxPerUnit;
+  gl_Position = projectionMatrix * mv;
+}
+`;
+
+export const highlightFragmentShader = /* glsl */ `
+precision highp float;
+
+uniform vec3 uColor;
+uniform vec3 uBackground;
+uniform vec3 uRing;
+
+in vec2 vPx;
+in float vRadius;
+
+out vec4 fragColor;
+
+void main() {
+  float d = abs(length(vPx) - vRadius);  // 輪の中心線からの距離（ピクセル）
+  float halfLine = 0.5 * uRing.y;
+  float body = clamp(halfLine + 0.5 - d, 0.0, 1.0);
+  float alpha = clamp(halfLine + uRing.z + 0.5 - d, 0.0, 1.0);
+  if (alpha <= 0.0) discard;
+  fragColor = vec4(mix(uBackground, uColor, body), alpha);
+}
+`;

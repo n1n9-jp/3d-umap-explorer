@@ -1,6 +1,6 @@
 import { Vector3 } from 'three';
 import type { PerspectiveCamera } from 'three';
-import { FlyCameraControls } from '../controls/FlyCameraControls';
+import { FlyCameraControls, type FlyToOptions } from '../controls/FlyCameraControls';
 import type { ViewSpec } from '../render/view';
 import { OverviewControls } from './overviewControls';
 import type { AutoSpeed } from './autoSpeed';
@@ -65,6 +65,8 @@ export class CameraRig {
   private _autoSpeedEnabled: boolean;
   private readonly prevPosition = new Vector3();
   private readonly velocity = new Vector3();
+  /** flyTo による自動移動の最中（速度の自動調整を止めている） */
+  private flying = false;
 
   constructor(camera: PerspectiveCamera, domElement: HTMLElement, center: Vector3, options: CameraRigOptions = {}) {
     this.camera = camera;
@@ -139,10 +141,26 @@ export class CameraRig {
     this.autoSpeedEnabled = !this._autoSpeedEnabled;
   }
 
+  /**
+   * `target` を注視する位置へ自動移動する（`FlyCameraControls.flyTo`）。俯瞰モードなら飛行モードへ切り替えてから。
+   * 移動中は速度の自動調整を止め（移動の速さは所要時間で決まり、係数には依らない）、着いたら止まった状態として測り直す。
+   */
+  flyTo(target: Vector3, options?: FlyToOptions): void {
+    this.setMode('fly');
+    this.fly.flyTo(target, options);
+    this.flying = this.fly.isFlying;
+  }
+
   update(dt: number): void {
     if (this._mode !== 'fly') return;
     this.prevPosition.copy(this.camera.position);
     this.fly.update(dt);
+    if (this.flying) {
+      if (this.fly.isFlying) return;
+      this.flying = false; // 着いた（または操作で中断した）
+      this.autoSpeed?.reset();
+      return;
+    }
     if (!this._autoSpeedEnabled || !this.autoSpeed) return;
     // 速度は、このフレームの移動量から求める（setView などによる瞬間移動はフレームの外で起きるので含まない）。
     if (dt > 0 && Number.isFinite(dt)) this.velocity.subVectors(this.camera.position, this.prevPosition).divideScalar(dt);
