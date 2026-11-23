@@ -214,6 +214,60 @@ export function viewFigure(input: ViewFigureInput, b: MinimapBasis): ViewFigure 
   return { heading, headingLength: Math.min(1, fl), corners, hull: convexHull([[0, 0], ...corners]) };
 }
 
+/** 視線が奥行きの向き（面に垂直）の成分をこれ以上持つとき、手前向き・奥向きとみなす（面から約 6° 以内なら横向き）。 */
+export const FACING_THRESHOLD = 0.1;
+
+export type DepthFacing = 'near' | 'far' | 'level';
+
+/**
+ * 視線が奥行きの手前と奥のどちらを向いているか。視線が面に垂直に近いと、面へ投影した視野の図形は手前向きでも奥向きでも
+ * 同じ形になるので、奥行きの目盛りの側で区別する。
+ * `component` は視線の単位ベクトルの奥行き成分（-1..1。正が手前＝ホームの視点の側、負が奥）。
+ */
+export function depthFacing(forward: Vec3, b: MinimapBasis, threshold: number = FACING_THRESHOLD): { component: number; facing: DepthFacing } {
+  const n = normalize(forward);
+  const component = dot(n, b.back);
+  const facing: DepthFacing = component >= threshold ? 'near' : component <= -threshold ? 'far' : 'level';
+  return { component, facing };
+}
+
+export interface MinimapStatusInput {
+  /** カメラの位置（枠に寄せる前）。地図の中の CSS ピクセル（左上が原点）と、地図の 1 辺 */
+  mapX: number;
+  mapY: number;
+  mapSize: number;
+  /** 目盛りの中の高さ（上端が 0、上が手前）と目盛りの高さ */
+  depthY: number;
+  gaugeHeight: number;
+  facing: DepthFacing;
+}
+
+const FACING_TEXT: Record<DepthFacing, string> = {
+  near: '手前向き',
+  far: '奥向き',
+  level: '奥行きには水平な向き',
+};
+
+/**
+ * 画面の読み上げ用の、現在位置の説明（地図を 3×3、奥行きを 3 段に分けた大まかな位置）。
+ * 範囲の外にいるときは、そのことと向きを言う。
+ */
+export function describeMinimapStatus(i: MinimapStatusInput): string {
+  const third = (v: number, size: number) => (size > 0 ? Math.floor(Math.min(2, Math.max(0, (3 * v) / size))) : 1);
+  const outside = i.mapX < 0 || i.mapY < 0 || i.mapX > i.mapSize || i.mapY > i.mapSize;
+  const h = ['左', '', '右'][i.mapX < 0 ? 0 : i.mapX > i.mapSize ? 2 : third(i.mapX, i.mapSize)]!;
+  const v = ['上', '', '下'][i.mapY < 0 ? 0 : i.mapY > i.mapSize ? 2 : third(i.mapY, i.mapSize)]!;
+  const where = `${h}${v}`;
+  const place = outside
+    ? `地図の範囲の外（${where}の方向）`
+    : `地図の${where === '' ? '中央' : where}あたり`;
+  let depth: string;
+  if (i.depthY < 0) depth = '目盛りの範囲の外（手前側）';
+  else if (i.depthY > i.gaugeHeight) depth = '目盛りの範囲の外（奥側）';
+  else depth = ['手前寄り', '中ほど', '奥寄り'][third(i.depthY, i.gaugeHeight)]!;
+  return `現在位置: ${place}、奥行きは${depth}。視線は${FACING_TEXT[i.facing]}。`;
+}
+
 /** 2 次元の点の凸包（反時計回り、Andrew の単調鎖）。点が 2 個以下ならそのまま。 */
 export function convexHull(points: [number, number][]): [number, number][] {
   const pts = [...points].sort((a, b) => a[0] - b[0] || a[1] - b[1]);

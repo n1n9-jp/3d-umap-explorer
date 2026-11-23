@@ -16,6 +16,10 @@
  *   - 本体への影響: 地図の領域の外の本体の描画が 1 画素も変わらない。ピッキングの番号の画像が変わらない。
  *     ミニマップを描いたあとの本体の描画が、描く前と同じ（レンダラーの状態が戻っている）
  *   - deviceScaleFactor 2 と、画面の大きさを変えたあとで、領域の位置と大きさが正しい
+ *   - 更新の省略: カメラが止まっている間は、ミニマップの SVG・説明の書き換えが 0 回（MutationObserver で数える）。
+ *     位置・向きを変えると更新される。点群の描画は止まっている間も毎フレーム行われる
+ *   - 手前向き・奥向き: 視線が面に垂直なとき、地図の図形は同じ形だが、目盛りの矢印が上（手前）・下（奥）を向く
+ *   - アクセシビリティ: フォーカスできるグループで、説明が実際の操作と一致し、状態の文章が位置・範囲の外を言う。Tab でフォーカスでき、枠が見える
  *   - コンソールエラーがない
  * ソフトウェア描画では 1 フレームが約 200 ミリ秒かかるので、待ちはフレーム数と状態の変化で数える。
  * 失敗があれば終了コード 1 で終わる。スクリーンショットを --out に保存する。
@@ -596,6 +600,218 @@ async function testToggleAndFrames(page) {
   await page.evaluate(() => document.getElementById('mm-test-input').remove());
 }
 
+
+/** 地図の領域の画面の画素（SVG も含む）に、ラベルの色の点がどれだけあるか。点群が毎フレーム描かれていれば多い。 */
+async function labelPixelsOnScreen(page, map) {
+  const shot = await page.screenshot({ clip: { x: map.left, y: map.top, width: map.width, height: map.height } });
+  return page.evaluate(async ({ b64, labelColors }) => {
+    const im = await new Promise((res) => { const i = new Image(); i.onload = () => res(i); i.src = `data:image/png;base64,${b64}`; });
+    const c = document.createElement('canvas'); c.width = im.width; c.height = im.height;
+    const g = c.getContext('2d'); g.drawImage(im, 0, 0);
+    const d = g.getImageData(0, 0, im.width, im.height).data;
+    const cols = labelColors.map((h) => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)]);
+    let n = 0;
+    for (let i = 0; i < d.length; i += 4) if (cols.some((lc) => Math.abs(d[i] - lc[0]) <= 6 && Math.abs(d[i + 1] - lc[1]) <= 6 && Math.abs(d[i + 2] - lc[2]) <= 6)) n++;
+    return n;
+  }, { b64: shot.toString('base64'), labelColors: LABEL_COLORS });
+}
+
+async function testIdleUpdates(page, views) {
+  console.log('\n[カメラが止まっている間は SVG を更新しない]');
+  const inside = views.find((v) => v.name === '3-inside');
+  await setView(page, inside.pos, inside.look);
+  await waitStill(page);
+  await frames(page, 3);
+  const st = await mm(page);
+  // ミニマップの要素（SVG・説明）の変化を数える。属性の書き換え（同じ値でも 1 回と数える）、子要素・文字の変更
+  await page.evaluate(() => {
+    const el = document.getElementById('minimap');
+    window.__mmMutations = 0;
+    window.__mmObserver = new MutationObserver((list) => { window.__mmMutations += list.length; });
+    window.__mmObserver.observe(el, { attributes: true, childList: true, characterData: true, subtree: true });
+  });
+  const mutations = () => page.evaluate(() => { window.__mmObserver.takeRecords().forEach(() => window.__mmMutations++); return window.__mmMutations; });
+  const reset = () => page.evaluate(() => { window.__mmObserver.takeRecords(); window.__mmMutations = 0; });
+  await reset();
+  const N = 25;
+  await frames(page, N);
+  const idle = await mutations();
+  check(`カメラが止まっている ${N} フレームの間、ミニマップの SVG・説明の書き換えが 0 回`, idle === 0, `書き換え ${idle} 回`);
+  const lit = await labelPixelsOnScreen(page, st.map);
+  check('止まっている間も、地図の点群は毎フレーム描かれている（画面の画素にラベルの色の点がある）', lit > 500, `ラベルの色の画素 ${lit}`);
+
+  // 動かす：位置、向き
+  const s = await state(page);
+  await reset();
+  const pos = add(inside.pos, mul(st.basis.right, 0.02));
+  await setView(page, pos, add(pos, mul(s.direction, 0.25)));
+  await frames(page, 2);
+  const afterMove = await mutations();
+  check('カメラを動かす（位置）と、SVG が更新される', afterMove > 0, `書き換え ${afterMove} 回`);
+  const movedState = await mm(page);
+  const svg = await readSvg(page);
+  check('更新された SVG が新しい位置を指している', near(svg.camera.x, movedState.camera.x, 0.02) && near(svg.camera.y, movedState.camera.y, 0.02), `SVG (${svg.camera.x.toFixed(2)}, ${svg.camera.y.toFixed(2)})`);
+
+  await frames(page, 3);
+  await reset();
+  await frames(page, 10);
+  check('動かしたあと止まると、再び書き換えが 0 回', (await mutations()) === 0);
+
+  await reset();
+  const turned = add(pos, mul(norm(add(s.direction, mul(st.basis.up, 0.5))), 0.25));
+  await setView(page, pos, turned);
+  await frames(page, 2);
+  check('カメラの向きだけを変えても SVG が更新される', (await mutations()) > 0);
+
+  // 表示の切り替え：消して戻すと、止まったままでも描き直される（前の状態のままではない）
+  await frames(page, 3);
+  await page.keyboard.press('KeyM');
+  await frames(page, 2);
+  await page.keyboard.press('KeyM');
+  await frames(page, 3);
+  const back = await readSvg(page);
+  const bs = await mm(page);
+  check('M で消して戻したあとも、SVG が現在の状態を指している', !back.hidden && near(back.camera.x, bs.camera.x, 0.02) && near(back.camera.y, bs.camera.y, 0.02));
+  await page.evaluate(() => window.__mmObserver.disconnect());
+}
+
+/** 目盛りの側の、手前向き・奥向きの印を読む。 */
+const readFacing = (page) => page.evaluate(() => {
+  const q = (s) => document.querySelector(`#minimap ${s}`);
+  const n = (el, a) => Number(el.getAttribute(a));
+  const line = q('.mm-facing-line'), head = q('.mm-facing-head'), cam = q('.mm-depth-camera-line');
+  const shown = line.style.display !== 'none' && head.style.display !== 'none';
+  const pts = head.getAttribute('points').split(' ').map((p) => p.split(',').map(Number));
+  return { shown, camY: n(cam, 'y1'), lineY1: n(line, 'y1'), lineY2: n(line, 'y2'), tipY: pts[0] ? pts[0][1] : NaN, fan: q('.mm-fan').getAttribute('points') };
+});
+
+async function testFacing(page, views) {
+  console.log('\n[手前向きか奥向きかの印（視線が面に垂直なとき）]');
+  const inside = views.find((v) => v.name === '3-inside');
+  await setView(page, inside.pos, inside.look);
+  await waitStill(page);
+  const b = (await mm(page)).basis;
+  const shape = (fan) => fan.split(' ').map((p) => p.split(',').map(Number)).sort((a, c) => a[0] - c[0] || a[1] - c[1]);
+  const out = {};
+  for (const t of [{ name: '手前向き', sign: 1, facing: 'near' }, { name: '奥向き', sign: -1, facing: 'far' }]) {
+    await setView(page, inside.pos, add(inside.pos, mul(b.back, 0.25 * t.sign)));
+    await frames(page, 2);
+    const m = await mm(page);
+    const f = await readFacing(page);
+    out[t.facing] = { m, f };
+    const up = t.facing === 'near';
+    check(`視線が面に垂直（${t.name}）：状態が ${t.facing}、視線の長さが 0`, m.heading.facing === t.facing && Math.abs(Math.abs(m.heading.depth) - 1) < 1e-6 && m.heading.length < 1e-6,
+      `facing ${m.heading.facing}、奥行き成分 ${m.heading.depth.toFixed(4)}、面に沿った長さ ${m.heading.length.toExponential(2)}`);
+    check(`視線が面に垂直（${t.name}）：目盛りの印が ${up ? '上（手前）' : '下（奥）'}向きの矢印`, f.shown && (up ? f.tipY < f.camY - 5 : f.tipY > f.camY + 5),
+      `矢印の先 ${f.tipY.toFixed(1)}、カメラの目盛り ${f.camY.toFixed(1)}`);
+  }
+  const sa = shape(out.near.f.fan), sb = shape(out.far.f.fan);
+  const same = sa.length === sb.length && sa.every((p, i) => Math.abs(p[0] - sb[i][0]) < 0.05 && Math.abs(p[1] - sb[i][1]) < 0.05);
+  check('視線が面に垂直だと、地図の視野の図形は手前向きでも奥向きでも同じ形（矢印がなければ区別できない）', same, `${out.near.f.fan} / ${out.far.f.fan}`);
+  // 斜め：矢印の長さが奥行き成分に応じて変わる
+  const tilt = (k) => norm(add(mul(b.right, Math.sqrt(1 - k * k)), mul(b.back, -k)));
+  const lens = [];
+  for (const k of [0.3, 0.7, 1]) {
+    await setView(page, inside.pos, add(inside.pos, mul(tilt(k), 0.25)));
+    await frames(page, 2);
+    const f = await readFacing(page);
+    lens.push(f.shown ? Math.abs(f.tipY - f.camY) : 0);
+  }
+  check('奥向きの成分が大きいほど、矢印が長い', lens[0] > 0 && lens[0] < lens[1] && lens[1] < lens[2], lens.map((v) => v.toFixed(1)).join(' < '));
+  // 面に平行な視線では出さない
+  await setView(page, inside.pos, add(inside.pos, mul(b.right, 0.25)));
+  await frames(page, 2);
+  const lv = await readFacing(page);
+  const lm = await mm(page);
+  check('視線が面に平行なら、矢印を出さない', !lv.shown && lm.heading.facing === 'level');
+  // 範囲の外でも、矢印が目盛りの外へはみ出さない
+  const far = add(mul(b.right, 3.2), add(mul(b.up, 1.4), mul(b.back, 2.6)));
+  await setView(page, far, [0, 0, 0]);
+  await frames(page, 2);
+  const o = await readFacing(page);
+  const om = await mm(page);
+  check('範囲の外でも、矢印の先が目盛りの内側に収まる', !o.shown || (o.tipY >= 0 && o.tipY <= om.gauge.height), `先 ${o.tipY.toFixed(1)}（目盛りの高さ ${om.gauge.height}）、facing ${om.heading.facing}`);
+  await setView(page, inside.pos, add(inside.pos, mul(b.back, -0.25)));
+  await waitStill(page);
+  await frames(page, 2);
+  await page.screenshot({ path: path.join(outDir, '4-facing-far.png'), clip: { x: om.gauge.left - 20, y: om.gauge.top - 20, width: om.gauge.width + om.map.width + 40, height: om.map.height + 40 } });
+  await setView(page, inside.pos, add(inside.pos, mul(b.back, 0.25)));
+  await waitStill(page);
+  await frames(page, 2);
+  await page.screenshot({ path: path.join(outDir, '4-facing-near.png'), clip: { x: om.gauge.left - 20, y: om.gauge.top - 20, width: om.gauge.width + om.map.width + 40, height: om.map.height + 40 } });
+}
+
+async function testAccessibility(page, views) {
+  console.log('\n[アクセシビリティ：フォーカスと読み上げ]');
+  const inside = views.find((v) => v.name === '3-inside');
+  const b = (await mm(page)).basis;
+  await setView(page, inside.pos, add(inside.pos, mul(b.back, -0.25)));
+  await waitStill(page);
+  await frames(page, 3);
+  const attrs = await page.evaluate(() => {
+    const el = document.getElementById('minimap');
+    const text = (id) => document.getElementById(id)?.textContent ?? null;
+    const desc = (el.getAttribute('aria-describedby') ?? '').split(/\s+/).map(text);
+    return {
+      role: el.getAttribute('role'), tabindex: el.getAttribute('tabindex'), label: el.getAttribute('aria-label'),
+      svgHidden: el.querySelector('svg').getAttribute('aria-hidden'), desc, status: text('minimap-status'),
+      live: document.getElementById('minimap-status').getAttribute('aria-live'),
+    };
+  });
+  check('role="img" ではなく、フォーカスできるグループ（tabindex 0）', attrs.role === 'group' && attrs.tabindex === '0' && !!attrs.label, JSON.stringify({ role: attrs.role, tabindex: attrs.tabindex, label: attrs.label }));
+  check('中の図（SVG）は読み上げの対象外', attrs.svgHidden === 'true');
+  check('説明（aria-describedby）に、実際にできる操作が書かれている（クリックで移動、キーボードでは移動できない）',
+    attrs.desc.length === 2 && attrs.desc.every((t) => t && t.length > 0) && attrs.desc[0].includes('クリック') && attrs.desc[0].includes('キーボードでは移動できません'), attrs.desc[0] ?? '');
+  check('状態の文章が、現在位置と視線の向きを言う', /^現在位置: 地図の.+あたり、奥行きは.+。視線は.+。$/.test(attrs.status ?? ''), attrs.status ?? '');
+
+  // Tab でフォーカスできる
+  await page.evaluate(() => document.activeElement && document.activeElement.blur());
+  let focused = false, tabs = 0;
+  for (; tabs < 40 && !focused; tabs++) {
+    await page.keyboard.press('Tab');
+    focused = await page.evaluate(() => document.activeElement && document.activeElement.id === 'minimap');
+  }
+  check('Tab キーでミニマップにフォーカスできる', focused, `Tab ${tabs} 回`);
+  if (focused) {
+    const f = await page.evaluate(() => {
+      const el = document.getElementById('minimap');
+      const cs = getComputedStyle(el);
+      return { outline: cs.outlineStyle, width: cs.outlineWidth, color: cs.outlineColor, live: document.getElementById('minimap-status').getAttribute('aria-live'), focusVisible: el.matches(':focus-visible') };
+    });
+    check('キーボードでフォーカスすると、枠（outline）が見える', f.focusVisible && f.outline === 'solid' && parseFloat(f.width) >= 2, `${f.outline} ${f.width} ${f.color}`);
+    check('フォーカス中は、状態の変化が aria-live で知らされる', f.live === 'polite', f.live);
+    // フォーカス中に位置が変わると、文章が変わる
+    const before = (await page.evaluate(() => document.getElementById('minimap-status').textContent));
+    const far = add(mul(b.right, 3.2), add(mul(b.up, 1.4), mul(b.back, 2.6)));
+    await setView(page, far, [0, 0, 0]);
+    await frames(page, 3);
+    const after = await page.evaluate(() => document.getElementById('minimap-status').textContent);
+    check('範囲の外へ出ると、状態の文章が「範囲の外」になる', after !== before && after.includes('地図の範囲の外') && after.includes('目盛りの範囲の外'), after);
+    await setView(page, inside.pos, inside.look);
+    await waitStill(page);
+    await frames(page, 3);
+    const back = await page.evaluate(() => document.getElementById('minimap-status').textContent);
+    check('範囲の中へ戻ると、文章も戻る', back.includes('地図の') && !back.includes('範囲の外'), back);
+    // M キーはフォーカス中も効く
+    await page.keyboard.press('KeyM');
+    await frames(page, 2);
+    check('フォーカス中も M キーで表示を切り替えられる（消えるとフォーカスも外れる）', !(await mm(page)).visible);
+    await page.keyboard.press('KeyM');
+    await frames(page, 2);
+    check('もう一度 M で戻る', (await mm(page)).visible);
+    await page.evaluate(() => document.activeElement && document.activeElement.blur());
+    const live2 = await page.evaluate(() => document.getElementById('minimap-status').getAttribute('aria-live'));
+    check('フォーカスが外れると aria-live は off', live2 === 'off', live2);
+  }
+  // マウスのクリックでは枠が出ない（フォーカスは奪わない）
+  const m = await mm(page);
+  await page.mouse.click(m.map.left + 30, m.map.top + 30);
+  await waitFrames(page, async (pg) => ({ ok: (await state(pg)).homing }), 5);
+  await waitStill(page, 40);
+  const noRing = await page.evaluate(() => !document.getElementById('minimap').matches(':focus-visible'));
+  check('マウスのクリックでは、フォーカスの枠が出ない', noRing);
+}
+
 async function testLayout(browser, base, cfg) {
   console.log(`\n[領域の位置と大きさ: ${cfg.name}]`);
   const page = await openPage(browser, base, { viewport: cfg.viewport, dsf: cfg.dsf });
@@ -658,6 +874,9 @@ async function main() {
     await testClickAndSelection(page, views);
     await testIsolation(page, views);
     await testToggleAndFrames(page);
+    await testIdleUpdates(page, views);
+    await testFacing(page, views);
+    await testAccessibility(page, views);
     // クラスタの内部の画像
     const inside = views.find((v) => v.name === '3-inside');
     await setView(page, inside.pos, inside.look);

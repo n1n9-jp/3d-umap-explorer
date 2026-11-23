@@ -71,6 +71,8 @@
       /* ミニマップ（src/minimap/）。点群は WebGL で同じ canvas の右下へ描き、枠・印・目盛りをこの SVG で重ねる */
       #minimap { position: fixed; z-index: 1; cursor: crosshair; touch-action: none; user-select: none; }
       #minimap[hidden] { display: none; }
+      #minimap:focus { outline: none; }
+      #minimap:focus-visible { outline: 2px solid #ffc233; outline-offset: 3px; }
       #minimap svg { display: block; overflow: visible; }
       #minimap .mm-border { fill: none; stroke: rgba(180, 188, 203, 0.55); stroke-width: 1; }
       #minimap.outside .mm-border { stroke: rgba(255, 255, 255, 0.9); stroke-dasharray: 4 3; }
