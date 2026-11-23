@@ -1,5 +1,24 @@
-import { decodeFloat32LE, decodeUint8 } from './binary';
+import { decodeFloat32LE, decodeUint16LE, decodeUint8 } from './binary';
 import { parseManifest, type DatasetManifest } from './manifest';
+
+/**
+ * 座標の境界。`min`/`max` は全点を含む軸平行の箱（常に座標から計算）。
+ * `center` と `radius` は全点を含む球で、manifest に `bounds` があればその値、なければ原点中心・最大距離を使う。
+ */
+export interface DatasetBounds {
+  min: [number, number, number];
+  max: [number, number, number];
+  center: [number, number, number];
+  radius: number;
+}
+
+/** 点ごとのクラスタ id（manifest.clusters.levels[i] に対応）。 */
+export interface ClusterAssignment {
+  /** 階層の名前（`manifest.clusters.levels[i].name`） */
+  level: string;
+  /** 長さ count。値は階層内のクラスタ id（`manifest.clusters.noise` はクラスタなし） */
+  ids: Uint16Array;
+}
 
 export interface DatasetArrays {
   manifest: DatasetManifest;
@@ -7,8 +26,10 @@ export interface DatasetArrays {
   positions: Float32Array;
   /** 長さ count、値は manifest.labels.names の添字 */
   labels: Uint8Array;
-  /** 座標の境界（全点を含む軸平行の箱と、原点中心の外接球半径） */
-  bounds: { min: [number, number, number]; max: [number, number, number]; radius: number };
+  /** 座標の境界（全点を含む軸平行の箱と外接球） */
+  bounds: DatasetBounds;
+  /** manifest.clusters があるときのみ。`manifest.clusters.levels` と同じ順 */
+  clusterAssignments?: ClusterAssignment[];
 }
 
 export type FetchLike = (url: string) => Promise<{ ok: boolean; status: number; json(): Promise<unknown>; arrayBuffer(): Promise<ArrayBuffer> }>;
@@ -25,7 +46,8 @@ async function fetchOk(fetchImpl: FetchLike, url: string) {
   return res;
 }
 
-export function computeBounds(positions: Float32Array): DatasetArrays['bounds'] {
+/** 座標から境界を計算する。球は原点中心で、原点から最も遠い点までを半径とする。 */
+export function computeBounds(positions: Float32Array): DatasetBounds {
   const min: [number, number, number] = [Infinity, Infinity, Infinity];
   const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
   let r2 = 0;
@@ -37,15 +59,18 @@ export function computeBounds(positions: Float32Array): DatasetArrays['bounds'] 
     const d = x * x + y * y + z * z;
     if (d > r2) r2 = d;
   }
-  return { min, max, radius: Math.sqrt(r2) };
+  return { min, max, center: [0, 0, 0], radius: Math.sqrt(r2) };
 }
 
 /** manifest と数値バイナリを読み込む（画像は含まない。DOM に依存しないのでテストできる）。 */
 export async function loadDatasetArrays(baseUrl: string, fetchImpl: FetchLike = fetch): Promise<DatasetArrays> {
   const manifest = parseManifest(await (await fetchOk(fetchImpl, resolveDataUrl(baseUrl, 'manifest.json'))).json());
-  const [posBuf, labBuf] = await Promise.all([
-    fetchOk(fetchImpl, resolveDataUrl(baseUrl, manifest.positions.file)).then((r) => r.arrayBuffer()),
-    fetchOk(fetchImpl, resolveDataUrl(baseUrl, manifest.labels.file)).then((r) => r.arrayBuffer()),
+  const fetchBuffer = (file: string) => fetchOk(fetchImpl, resolveDataUrl(baseUrl, file)).then((r) => r.arrayBuffer());
+  const levels = manifest.clusters?.levels ?? [];
+  const [posBuf, labBuf, ...clusterBufs] = await Promise.all([
+    fetchBuffer(manifest.positions.file),
+    fetchBuffer(manifest.labels.file),
+    ...levels.map((level) => fetchBuffer(level.pointFile)),
   ]);
   const positions = decodeFloat32LE(posBuf, manifest.count * 3, manifest.positions.file);
   const labels = decodeUint8(labBuf, manifest.count, manifest.labels.file);
@@ -58,7 +83,28 @@ export async function loadDatasetArrays(baseUrl: string, fetchImpl: FetchLike = 
   for (let i = 0; i < positions.length; i++) {
     if (!Number.isFinite(positions[i])) throw new Error(`${manifest.positions.file}: 有限でない値があります（添字 ${i}）`);
   }
-  return { manifest, positions, labels, bounds: computeBounds(positions) };
+  const computed = computeBounds(positions);
+  const bounds: DatasetBounds = manifest.bounds
+    ? { min: computed.min, max: computed.max, center: [...manifest.bounds.center], radius: manifest.bounds.radius }
+    : computed;
+  const result: DatasetArrays = { manifest, positions, labels, bounds };
+  if (manifest.clusters) {
+    const { noise } = manifest.clusters;
+    result.clusterAssignments = levels.map((level, li) => {
+      const ids = decodeUint16LE(clusterBufs[li] as ArrayBuffer, manifest.count, level.pointFile);
+      const clusterCount = level.clusters.length;
+      for (let i = 0; i < ids.length; i++) {
+        const id = ids[i] as number;
+        if (id !== noise && id >= clusterCount) {
+          throw new Error(
+            `${level.pointFile}: 点 ${i} のクラスタ id ${id} が範囲外です（クラスタは ${clusterCount} 個、noise は ${noise}）`,
+          );
+        }
+      }
+      return { level: level.name, ids };
+    });
+  }
+  return result;
 }
 
 /** アトラス画像をブラウザで読み込む。 */
