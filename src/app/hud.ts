@@ -30,6 +30,8 @@ export interface HudInfo {
   labels?: boolean;
   /** ミニマップがあるか（M キーの説明を操作説明に含める）。省略時は含めない。 */
   minimap?: boolean;
+  /** 近くの単語の文字の表示があるか（K キーの説明を操作説明に含める。単語のデータセットだけ）。省略時は含めない。 */
+  words?: boolean;
 }
 
 export interface HudAutoSpeed {
@@ -52,10 +54,11 @@ export function formatAutoSpeed(auto: HudAutoSpeed, mode: CameraMode): string {
   return mode === 'fly' ? `${state}  実速度 ${formatSpeed(auto.effectiveSpeed)}` : state;
 }
 
-/** 操作説明の項目。モードごとの操作に、使える機能（目印・ミニマップ）のキーを続ける。 */
+/** 操作説明の項目。モードごとの操作に、使える機能（目印・単語の文字・ミニマップ）のキーを続ける。 */
 export function hudHelpItems(info: HudInfo): string[] {
   const items = [...HELP[info.mode]];
   if (info.labels) items.push('L 目印の表示');
+  if (info.words) items.push('K 単語の文字');
   if (info.minimap) items.push('M ミニマップ');
   return items;
 }

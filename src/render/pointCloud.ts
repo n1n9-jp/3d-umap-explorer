@@ -87,6 +87,7 @@ export class PointCloud {
   private readonly highlightMeshes: Record<HighlightKind, THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial>>;
   private readonly highlighted: Record<HighlightKind, number | null> = { hover: null, selected: null };
   private pixelRatio = 1;
+  private dotScaleAttr: THREE.InstancedBufferAttribute | null = null;
 
   constructor(data: PointCloudData, params: Partial<PointCloudParams> = {}) {
     const atlas = data.atlas ?? null;
@@ -101,6 +102,14 @@ export class PointCloud {
     geometry.setAttribute('instancePosition', new THREE.InstancedBufferAttribute(data.positions, 3));
     geometry.setAttribute('instanceLabel', new THREE.InstancedBufferAttribute(data.colorIndices, 1));
     if (atlas) geometry.setAttribute('instanceCell', new THREE.InstancedBufferAttribute(atlas.cellOrigins, 2));
+    else {
+      // 丸い点の半径の倍率（単語の文字を出している点は 0 にして、文字と重ねない。src/text/）
+      const scales = new Float32Array(count).fill(1);
+      const attr = new THREE.InstancedBufferAttribute(scales, 1);
+      attr.setUsage(THREE.DynamicDrawUsage);
+      geometry.setAttribute('instanceDotScale', attr);
+      this.dotScaleAttr = attr;
+    }
     geometry.instanceCount = count;
     // ビルボードはシェーダで広げるので、カリング用の境界は点群全体＋余白で十分
     geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 10);
@@ -189,6 +198,7 @@ export class PointCloud {
           uCenter: { value: new THREE.Vector3() },
           uColor: { value: new THREE.Vector3(...hexToRgb(`#${style.color.toString(16).padStart(6, '0')}`)) },
           uRing: { value: new THREE.Vector3() },
+          uBox: { value: new THREE.Vector4() },
         },
         transparent: true,
         depthTest: false,
@@ -219,6 +229,29 @@ export class PointCloud {
           this.positions[3 * i]!, this.positions[3 * i + 1]!, this.positions[3 * i + 2]!);
       }
     }
+  }
+
+  /**
+   * 強調表示を、輪の代わりに単語の文字を囲む矩形にする（null で輪に戻す）。
+   * box は [半分の幅, 半分の高さ, 中心の横のずれ, 縦のずれ]（ビュー空間のワールド単位。点の位置からのずれ）。
+   */
+  setHighlightBox(kind: HighlightKind, box: readonly [number, number, number, number] | null): void {
+    const v = this.highlightMeshes[kind].material.uniforms.uBox!.value as THREE.Vector4;
+    if (box) v.set(box[0], box[1], box[2], box[3]);
+    else v.set(0, 0, 0, 0);
+  }
+
+  /**
+   * 丸い点の半径の倍率（画像のないデータセットだけ。長さ count、既定 1）。書き換えたら `commitDotScales()` を呼ぶ。
+   * 単語の文字を出している点を 0 にして、文字と丸い点を重ねない（ピッキングも同じ形になる）。
+   */
+  get dotScales(): Float32Array | null {
+    return (this.dotScaleAttr?.array as Float32Array | undefined) ?? null;
+  }
+
+  /** `dotScales` の書き換えを GPU へ送る。 */
+  commitDotScales(): void {
+    if (this.dotScaleAttr) this.dotScaleAttr.needsUpdate = true;
   }
 
   /** 強調表示されている点の番号。 */

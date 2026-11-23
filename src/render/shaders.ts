@@ -31,6 +31,50 @@ import { LABEL_COLORS } from './palette';
 /** シェーダのパレットの色数（ラベル色の繰り返しの周期）。 */
 export const PALETTE_SIZE = LABEL_COLORS.length;
 
+/**
+ * 点群と単語の文字（src/text/）が共有する GLSL。「形を表す場を閾値で切る」描画の共通部分。
+ * 使う側は、ここで参照するユニフォーム（uViewportHeight・uNearFade・uFog・uPalette・uNoiseColor）を宣言してから展開する。
+ */
+export const GLSL_VERTEX_COMMON = /* glsl */ `
+// ビュー空間の奥行き depth での、ワールド 1 単位の画面上の大きさ（描画バッファの画素）
+float pxPerUnitAt(float depth) {
+  return 0.5 * uViewportHeight * projectionMatrix[1][1] / depth;
+}
+// 近接フェード（0: 完全に消える, 1: フェードなし）
+float nearFadeAt(float dist) {
+  return smoothstep(uNearFade.x, uNearFade.y, dist);
+}
+// 霧の濃さ（背景色へ溶かす割合）
+float fogAt(float dist) {
+  return uFog.z * (1.0 - exp(-max(dist - uFog.x, 0.0) / uFog.y));
+}
+// 色の番号の色（負なら uNoiseColor、それ以外はパレットを繰り返して引く）
+vec3 paletteColor(float colorIndex) {
+  if (colorIndex < -0.5) return uNoiseColor;
+  int label = clamp(int(colorIndex + 0.5), 0, 65535);
+  return uPalette[label % ${PALETTE_SIZE}];
+}
+`;
+
+export const GLSL_FRAGMENT_COMMON = /* glsl */ `
+// 閾値 t で場 f を切り、幅約1ピクセルの滑らかな遷移にする
+float coverage(float f, float t) {
+  float w = max(fwidth(f), 1e-4);
+  return clamp((f - t) / w + 0.5, 0.0, 1.0);
+}
+// フェードの量（0..1）から、線を細らせる閾値と、消すためのアルファの係数
+float fadeThreshold(float fade, float edge) {
+  return mix(0.98, edge, fade);
+}
+float fadeAlpha(float fade) {
+  return smoothstep(0.0, 0.35, fade);
+}
+// ピッキングの番号（index + 1。R が下位 8 ビット）
+vec4 encodePickId(int id) {
+  return vec4(float(id & 255), float((id >> 8) & 255), float((id >> 16) & 255), 255.0) / 255.0;
+}
+`;
+
 export const vertexShader = /* glsl */ `
 precision highp float;
 
@@ -38,6 +82,8 @@ in vec3 instancePosition;
 in float instanceLabel;   // 色の番号（負なら uNoiseColor）
 #ifndef DOTS_ONLY
 in vec2 instanceCell;
+#else
+in float instanceDotScale; // 丸い点の半径の倍率（単語の文字を出している点は 0 へ）
 #endif
 
 uniform float uPointSize;
@@ -57,23 +103,31 @@ out float vDigit;
 out float vFade;
 out float vFog;
 out float vPx;
+#ifdef DOTS_ONLY
+out float vDotScale;
+#endif
 #ifdef PICKING
 flat out int vPickId;
 #endif
-
+${GLSL_VERTEX_COMMON}
 void main() {
   vec4 mv = modelViewMatrix * vec4(instancePosition, 1.0);
   float dist = length(mv.xyz);
   float depth = max(-mv.z, 1e-6);
 
-  float fade = smoothstep(uNearFade.x, uNearFade.y, dist);
+  float fade = nearFadeAt(dist);
+#ifdef DOTS_ONLY
+  // 単語の文字を出している点は、丸い点を縮めて消す（文字と重ならないように）
+  if (fade <= 0.0 || instanceDotScale <= 0.001) {
+#else
   if (fade <= 0.0) {
+#endif
     // 視界から外す（クリップ空間の外へ）
     gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
     return;
   }
 
-  float pxPerUnit = 0.5 * uViewportHeight * projectionMatrix[1][1] / depth;
+  float pxPerUnit = pxPerUnitAt(depth);
   float px = uPointSize * pxPerUnit;
   float shownPx = max(px, uMinPixelSize);
   float size = shownPx / pxPerUnit;
@@ -90,15 +144,13 @@ void main() {
   vUv = instanceCell + cornerUv * uCellSize;
   vDigit = smoothstep(uDigitPx.x, uDigitPx.y, shownPx);
 #endif
-  if (instanceLabel < -0.5) {
-    vColor = uNoiseColor;
-  } else {
-    int label = clamp(int(instanceLabel + 0.5), 0, 65535);
-    vColor = uPalette[label % ${PALETTE_SIZE}];
-  }
+  vColor = paletteColor(instanceLabel);
   vPx = shownPx;
+#ifdef DOTS_ONLY
+  vDotScale = instanceDotScale;
+#endif
   vFade = fade;
-  vFog = uFog.z * (1.0 - exp(-max(dist - uFog.x, 0.0) / uFog.y));
+  vFog = fogAt(dist);
 #ifdef PICKING
   vPickId = gl_InstanceID + 1;
 #endif
@@ -123,17 +175,15 @@ in float vDigit;
 in float vFade;
 in float vFog;
 in float vPx;
+#ifdef DOTS_ONLY
+in float vDotScale;
+#endif
 #ifdef PICKING
 flat in int vPickId;
 #endif
 
 out vec4 fragColor;
-
-// 閾値 t で場 f を切り、幅約1ピクセルの滑らかな遷移にする
-float coverage(float f, float t) {
-  float w = max(fwidth(f), 1e-4);
-  return clamp((f - t) / w + 0.5, 0.0, 1.0);
-}
+${GLSL_FRAGMENT_COMMON}
 
 void main() {
 #ifdef DOTS_ONLY
@@ -145,26 +195,29 @@ void main() {
 
   // 丸い点の場（ピクセル単位）：半径の位置で 0.5。中距離の点が大きな円盤にならないよう半径に上限を設ける
   float radiusPx = min(uDotRadius.x * vPx, uDotRadius.y);
+#ifdef DOTS_ONLY
+  radiusPx *= vDotScale;
+#endif
   float disc = 0.5 + 0.1 * (radiusPx - length(vLocal) * vPx);
   float field = mix(disc, ink, vDigit);
 
   // 近接フェード：閾値を上げて線を細らせる
-  float t = mix(0.98, 0.5, vFade);
+  float t = fadeThreshold(vFade, 0.5);
   float outline = uOutline * vDigit * vFade;
 
   float body = coverage(field, t);
   float alpha = coverage(field, t - outline);
-  float fadeAlpha = smoothstep(0.0, 0.35, vFade);
+  float fadeA = fadeAlpha(vFade);
 
 #ifdef PICKING
-  if (alpha * fadeAlpha < 0.5) discard;
-  if (body * fadeAlpha < 0.5) {
+  if (alpha * fadeA < 0.5) discard;
+  if (body * fadeA < 0.5) {
     fragColor = vec4(0.0);  // 縁取り：背後を隠すが、点としては選ばない
   } else {
-    fragColor = vec4(float(vPickId & 255), float((vPickId >> 8) & 255), float((vPickId >> 16) & 255), 255.0) / 255.0;
+    fragColor = encodePickId(vPickId);
   }
 #else
-  alpha *= fadeAlpha;
+  alpha *= fadeA;
   if (alpha < 0.02) discard;
 
   vec3 color = mix(uBackground, vColor, body);
@@ -192,9 +245,11 @@ uniform float uMinPixelSize;
 uniform float uViewportHeight;
 uniform vec3 uRing;        // x: 半径の下限, y: 線の太さ, z: 縁取りの太さ（いずれも描画バッファのピクセル）
 uniform vec2 uDotRadius;   // 点群と共有（DOTS_ONLY のときだけ使う）
+uniform vec4 uBox;         // 単語を囲む形 xy: 半分の幅と高さ, zw: 中心のずれ（ビュー空間のワールド単位）。x が 0 なら輪
 
 out vec2 vPx;              // 中心からのずれ（ピクセル）
 out float vRadius;
+out vec2 vHalf;            // 単語を囲む矩形の半分の大きさ（ピクセル）。x が 0 なら輪
 
 void main() {
   vec4 mv = modelViewMatrix * vec4(uCenter, 1.0);
@@ -204,6 +259,17 @@ void main() {
     return;
   }
   float pxPerUnit = 0.5 * uViewportHeight * projectionMatrix[1][1] / depth;
+  if (uBox.x > 0.0) {
+    // 単語の文字を囲む角の丸い矩形（文字の縁取りの外側に、線の太さの分だけ離す）
+    vec2 halfSz = uBox.xy * pxPerUnit + vec2(0.5 * uRing.y + 3.0);
+    vec2 ext = halfSz + vec2(0.5 * uRing.y + uRing.z + 2.0);
+    vPx = position.xy * 2.0 * ext;
+    vHalf = halfSz;
+    vRadius = 0.0;
+    mv.xy += uBox.zw + vPx / pxPerUnit;
+    gl_Position = projectionMatrix * mv;
+    return;
+  }
   float shownPx = max(uPointSize * pxPerUnit, uMinPixelSize);
 #ifdef DOTS_ONLY
   // 丸い点（点群と同じ式の半径）より少し外側
@@ -216,6 +282,7 @@ void main() {
 
   vPx = position.xy * 2.0 * halfPx;
   vRadius = radius;
+  vHalf = vec2(0.0);
   mv.xy += vPx / pxPerUnit;
   gl_Position = projectionMatrix * mv;
 }
@@ -230,11 +297,20 @@ uniform vec3 uRing;
 
 in vec2 vPx;
 in float vRadius;
+in vec2 vHalf;
 
 out vec4 fragColor;
 
 void main() {
-  float d = abs(length(vPx) - vRadius);  // 輪の中心線からの距離（ピクセル）
+  float d;
+  if (vHalf.x > 0.0) {
+    // 角の丸い矩形の輪郭からの距離（ピクセル）
+    float r = min(6.0, min(vHalf.x, vHalf.y));
+    vec2 q = abs(vPx) - vHalf + vec2(r);
+    d = abs(length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r);
+  } else {
+    d = abs(length(vPx) - vRadius);  // 輪の中心線からの距離（ピクセル）
+  }
   float halfLine = 0.5 * uRing.y;
   float body = clamp(halfLine + 0.5 - d, 0.0, 1.0);
   float alpha = clamp(halfLine + uRing.z + 0.5 - d, 0.0, 1.0);

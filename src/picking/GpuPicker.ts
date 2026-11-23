@@ -14,6 +14,17 @@ export interface GpuPickerOptions {
   radiusPx?: number;
 }
 
+/**
+ * 点群のほかにピッキングで描く層（単語の文字など）。`source` のジオメトリを `material`（PICKING で番号を出すシェーダ）で描く。
+ * `material` の uViewportHeight は、ピッキングが描く領域の高さに合わせて書き換える（描画用とは別のオブジェクトにしておく）。
+ */
+export interface PickLayer {
+  source: THREE.Mesh;
+  material: THREE.ShaderMaterial;
+  /** 描くか（省略時は source.visible） */
+  visible?: () => boolean;
+}
+
 /** 番号の画像（全画面）。検証用。 */
 export interface IdImage {
   width: number;
@@ -45,6 +56,7 @@ export class GpuPicker {
   private fullTarget: THREE.WebGLRenderTarget | null = null;
   private readonly savedClearColor = new THREE.Color();
   private readonly bufferSize = new THREE.Vector2();
+  private readonly layers: { layer: PickLayer; mesh: THREE.Mesh }[] = [];
 
   constructor(renderer: THREE.WebGLRenderer, cloud: PointCloud, options: GpuPickerOptions = {}) {
     this.renderer = renderer;
@@ -87,6 +99,22 @@ export class GpuPicker {
     });
   }
 
+  /** 点群のほかに描く層を加える。返す関数で外す（ジオメトリとマテリアルは層の持ち主が解放する）。 */
+  addLayer(layer: PickLayer): () => void {
+    const mesh = new THREE.Mesh(layer.source.geometry, layer.material);
+    mesh.frustumCulled = false;
+    mesh.matrixAutoUpdate = false;
+    mesh.renderOrder = layer.source.renderOrder;
+    const entry = { layer, mesh };
+    this.layers.push(entry);
+    this.scene.add(mesh);
+    return () => {
+      const k = this.layers.indexOf(entry);
+      if (k >= 0) this.layers.splice(k, 1);
+      this.scene.remove(mesh);
+    };
+  }
+
   /** ピッキング用マテリアルで全画面を描き、番号の画像を返す（検証用）。 */
   async readIdImage(camera: THREE.PerspectiveCamera): Promise<IdImage> {
     const { x: bw, y: bh } = this.renderer.getDrawingBufferSize(this.bufferSize);
@@ -110,6 +138,8 @@ export class GpuPicker {
     this.fullTarget?.dispose();
     this.target = this.fullTarget = null;
     this.scene.remove(this.mesh);
+    for (const { mesh } of this.layers) this.scene.remove(mesh);
+    this.layers.length = 0;
   }
 
   /**
@@ -137,6 +167,12 @@ export class GpuPicker {
     this.mesh.matrix.copy(this.cloud.mesh.matrixWorld);
     this.mesh.visible = this.cloud.mesh.visible;
     this.cloud.setPickingViewportHeight(h);
+    for (const { layer, mesh } of this.layers) {
+      layer.source.updateWorldMatrix(true, false);
+      mesh.matrix.copy(layer.source.matrixWorld);
+      mesh.visible = layer.visible ? layer.visible() : layer.source.visible;
+      layer.material.uniforms.uViewportHeight!.value = h;
+    }
 
     const prevTarget = renderer.getRenderTarget();
     const prevFace = renderer.getActiveCubeFace();

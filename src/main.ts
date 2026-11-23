@@ -23,6 +23,7 @@ import type { DatasetKind } from './data/manifest';
 import type { EmbeddingHost, UmapFeatureState } from './compute/host';
 import type { UmapFeature, UmapOutcome } from './compute/umapFeature';
 import { embeddingStatusText, parseUrlParams, searchWithParams, type UmapParams } from './compute/params';
+import type { WordLabelsState } from './text/WordLabels';
 
 interface FrameStats { frames: number; meanMs: number; medianMs: number; p95Ms: number; maxMs: number }
 
@@ -79,6 +80,11 @@ declare global {
         text(index: number): string | null;
         /** 点の色（'#rrggbb'。描画・ミニマップ・情報パネルと同じ規則） */
         pointColor(index: number): string;
+      };
+      /** 近くの単語の文字（src/text/）。単語のデータセットでなければ state は null。enabled は K キーと同じ切り替え */
+      words: {
+        getState(): WordLabelsState | null;
+        setEnabled(enabled: boolean): void;
       };
       /** WebGL の資源の数（renderer.info.memory と programs） */
       memory(): { geometries: number; textures: number; programs: number };
@@ -161,6 +167,8 @@ async function start(): Promise<void> {
   };
   const state: DatasetState = { current: null, loading: false, error: null, generation: 0 };
   let loadToken = 0;
+  let wordsEnabled = true; // K キーの状態（データセットを切り替えても保つ）
+  const setWordsEnabled = (enabled: boolean) => { wordsEnabled = enabled; view?.words?.setEnabled(enabled); };
 
   const switcher = new DatasetSwitcher(doc, catalog, (id) => { void switchTo(id, { pushHistory: true }); });
 
@@ -176,6 +184,7 @@ async function start(): Promise<void> {
       autoSpeed: { available: s.autoSpeed.available, enabled: s.autoSpeed.enabled, effectiveSpeed: s.effectiveSpeed },
       viewParams: formatView({ pos: s.position, look: s.lookAt }),
       labels: view.clusterLabels.available, // L キー（クラスタのないデータセットでは使えない）
+      words: view.words !== null, // K キー（単語のデータセットだけ）
       minimap: true, // M キー
     });
   };
@@ -193,11 +202,11 @@ async function start(): Promise<void> {
     prev?.dispose();
     view = null;
     try {
-      view = new DatasetView(ctx, data, { pointSize });
+      view = new DatasetView(ctx, data, { pointSize, words: wordsEnabled });
     } catch (e) {
       // 作れなければ、前のデータで作り直して表示を保つ（視点はホーム）
       if (prev && prevTarget) {
-        view = new DatasetView(ctx, prev.data, { coloring: prev.coloring });
+        view = new DatasetView(ctx, prev.data, { coloring: prev.coloring, words: wordsEnabled });
         view.controller.onChange(() => updateHud());
         view.controller.setView(view.homeView());
       }
@@ -234,10 +243,10 @@ async function start(): Promise<void> {
     view = null;
     let next: DatasetView;
     try {
-      next = new DatasetView(ctx, data, { pointSize: ui.pointSize, coloring: options.coloring });
+      next = new DatasetView(ctx, data, { pointSize: ui.pointSize, coloring: options.coloring, words: wordsEnabled });
     } catch (e) {
       // 作れなければ、前のデータで作り直して表示を保つ
-      view = new DatasetView(ctx, prev.data, { pointSize: ui.pointSize, coloring: prev.coloring });
+      view = new DatasetView(ctx, prev.data, { pointSize: ui.pointSize, coloring: prev.coloring, words: wordsEnabled });
       view.controller.onChange(() => updateHud());
       view.applyUiState(ui);
       throw e;
@@ -361,6 +370,7 @@ async function start(): Promise<void> {
   bindShortcut(window, 'KeyL', () => view?.clusterLabels.toggle()); // L キーで目印の表示・非表示
   bindShortcut(window, 'KeyM', () => view?.minimap.toggle()); // M キーでミニマップの表示・非表示
   bindShortcut(window, 'KeyU', () => toggleUmapPanel(true)); // U キーで UMAP の再計算のパネルを開閉
+  bindShortcut(window, 'KeyK', () => setWordsEnabled(!wordsEnabled)); // K キーで近くの単語の文字の表示・非表示
 
   // ---- 描画ループ ----
   let frameTimes: number[] | null = null;
@@ -463,6 +473,10 @@ async function start(): Promise<void> {
         const m = v().arrays.manifest;
         return { bounds: m.bounds ?? null, density: m.density ?? null, overview: m.overview ?? null, umap: m.umap ?? null };
       },
+    },
+    words: {
+      getState: () => v().words?.getState() ?? null,
+      setEnabled: (enabled) => setWordsEnabled(enabled),
     },
     memory: () => ({
       geometries: renderer.info.memory.geometries,

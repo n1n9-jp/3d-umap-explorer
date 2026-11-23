@@ -29,6 +29,7 @@ import { InteractionController } from '../interaction/InteractionController';
 import { InfoPanel, type PointInfoSource } from '../interaction/infoPanel';
 import { ClusterLabels } from '../labels/ClusterLabels';
 import { Minimap } from '../minimap/Minimap';
+import { WordLabels } from '../text/WordLabels';
 
 /** 読み込み済みのデータ（GPU の資源はまだ作らない）。 */
 export interface LoadedDataset {
@@ -80,6 +81,8 @@ export interface DatasetViewOptions {
    * 省略時は arrays のラベル・クラスタから決める
    */
   coloring?: PointColoring | null;
+  /** 近くの単語の文字の表示を有効にするか（K キーの状態。省略時は有効） */
+  words?: boolean;
 }
 
 /**
@@ -115,6 +118,11 @@ export class DatasetView {
   readonly minimap: Minimap;
   /** 点ごとの表示用の文字列（単語のデータセットだけ） */
   readonly text: string[] | null;
+  /** 近くの単語の文字（単語のデータセットで、画像のないときだけ。src/text/） */
+  readonly words: WordLabels | null;
+  /** 描いている座標が arrays.positions と違う間、単語の文字を止めているか（setDisplayPositions） */
+  private wordsSuspended = false;
+  private wordsEnabledBeforeSuspend = true;
   private readonly ctx: AppContext;
   private readonly boundsCenter: THREE.Vector3;
   /**
@@ -186,6 +194,24 @@ export class DatasetView {
     this.picker = new GpuPicker(renderer, this.cloud);
     this.picking = createPickingDebug(renderer, scene, camera, this.cloud, this.picker);
 
+    // ---- 近くの単語の文字（src/text/）。画像のない単語のデータセットだけ。root に加え、ピッキングの層にする ----
+    this.words = this.text && this.cloud.dotsOnly && manifest.kind === 'text'
+      ? new WordLabels({
+        text: this.text,
+        positions: arrays.positions,
+        colorIndices: this.coloring.indices,
+        cloud: this.cloud,
+        picker: this.picker,
+        nearest: (x, y, z, k) => this.spatialIndex.kNearest(x, y, z, k).indices,
+        camera,
+        doc,
+      })
+      : null;
+    if (this.words) {
+      this.root.add(this.words.group);
+      if (options.words === false) this.words.setEnabled(false);
+    }
+
     // ---- ホバー・選択・ダブルクリックで点へ飛ぶ（src/interaction/）----
     this.infoPanel = new InfoPanel(doc, this.pointInfoSource(coarseLevel?.clusters.map((c) => c.name) ?? []), () => this.interaction.select(null));
     this.interaction = new InteractionController({
@@ -234,6 +260,21 @@ export class DatasetView {
     this.displayPositions.set(positions);
     const attr = this.cloud.mesh.geometry.getAttribute('instancePosition');
     attr.needsUpdate = true;
+    // 近くの単語の文字は、空間索引と同じ座標（arrays.positions）に置かれる。描いている座標がそれと違う間
+    // （計算の途中の表示、新旧の座標の間の移動）は、文字が点から離れてしまうので、文字を出さない。
+    if (this.words) {
+      const base = this.arrays.positions;
+      let detached = false;
+      for (let i = 0; i < base.length; i++) { if (base[i] !== this.displayPositions[i]) { detached = true; break; } }
+      if (detached && !this.wordsSuspended) {
+        this.wordsSuspended = true;
+        this.wordsEnabledBeforeSuspend = this.words.getState().enabled;
+        this.words.setEnabled(false);
+      } else if (!detached && this.wordsSuspended) {
+        this.wordsSuspended = false;
+        this.words.setEnabled(this.wordsEnabledBeforeSuspend);
+      }
+    }
     // 強調表示の輪の位置も合わせ直す
     for (const kind of ['hover', 'selected'] as const) this.cloud.setHighlight(kind, this.cloud.getHighlight(kind));
   }
@@ -294,6 +335,7 @@ export class DatasetView {
   update(dt: number, width: number, height: number): void {
     this.controller.update(dt);
     this.updateCameraDependent();
+    this.words?.update(dt, width, height);
     this.clusterLabels.update(width, height);
   }
 
@@ -310,6 +352,7 @@ export class DatasetView {
     this.clusterLabels.dispose();
     this.minimap.dispose();
     this.controller.dispose();
+    this.words?.dispose();
     this.picker.dispose();
     this.ctx.scene.remove(this.root);
     this.cloud.dispose();

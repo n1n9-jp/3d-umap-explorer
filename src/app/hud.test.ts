@@ -74,3 +74,16 @@ describe('formatHud の機能の説明（目印・ミニマップ）', () => {
     expect(formatHud({ ...base, mode: 'fly', labels: true, minimap: true }).split('\n')[2]).toBe(items.join(' / '));
   });
 });
+
+describe('formatHud の機能の説明（単語の文字）', () => {
+  it('単語のデータセットでは K キーを、目印とミニマップの間に含める', () => {
+    const line = formatHud({ ...base, mode: 'fly', labels: true, words: true, minimap: true }).split('\n')[2]!;
+    expect(line.endsWith('O 俯瞰モードへ / L 目印の表示 / K 単語の文字 / M ミニマップ')).toBe(true);
+    const overview = formatHud({ ...base, mode: 'overview', labels: true, words: true, minimap: true }).split('\n')[2]!;
+    expect(overview).toContain('K 単語の文字');
+  });
+  it('画像のデータセット（words が false・省略）では含めない', () => {
+    expect(formatHud({ ...base, mode: 'fly', labels: true, words: false, minimap: true }).split('\n')[2]).not.toContain('K 単語');
+    expect(formatHud({ ...base, mode: 'fly', labels: true, minimap: true }).split('\n')[2]).not.toContain('K 単語');
+  });
+});
