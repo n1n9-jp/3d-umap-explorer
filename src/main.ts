@@ -20,6 +20,7 @@ import {
 import { DatasetSwitcher } from './app/datasetSwitcher';
 import { colorIndexHex } from './render/colorScheme';
 import type { DatasetKind } from './data/manifest';
+import type { WordLabelsState } from './text/WordLabels';
 
 interface FrameStats { frames: number; meanMs: number; medianMs: number; p95Ms: number; maxMs: number }
 
@@ -77,6 +78,11 @@ declare global {
         /** 点の色（'#rrggbb'。描画・ミニマップ・情報パネルと同じ規則） */
         pointColor(index: number): string;
       };
+      /** 近くの単語の文字（src/text/）。単語のデータセットでなければ state は null。enabled は K キーと同じ切り替え */
+      words: {
+        getState(): WordLabelsState | null;
+        setEnabled(enabled: boolean): void;
+      };
       /** WebGL の資源の数（renderer.info.memory と programs） */
       memory(): { geometries: number; textures: number; programs: number };
     };
@@ -124,6 +130,8 @@ async function start(): Promise<void> {
   let target: DatasetTarget | null = null;
   const state: DatasetState = { current: null, loading: false, error: null, generation: 0 };
   let loadToken = 0;
+  let wordsEnabled = true; // K キーの状態（データセットを切り替えても保つ）
+  const setWordsEnabled = (enabled: boolean) => { wordsEnabled = enabled; view?.words?.setEnabled(enabled); };
 
   const switcher = new DatasetSwitcher(doc, catalog, (id) => { void switchTo(id, { pushHistory: true }); });
 
@@ -139,6 +147,7 @@ async function start(): Promise<void> {
       autoSpeed: { available: s.autoSpeed.available, enabled: s.autoSpeed.enabled, effectiveSpeed: s.effectiveSpeed },
       viewParams: formatView({ pos: s.position, look: s.lookAt }),
       labels: view.clusterLabels.available, // L キー（クラスタのないデータセットでは使えない）
+      words: view.words !== null, // K キー（単語のデータセットだけ）
       minimap: true, // M キー
     });
   };
@@ -156,11 +165,11 @@ async function start(): Promise<void> {
     prev?.dispose();
     view = null;
     try {
-      view = new DatasetView(ctx, data, { pointSize });
+      view = new DatasetView(ctx, data, { pointSize, words: wordsEnabled });
     } catch (e) {
       // 作れなければ、前のデータで作り直して表示を保つ（視点はホーム）
       if (prev && prevTarget) {
-        view = new DatasetView(ctx, prev.data, {});
+        view = new DatasetView(ctx, prev.data, { words: wordsEnabled });
         view.controller.onChange(() => updateHud());
         view.controller.setView(view.homeView());
       }
@@ -255,6 +264,7 @@ async function start(): Promise<void> {
   bindShortcut(window, 'KeyH', () => view?.controller.goHome(view.homeView())); // H キーでホームの視点へ戻る
   bindShortcut(window, 'KeyL', () => view?.clusterLabels.toggle()); // L キーで目印の表示・非表示
   bindShortcut(window, 'KeyM', () => view?.minimap.toggle()); // M キーでミニマップの表示・非表示
+  bindShortcut(window, 'KeyK', () => setWordsEnabled(!wordsEnabled)); // K キーで近くの単語の文字の表示・非表示
 
   // ---- 描画ループ ----
   let frameTimes: number[] | null = null;
@@ -337,6 +347,10 @@ async function start(): Promise<void> {
       switchTo: (param) => switchTo(param, { pushHistory: true }),
       text: (i) => view?.text?.[i] ?? null,
       pointColor: (i) => colorIndexHex(v().coloring.indices[i] ?? 0),
+    },
+    words: {
+      getState: () => v().words?.getState() ?? null,
+      setEnabled: (enabled) => setWordsEnabled(enabled),
     },
     memory: () => ({
       geometries: renderer.info.memory.geometries,

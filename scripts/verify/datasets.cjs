@@ -595,6 +595,9 @@ async function main() {
     await waitForServer(base);
     browser = await chromium.launch({ args: CHROMIUM_ARGS });
     const page = await openPage(browser, base, 'data=word2vec-10k');
+    // 近くの単語の文字（src/text/。words.cjs で検証する）は、ここでは無効にして、丸い点の形と点の同一性を確かめる
+    // （K キーと同じ切り替え。データセットを切り替えても保つ）
+    await page.evaluate(() => window.__explorer.words.setEnabled(false));
     const cdp = await page.context().newCDPSession(page);
     await testWord2vecDisplay(page);
     await testPicking(page);
