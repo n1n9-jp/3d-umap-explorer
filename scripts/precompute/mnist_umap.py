@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 """MNIST 1万点の3次元UMAP座標を事前計算し、public/data/mnist/ へ配信用データを書き出す。
 
-入力の取得、UMAP計算、正規化、書き出し、簡単な検証までを1コマンドで行う。
+入力の取得（SHA-256 で照合）、UMAP計算、正規化、空間の構造（クラスタ・密度・全体範囲）の追加、
+書き出し、簡単な検証までを1コマンドで行う。
     python scripts/precompute/mnist_umap.py
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from importlib.metadata import version
 from pathlib import Path
@@ -19,12 +23,15 @@ import numpy as np
 from PIL import Image
 from scipy.spatial import cKDTree
 
+import add_structure
+
 REPO_URL = "https://github.com/tensorflow/embedding-projector-standalone"
 COMMIT = "6ff71f7233ac5947450409e7938b58ec14d1e24c"
+# 入力ファイル: キー -> (ファイル名, SHA-256)。取得直後と .cache/ の再利用時に照合する
 SRC_FILES = {
-    "tensors": ("mnist_10k_784d_tensors.bytes", 31_360_000),
-    "labels": ("mnist_10k_784d_labels.tsv", 20_000),
-    "sprite": ("mnist_10k_sprite.png", None),
+    "tensors": ("mnist_10k_784d_tensors.bytes", "f35429bfdd77d51c5dea063ef595c6fa242921aa69ee648056c8f26e2c2d370a"),
+    "labels": ("mnist_10k_784d_labels.tsv", "b00c1c90c51a6005aa65dbdac2843589c7580a99541ad50ec435a545b6c25947"),
+    "sprite": ("mnist_10k_sprite.png", "9221b2e9866f9590d5c90a092aea5a1904e83e0e02d8125098bbe51d1cbe055d"),
 }
 
 COUNT = 10_000
@@ -37,6 +44,7 @@ UMAP_PARAMS = dict(
     min_dist=0.1,
     metric="euclidean",
     random_state=42,
+    n_jobs=1,  # 単一スレッドで実行する（並列実行では結果が変わりうる）
     # umap-learn 0.6 の既定値は将来変わる。0.5系と同じ処理（旧パイプライン）に固定して再現性を保つ
     compatibility_layout=True,
 )
@@ -50,10 +58,32 @@ def run(cmd: list[str], cwd: Path) -> None:
     subprocess.run(cmd, cwd=cwd, check=True)
 
 
+def sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def is_valid(path: Path, expected: str) -> bool:
+    return path.is_file() and sha256(path) == expected
+
+
 def fetch_inputs() -> dict[str, Path]:
-    """oss_data/ の3ファイルだけを、固定コミットから .cache/ へ取得する。"""
+    """oss_data/ の3ファイルだけを、固定コミットから .cache/ へ取得する。
+
+    取得済みのファイルも SHA-256 で照合し、一致しないものは取得し直す。
+    """
     paths = {key: CACHE / name for key, (name, _) in SRC_FILES.items()}
-    if all(p.exists() for p in paths.values()):
+    stale = []
+    for key, (_, digest) in SRC_FILES.items():
+        if is_valid(paths[key], digest):
+            continue
+        if paths[key].exists():
+            print(f"{paths[key]} の SHA-256 が一致しません。取得し直します")
+        stale.append(key)
+    if not stale:
         return paths
 
     CACHE.mkdir(parents=True, exist_ok=True)
@@ -64,26 +94,29 @@ def fetch_inputs() -> dict[str, Path]:
     run(["git", "init", "-q"], work)
     run(["git", "remote", "add", "origin", REPO_URL + ".git"], work)
     run(["git", "sparse-checkout", "init", "--no-cone"], work)
-    run(["git", "sparse-checkout", "set", *[f"/oss_data/{n}" for n, _ in SRC_FILES.values()]], work)
+    run(["git", "sparse-checkout", "set", *[f"/oss_data/{SRC_FILES[k][0]}" for k in stale]], work)
     run(["git", "fetch", "-q", "--depth", "1", "--filter=blob:none", "origin", COMMIT], work)
     run(["git", "checkout", "-q", "FETCH_HEAD"], work)
-    for key, (name, _) in SRC_FILES.items():
-        shutil.copyfile(work / "oss_data" / name, paths[key])
+    for key in stale:
+        name, digest = SRC_FILES[key]
+        src = work / "oss_data" / name
+        if not is_valid(src, digest):
+            raise SystemExit(f"取得した {name} の SHA-256 が想定と一致しません")
+        # 一時ファイルへ書いてから名前を変える（途中で切れたファイルを .cache/ に残さない）
+        tmp = paths[key].with_name(paths[key].name + ".tmp")
+        shutil.copyfile(src, tmp)
+        os.replace(tmp, paths[key])
     shutil.rmtree(work)
     return paths
 
 
 def load_inputs(paths: dict[str, Path]):
-    tensors_size = SRC_FILES["tensors"][1]
-    if paths["tensors"].stat().st_size != tensors_size:
-        raise SystemExit(f"{paths['tensors']} のサイズが {tensors_size} バイトではありません")
     x = np.fromfile(paths["tensors"], dtype="<f4").reshape(COUNT, DIM)
 
-    lines = paths["labels"].read_text().split()
-    labels = np.array([int(s) for s in lines], dtype=np.uint8)
-    if labels.shape != (COUNT,) or labels.min() < 0 or labels.max() > 9:
+    raw = np.array([int(s) for s in paths["labels"].read_text().split()], dtype=np.int64)
+    if raw.shape != (COUNT,) or raw.min() < 0 or raw.max() > 9:
         raise SystemExit("labels.tsv の内容が想定と異なります")
-    return x, labels
+    return x, raw.astype(np.uint8)
 
 
 def normalize(y: np.ndarray) -> np.ndarray:
@@ -95,12 +128,8 @@ def normalize(y: np.ndarray) -> np.ndarray:
     return y.astype("<f4")
 
 
-def write_outputs(pos: np.ndarray, labels: np.ndarray, sprite_src: Path, umap_version: str) -> None:
-    OUT.mkdir(parents=True, exist_ok=True)
-    pos.tofile(OUT / "positions.f32")
-    labels.tofile(OUT / "labels.u8")
-    shutil.copyfile(sprite_src, OUT / "sprite.png")
-
+def build_manifest(sprite_src: Path, umap_version: str) -> dict:
+    """スプライトを検証し、初期状態の manifest を返す。"""
     with Image.open(sprite_src) as im:
         width, height = im.size
     if width % CELL or height % CELL:
@@ -109,7 +138,7 @@ def write_outputs(pos: np.ndarray, labels: np.ndarray, sprite_src: Path, umap_ve
     if columns * rows < COUNT:
         raise SystemExit("sprite.png のセル数が点の数に足りません")
 
-    manifest = {
+    return {
         "name": "MNIST 10k",
         "count": COUNT,
         "positions": {"file": "positions.f32", "dtype": "float32", "components": 3},
@@ -122,10 +151,37 @@ def write_outputs(pos: np.ndarray, labels: np.ndarray, sprite_src: Path, umap_ve
             "minDist": UMAP_PARAMS["min_dist"],
             "metric": UMAP_PARAMS["metric"],
             "randomState": UMAP_PARAMS["random_state"],
+            "compatibilityLayout": UMAP_PARAMS["compatibility_layout"],
         },
         "source": {"url": REPO_URL, "commit": COMMIT},
     }
-    (OUT / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+
+
+def write_outputs(pos: np.ndarray, labels: np.ndarray, sprite_src: Path, umap_version: str) -> None:
+    """配信用データ一式を作り、すべての検証を終えてから OUT へまとめて置く。
+
+    作業用ディレクトリ（OUT と同じファイルシステム）に一式を作って検証し、
+    最後にファイルごとに名前を変えて OUT へ移す。途中で失敗しても OUT は実行前のまま残る。
+    """
+    manifest = build_manifest(sprite_src, umap_version)
+
+    OUT.parent.mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(prefix=f".{OUT.name}-staging-", dir=OUT.parent))
+    try:
+        pos.tofile(stage / "positions.f32")
+        labels.tofile(stage / "labels.u8")
+        shutil.copyfile(sprite_src, stage / "sprite.png")
+        (stage / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+        # クラスタ・密度・全体範囲を計算し、manifest へ追記する（検証に失敗すると異常終了する）
+        add_structure.add_structure(stage)
+
+        OUT.mkdir(parents=True, exist_ok=True)
+        names = sorted(p.name for p in stage.iterdir())
+        # manifest.json は最後に置く（他のファイルが揃ってから、それを指す manifest に切り替わる）
+        for name in [n for n in names if n != "manifest.json"] + ["manifest.json"]:
+            os.replace(stage / name, OUT / name)
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
 
 
 def report(pos: np.ndarray, labels: np.ndarray) -> None:
