@@ -9,12 +9,31 @@ const http = require('node:http');
 
 // ---------- データから視点を決める ----------
 
+/**
+ * データセットを読む。`labels` はラベル（あれば）、なければ粗い階層のクラスタ id（クラスタなしは 65535）を、
+ * 「同じ塊に属する点」の目安として入れる（computeViews がクラスタを近似するのに使う）。`text` は単語（あれば）。
+ */
 function loadDataset(dir) {
   const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8'));
   const pb = fs.readFileSync(path.join(dir, manifest.positions.file));
   const positions = new Float32Array(pb.buffer.slice(pb.byteOffset, pb.byteOffset + pb.byteLength));
-  const labels = new Uint8Array(fs.readFileSync(path.join(dir, manifest.labels.file)));
-  return { manifest, positions, labels, count: manifest.count };
+  let labels = null;
+  let groupSource = 'none';
+  if (manifest.labels) {
+    labels = new Uint8Array(fs.readFileSync(path.join(dir, manifest.labels.file)));
+    groupSource = 'label';
+  } else if (manifest.clusters) {
+    const cb = fs.readFileSync(path.join(dir, manifest.clusters.levels[0].pointFile));
+    labels = new Uint16Array(cb.buffer.slice(cb.byteOffset, cb.byteOffset + cb.byteLength));
+    groupSource = 'cluster';
+  } else {
+    labels = new Uint8Array(manifest.count);
+  }
+  const coarse = manifest.clusters
+    ? (() => { const cb = fs.readFileSync(path.join(dir, manifest.clusters.levels[0].pointFile)); return new Uint16Array(cb.buffer.slice(cb.byteOffset, cb.byteOffset + cb.byteLength)); })()
+    : null;
+  const text = manifest.text ? JSON.parse(fs.readFileSync(path.join(dir, manifest.text.file), 'utf8')) : null;
+  return { manifest, positions, labels, groupSource, coarse, text, count: manifest.count };
 }
 
 const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];

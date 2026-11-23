@@ -2,21 +2,31 @@
  * 選択中の点の情報パネル（画面の右上）と、ホバー中の点のラベル（カーソルの近く）。
  * 要素は index.html にある（#info、#hover-label、#info-live）。
  *
+ * 画像のデータセット（MNIST）では、元の画像・ラベル・番号・クラスタを、
+ * 単語のデータセット（word2vec）では、画像の代わりに単語を大きく出し、番号とクラスタを出す。
+ *
  * アクセシビリティ: パネルは見出しつきのリージョン（role="region"）で、画像のキャンバスは role="img" と
  * 代替テキストを持つ。選択したときの読み上げは、常に DOM にある #info-live（role="status"、aria-live="polite"）へ
  * 文を入れて行う。パネル自体は `hidden` で出し入れするので、中身を読み上げ対象にしても出現時に拾われない読み上げ環境がある。
  */
+import type { DatasetKind } from '../data/manifest';
 
-export interface PointInfoSource {
+export interface PointInfoImage {
   /** アトラス画像 */
   atlas: CanvasImageSource;
   /** アトラスのセルの大きさ（画像のピクセル）と列数 */
   cellSize: [number, number];
   columns: number;
-  labels: Uint8Array;
-  labelNames: string[];
-  /** ラベルの色（0..1 の RGB）。ラベルの添字の順 */
-  labelColors: [number, number, number][];
+}
+
+export interface PointInfoSource {
+  kind: DatasetKind;
+  /** 点の名前（画像のデータセットではラベル名、単語のデータセットでは単語） */
+  title(index: number): string;
+  /** 点の色（'#rrggbb'。描画と同じ色） */
+  color(index: number): string;
+  /** 画像アトラス（画像のデータセットだけ） */
+  image: PointInfoImage | null;
   /** 点ごとの粗い階層のクラスタ id と、その名前。クラスタの情報がないデータセットでは null */
   coarse: { ids: Uint16Array; names: string[]; noise: number } | null;
 }
@@ -37,17 +47,21 @@ export function imageAltText(labelName: string): string {
   return `手書きの数字 ${labelName} の画像`;
 }
 
-/** クラスタ名の表示。ノイズは「なし（ノイズ）」、クラスタの情報がなければ「（情報なし）」。 */
-export function clusterText(cluster: string | null | undefined): string {
-  return cluster === undefined ? '（情報なし）' : cluster === null ? 'なし（ノイズ）' : cluster;
+/**
+ * クラスタ名の表示。どのクラスタにも属さなければ、画像のデータセットでは「なし（ノイズ）」、単語のデータセットでは「なし」。
+ * クラスタの情報がなければ「（情報なし）」。
+ */
+export function clusterText(cluster: string | null | undefined, kind: DatasetKind = 'image'): string {
+  if (cluster === undefined) return '（情報なし）';
+  if (cluster === null) return kind === 'text' ? 'なし' : 'なし（ノイズ）';
+  return cluster;
 }
 
-/** 選択したときに読み上げる文（ラベル・番号・クラスタ名）。 */
-export function selectionAnnouncement(labelName: string, index: number, cluster: string): string {
-  return `選択した点: ${labelName}、番号 ${index}、クラスタ ${cluster}`;
+/** 選択したときに読み上げる文（画像: ラベル・番号・クラスタ名、単語: 単語・番号・クラスタ名）。 */
+export function selectionAnnouncement(title: string, index: number, cluster: string, kind: DatasetKind = 'image'): string {
+  if (kind === 'text') return `選択した単語: ${title}、番号 ${index}、クラスタ ${cluster}`;
+  return `選択した点: ${title}、番号 ${index}、クラスタ ${cluster}`;
 }
-
-const css = ([r, g, b]: [number, number, number]) => `rgb(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)})`;
 
 export class InfoPanel {
   private readonly root: HTMLElement;
@@ -59,10 +73,13 @@ export class InfoPanel {
   private readonly clusterEl: HTMLElement;
   private readonly hoverEl: HTMLElement;
   private readonly liveEl: HTMLElement;
+  private readonly closeEl: HTMLElement;
   private readonly src: PointInfoSource;
+  private readonly onClose: () => void;
 
   constructor(doc: Document, src: PointInfoSource, onClose: () => void) {
     this.src = src;
+    this.onClose = onClose;
     const get = (id: string) => {
       const el = doc.getElementById(id);
       if (!el) throw new Error(`#${id} がありません`);
@@ -76,12 +93,19 @@ export class InfoPanel {
     this.clusterEl = get('info-cluster');
     this.hoverEl = get('hover-label');
     this.liveEl = get('info-live');
-    this.image.width = src.cellSize[0] * INFO_IMAGE_SCALE;
-    this.image.height = src.cellSize[1] * INFO_IMAGE_SCALE;
-    this.image.style.width = `${this.image.width}px`;
-    this.image.style.height = `${this.image.height}px`;
+    this.closeEl = get('info-close');
+    this.root.dataset.kind = src.kind;
+    this.image.hidden = src.image === null;
+    if (src.image) {
+      this.image.width = src.image.cellSize[0] * INFO_IMAGE_SCALE;
+      this.image.height = src.image.cellSize[1] * INFO_IMAGE_SCALE;
+      this.image.style.width = `${this.image.width}px`;
+      this.image.style.height = `${this.image.height}px`;
+    }
     this.ctx = this.image.getContext('2d')!;
-    get('info-close').addEventListener('click', onClose);
+    this.closeEl.addEventListener('click', this.onClose);
+    this.show(null);
+    this.showHover(null);
   }
 
   /** 選択中の点を表示する。null で隠す。 */
@@ -93,24 +117,23 @@ export class InfoPanel {
       return;
     }
     const { src } = this;
-    const label = src.labels[index]!;
-    const [cw, ch] = src.cellSize;
-    const sx = (index % src.columns) * cw;
-    const sy = Math.floor(index / src.columns) * ch;
-    const ctx = this.ctx;
-    ctx.imageSmoothingEnabled = false;
-    ctx.clearRect(0, 0, this.image.width, this.image.height);
-    ctx.drawImage(src.atlas, sx, sy, cw, ch, 0, 0, this.image.width, this.image.height);
-
-    const labelName = src.labelNames[label] ?? String(label);
-    this.labelEl.textContent = labelName;
-    this.image.setAttribute('aria-label', imageAltText(labelName));
-    this.swatch.style.background = css(src.labelColors[label] ?? [1, 1, 1]);
+    const title = src.title(index);
+    if (src.image) {
+      const { atlas, cellSize: [cw, ch], columns } = src.image;
+      const sx = (index % columns) * cw;
+      const sy = Math.floor(index / columns) * ch;
+      const ctx = this.ctx;
+      ctx.imageSmoothingEnabled = false;
+      ctx.clearRect(0, 0, this.image.width, this.image.height);
+      ctx.drawImage(atlas, sx, sy, cw, ch, 0, 0, this.image.width, this.image.height);
+      this.image.setAttribute('aria-label', imageAltText(title));
+    }
+    this.labelEl.textContent = title;
+    this.swatch.style.background = src.color(index);
     this.indexEl.textContent = `#${index}`;
-    const cluster = coarseClusterName(src, index);
-    const clusterLabel = clusterText(cluster);
+    const clusterLabel = clusterText(coarseClusterName(src, index), src.kind);
     this.clusterEl.textContent = clusterLabel;
-    this.liveEl.textContent = selectionAnnouncement(labelName, index, clusterLabel);
+    this.liveEl.textContent = selectionAnnouncement(title, index, clusterLabel, src.kind);
     this.root.dataset.index = String(index);
     this.root.hidden = false;
   }
@@ -121,9 +144,8 @@ export class InfoPanel {
       this.hoverEl.hidden = true;
       return;
     }
-    const label = this.src.labels[index]!;
-    this.hoverEl.textContent = this.src.labelNames[label] ?? String(label);
-    this.hoverEl.style.borderColor = css(this.src.labelColors[label] ?? [1, 1, 1]);
+    this.hoverEl.textContent = this.src.title(index);
+    this.hoverEl.style.borderColor = this.src.color(index);
     // 画面の右端・下端では、カーソルの反対側へ出す
     const w = this.hoverEl.ownerDocument.defaultView?.innerWidth ?? Infinity;
     const h = this.hoverEl.ownerDocument.defaultView?.innerHeight ?? Infinity;
@@ -132,5 +154,12 @@ export class InfoPanel {
     const x = clientX + 14 + r.width > w ? clientX - 10 - r.width : clientX + 14;
     const y = clientY + 16 + r.height > h ? clientY - 10 - r.height : clientY + 16;
     this.hoverEl.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
+  }
+
+  /** パネルとホバーのラベルを隠し、閉じるボタンのリスナーを外す（データセットの切り替え時）。 */
+  dispose(): void {
+    this.show(null);
+    this.showHover(null);
+    this.closeEl.removeEventListener('click', this.onClose);
   }
 }

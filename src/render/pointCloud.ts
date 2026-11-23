@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { PALETTE_SIZE, fragmentShader, highlightFragmentShader, highlightVertexShader, vertexShader } from './shaders';
 import { BACKGROUND_COLOR, hexToRgb, labelColors } from './palette';
+import { NOISE_COLOR } from './colorScheme';
 import { INTERIOR_FOG } from './fog';
 
 /** 描画パラメータ。距離はワールド単位（座標は [-1, 1] の立方体）。 */
@@ -31,6 +32,14 @@ export const DEFAULT_PARAMS: PointCloudParams = {
   dotRadius: [0.4, 2.2],
 };
 
+/**
+ * 画像のないデータセット（すべて丸い点）での既定値の差分。丸い点がビルボードの全体（半径 = 1 辺の半分）を占め、
+ * 近くの点は画面上で半径 10 CSS ピクセル（直径 20）までの円になる（遠くの点は最小サイズ 3 ピクセルの点）。
+ */
+export const DOTS_ONLY_PARAMS: Partial<PointCloudParams> = {
+  dotRadius: [0.5, 10],
+};
+
 /** 強調表示の種類。 */
 export type HighlightKind = 'hover' | 'selected';
 
@@ -40,16 +49,22 @@ const HIGHLIGHT_STYLE: Record<HighlightKind, { color: number; minRadius: number;
   selected: { color: 0xffc233, minRadius: 9, line: 2.5, outline: 1.5, order: 2 },
 };
 
-export interface PointCloudData {
-  positions: Float32Array;
-  labels: Uint8Array;
+/** 画像アトラス（点ごとの画像）。 */
+export interface PointCloudAtlas {
+  image: ImageBitmap | HTMLImageElement | HTMLCanvasElement;
   /** 各点のセル左上 UV（長さ 2 * count） */
   cellOrigins: Float32Array;
   cellSize: [number, number];
-  labelCount: number;
-  atlas: ImageBitmap | HTMLImageElement | HTMLCanvasElement;
   /** アトラスが白地に黒インクなら true */
   inkIsDark: boolean;
+}
+
+export interface PointCloudData {
+  positions: Float32Array;
+  /** 長さ count。点ごとの色の番号（src/render/colorScheme.ts。負ならクラスタなしの灰色） */
+  colorIndices: Float32Array;
+  /** 画像アトラス。なければすべての点を丸い点で描く（シェーダの DOTS_ONLY） */
+  atlas?: PointCloudAtlas | null;
 }
 
 export class PointCloud {
@@ -65,36 +80,44 @@ export class PointCloud {
    * ほかの点に隠れていても位置が分かる。ピッキングは点群のメッシュだけを描くので、選ばれる形は変わらない。
    */
   readonly highlight = new THREE.Group();
-  private readonly texture: THREE.Texture;
+  /** 画像を持たず、すべての点を丸い点で描くか */
+  readonly dotsOnly: boolean;
+  private readonly texture: THREE.Texture | null;
   private readonly positions: Float32Array;
   private readonly highlightMeshes: Record<HighlightKind, THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial>>;
   private readonly highlighted: Record<HighlightKind, number | null> = { hover: null, selected: null };
   private pixelRatio = 1;
 
   constructor(data: PointCloudData, params: Partial<PointCloudParams> = {}) {
-    this.params = { ...DEFAULT_PARAMS, ...params };
-    const count = data.labels.length;
+    const atlas = data.atlas ?? null;
+    this.dotsOnly = atlas === null;
+    this.params = { ...DEFAULT_PARAMS, ...(this.dotsOnly ? DOTS_ONLY_PARAMS : {}), ...params };
+    const count = data.colorIndices.length;
 
     const quad = new THREE.PlaneGeometry(1, 1);
     const geometry = new THREE.InstancedBufferGeometry();
     geometry.index = quad.index;
     geometry.setAttribute('position', quad.getAttribute('position'));
     geometry.setAttribute('instancePosition', new THREE.InstancedBufferAttribute(data.positions, 3));
-    geometry.setAttribute('instanceLabel', new THREE.InstancedBufferAttribute(Float32Array.from(data.labels), 1));
-    geometry.setAttribute('instanceCell', new THREE.InstancedBufferAttribute(data.cellOrigins, 2));
+    geometry.setAttribute('instanceLabel', new THREE.InstancedBufferAttribute(data.colorIndices, 1));
+    if (atlas) geometry.setAttribute('instanceCell', new THREE.InstancedBufferAttribute(atlas.cellOrigins, 2));
     geometry.instanceCount = count;
     // ビルボードはシェーダで広げるので、カリング用の境界は点群全体＋余白で十分
     geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 10);
 
-    const texture = new THREE.Texture(data.atlas);
-    texture.flipY = false;
-    texture.colorSpace = THREE.NoColorSpace;
-    texture.generateMipmaps = true;
-    texture.minFilter = THREE.LinearMipmapLinearFilter;
-    texture.magFilter = THREE.LinearFilter;
-    texture.wrapS = texture.wrapT = THREE.ClampToEdgeWrapping;
-    texture.needsUpdate = true;
+    let texture: THREE.Texture | null = null;
+    if (atlas) {
+      texture = new THREE.Texture(atlas.image);
+      texture.flipY = false;
+      texture.colorSpace = THREE.NoColorSpace;
+      texture.generateMipmaps = true;
+      texture.minFilter = THREE.LinearMipmapLinearFilter;
+      texture.magFilter = THREE.LinearFilter;
+      texture.wrapS = texture.wrapT = THREE.ClampToEdgeWrapping;
+      texture.needsUpdate = true;
+    }
     this.texture = texture;
+    const defines: Record<string, string> = this.dotsOnly ? { DOTS_ONLY: '' } : {};
 
     // パレットはラベル数によらず PALETTE_SIZE 色。シェーダがラベル番号の余りで引く（10色の繰り返し）
     const palette = labelColors(PALETTE_SIZE).map((c) => new THREE.Vector3(...c));
@@ -103,11 +126,13 @@ export class PointCloud {
       glslVersion: THREE.GLSL3,
       vertexShader,
       fragmentShader,
+      defines: { ...defines },
       uniforms: {
         uAtlas: { value: texture },
-        uInkIsDark: { value: data.inkIsDark ? 1 : 0 },
-        uCellSize: { value: new THREE.Vector2(...data.cellSize) },
+        uInkIsDark: { value: atlas?.inkIsDark ? 1 : 0 },
+        uCellSize: { value: new THREE.Vector2(...(atlas?.cellSize ?? [0, 0])) },
         uPalette: { value: palette },
+        uNoiseColor: { value: new THREE.Vector3(...hexToRgb(NOISE_COLOR)) },
         uBackground: { value: new THREE.Vector3(...hexToRgb(BACKGROUND_COLOR)) },
         uPointSize: { value: 0 },
         uMinPixelSize: { value: 0 },
@@ -129,7 +154,7 @@ export class PointCloud {
       glslVersion: THREE.GLSL3,
       vertexShader,
       fragmentShader,
-      defines: { PICKING: '' },
+      defines: { ...defines, PICKING: '' },
       uniforms: { ...material.uniforms, uViewportHeight: { value: 1 } },
       transparent: false,
       blending: THREE.NoBlending,
@@ -153,12 +178,14 @@ export class PointCloud {
         glslVersion: THREE.GLSL3,
         vertexShader: highlightVertexShader,
         fragmentShader: highlightFragmentShader,
+        defines: { ...defines },
         uniforms: {
           // 画面上の大きさは点群と同じ式で求めるので、ユニフォームを共有する
           uPointSize: material.uniforms.uPointSize!,
           uMinPixelSize: material.uniforms.uMinPixelSize!,
           uViewportHeight: material.uniforms.uViewportHeight!,
           uBackground: material.uniforms.uBackground!,
+          uDotRadius: material.uniforms.uDotRadius!,
           uCenter: { value: new THREE.Vector3() },
           uColor: { value: new THREE.Vector3(...hexToRgb(`#${style.color.toString(16).padStart(6, '0')}`)) },
           uRing: { value: new THREE.Vector3() },
@@ -260,7 +287,7 @@ export class PointCloud {
     this.mesh.geometry.dispose();
     this.mesh.material.dispose();
     this.pickingMaterial.dispose();
-    this.texture.dispose();
+    this.texture?.dispose();
     this.highlightMeshes.hover.geometry.dispose();
     this.highlightMeshes.hover.material.dispose();
     this.highlightMeshes.selected.material.dispose();

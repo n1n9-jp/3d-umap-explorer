@@ -1,0 +1,7 @@
+{
+  "default": "mnist",
+  "datasets": [
+    { "id": "mnist", "name": "MNIST 10k（手書き数字）", "dir": "data/mnist/" },
+    { "id": "word2vec-10k", "name": "Word2Vec 10k（単語）", "dir": "data/word2vec-10k/" }
+  ]
+}

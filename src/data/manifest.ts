@@ -39,6 +39,8 @@ export interface ClusterInfo {
   /** 階層内で 0 から連番（`clusters` 配列の添字と一致し、pointFile の値と対応する） */
   id: number;
   name: string;
+  /** 代表の単語（`manifest.text` があって `manifest.labels` がないデータセットだけ）。最大 3 語 */
+  terms?: string[];
   size: number;
   /** 代表点の番号 */
   medoid: number;
@@ -69,12 +71,21 @@ export interface ManifestClusters {
   levels: ClusterLevel[];
 }
 
+/** 点が何を表すか。`image`: 各点が画像（`sprite` を持つ）、`text`: 各点が単語などの文字列（`text` を持つ）。 */
+export type DatasetKind = 'image' | 'text';
+
 export interface DatasetManifest {
   name: string;
+  /** manifest の `kind`。書かれていなければ、`sprite` があれば image、`text` があれば text とみなす（どちらもなければ text） */
+  kind: DatasetKind;
   count: number;
   positions: { file: string; dtype: 'float32'; components: 3 };
-  labels: { file: string; dtype: 'uint8'; names: string[] };
-  sprite: { file: string; cellSize: [number, number]; columns: number; rows: number };
+  /** 任意。ないデータセットでは、点はクラスタで色分けする */
+  labels?: { file: string; dtype: 'uint8'; names: string[] };
+  /** 任意。画像アトラス */
+  sprite?: { file: string; cellSize: [number, number]; columns: number; rows: number };
+  /** 任意。点ごとの表示用の文字列（JSON の文字列の配列） */
+  text?: { file: string };
   umap?: Record<string, unknown>;
   source?: Record<string, unknown>;
   /** 空間の構造（任意。ある場合は検証済み） */
@@ -223,9 +234,17 @@ function parseCluster(
     parent = requireIntInRange(o.parent, `${path}.parent`, 0, parentCount);
   }
 
+  let terms: string[] | undefined;
+  if (o.terms !== undefined) {
+    const raw = arrayAt(o.terms, `${path}.terms`);
+    if (!raw.every((t) => typeof t === 'string')) throw new ManifestError(`"${path}.terms" が文字列の配列ではありません`);
+    terms = raw as string[];
+  }
+
   return {
     id: index,
     name: requireString(o, 'name', `${path}.name`),
+    ...(terms ? { terms } : {}),
     size,
     medoid,
     center: parseVec3(o.center, `${path}.center`),
@@ -279,42 +298,68 @@ export function parseManifest(json: unknown): DatasetManifest {
   if (positions.dtype !== 'float32') throw new ManifestError('"positions.dtype" は "float32" のみ対応しています');
   if (positions.components !== 3) throw new ManifestError('"positions.components" は 3 のみ対応しています');
 
-  const labels = requireRecord(json, 'labels');
-  const labFile = requireString(labels, 'file', 'labels.file');
-  if (labels.dtype !== 'uint8') throw new ManifestError('"labels.dtype" は "uint8" のみ対応しています');
-  const names = labels.names;
-  if (!Array.isArray(names) || names.length === 0 || !names.every((n) => typeof n === 'string')) {
-    throw new ManifestError('"labels.names" が文字列の配列ではありません');
+  let labels: DatasetManifest['labels'];
+  if (json.labels !== undefined) {
+    const lo = requireRecord(json, 'labels');
+    const labFile = requireString(lo, 'file', 'labels.file');
+    if (lo.dtype !== 'uint8') throw new ManifestError('"labels.dtype" は "uint8" のみ対応しています');
+    const names = lo.names;
+    if (!Array.isArray(names) || names.length === 0 || !names.every((n) => typeof n === 'string')) {
+      throw new ManifestError('"labels.names" が文字列の配列ではありません');
+    }
+    if (names.length > MAX_LABELS) throw new ManifestError(`"labels.names" は ${MAX_LABELS} 個までです`);
+    labels = { file: labFile, dtype: 'uint8', names: names as string[] };
   }
-  if (names.length > MAX_LABELS) throw new ManifestError(`"labels.names" は ${MAX_LABELS} 個までです`);
 
-  const sprite = requireRecord(json, 'sprite');
-  const spriteFile = requireString(sprite, 'file', 'sprite.file');
-  const cell = sprite.cellSize;
-  if (
-    !Array.isArray(cell) || cell.length !== 2 ||
-    !cell.every((c) => typeof c === 'number' && Number.isInteger(c) && c > 0)
-  ) {
-    throw new ManifestError('"sprite.cellSize" が正の整数2つの配列ではありません');
+  let sprite: DatasetManifest['sprite'];
+  if (json.sprite !== undefined) {
+    const so = requireRecord(json, 'sprite');
+    const spriteFile = requireString(so, 'file', 'sprite.file');
+    const cell = so.cellSize;
+    if (
+      !Array.isArray(cell) || cell.length !== 2 ||
+      !cell.every((c) => typeof c === 'number' && Number.isInteger(c) && c > 0)
+    ) {
+      throw new ManifestError('"sprite.cellSize" が正の整数2つの配列ではありません');
+    }
+    const columns = requirePositiveInt(so, 'columns', 'sprite.columns');
+    const rows = requirePositiveInt(so, 'rows', 'sprite.rows');
+    if (columns * rows < count) {
+      throw new ManifestError(`アトラスのセル数 ${columns}x${rows} が点の数 ${count} より少なくなっています`);
+    }
+    sprite = { file: spriteFile, cellSize: [cell[0] as number, cell[1] as number], columns, rows };
   }
-  const columns = requirePositiveInt(sprite, 'columns', 'sprite.columns');
-  const rows = requirePositiveInt(sprite, 'rows', 'sprite.rows');
-  if (columns * rows < count) {
-    throw new ManifestError(`アトラスのセル数 ${columns}x${rows} が点の数 ${count} より少なくなっています`);
+
+  let text: DatasetManifest['text'];
+  if (json.text !== undefined) {
+    const to = requireRecord(json, 'text');
+    text = { file: requireString(to, 'file', 'text.file') };
+  }
+
+  let kind: DatasetKind;
+  if (json.kind !== undefined) {
+    if (json.kind !== 'image' && json.kind !== 'text') throw new ManifestError('"kind" は "image" か "text" です');
+    kind = json.kind;
+    if (kind === 'image' && !sprite) throw new ManifestError('"kind" が "image" なのに "sprite" がありません');
+    if (kind === 'text' && !text) throw new ManifestError('"kind" が "text" なのに "text" がありません');
+  } else {
+    kind = sprite ? 'image' : 'text';
   }
 
   const manifest: DatasetManifest = {
     name,
+    kind,
     count,
     positions: { file: posFile, dtype: 'float32', components: 3 },
-    labels: { file: labFile, dtype: 'uint8', names: names as string[] },
-    sprite: { file: spriteFile, cellSize: [cell[0] as number, cell[1] as number], columns, rows },
+    ...(labels ? { labels } : {}),
+    ...(sprite ? { sprite } : {}),
+    ...(text ? { text } : {}),
   };
   if (isRecord(json.umap)) manifest.umap = json.umap;
   if (isRecord(json.source)) manifest.source = json.source;
   if (json.bounds !== undefined) manifest.bounds = parseBounds(json.bounds);
   if (json.density !== undefined) manifest.density = parseDensity(json.density);
   if (json.overview !== undefined) manifest.overview = parseOverview(json.overview);
-  if (json.clusters !== undefined) manifest.clusters = parseClusters(json.clusters, count, names.length);
+  if (json.clusters !== undefined) manifest.clusters = parseClusters(json.clusters, count, labels?.names.length ?? 0);
   return manifest;
 }

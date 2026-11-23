@@ -1,28 +1,39 @@
 import * as THREE from 'three';
-import { cellOrigins, atlasLayout, inkIsDark } from './data/atlas';
-import { loadAtlasImage, loadDatasetArrays, measureBorderLuma } from './data/loader';
-import { PointCloud } from './render/pointCloud';
 import { BACKGROUND_COLOR } from './render/palette';
-import { INTERIOR_FOG, fogForCamera } from './render/fog';
-import { clipPlanesForCamera, type ClipPlanes } from './render/clip';
+import { type ClipPlanes } from './render/clip';
 import { formatView, parsePositiveNumber, parseView, type ViewSpec } from './render/view';
-import { CameraRig, type CameraState } from './app/cameraRig';
+import type { CameraState } from './app/cameraRig';
 import { renderHud } from './app/hud';
-import { GpuPicker, type PickResult } from './picking/GpuPicker';
-import { createPickingDebug, type PickingDebug } from './picking/debug';
-import { SpatialIndex } from './spatial/SpatialIndex';
-import { AutoSpeed, autoSpeedParams } from './app/autoSpeed';
+import type { PickResult } from './picking/GpuPicker';
+import type { PickingDebug } from './picking/debug';
 import { bindAutoSpeedKey } from './app/autoSpeedKey';
-import { computeHomeView } from './app/homeView';
 import { bindShortcut, isShortcutPress, isFromEditable } from './app/keyEvents';
-import { InteractionController, type InteractionState } from './interaction/InteractionController';
-import { InfoPanel } from './interaction/infoPanel';
+import type { InteractionState } from './interaction/InteractionController';
 import type { StopDistance } from './interaction/stopDistance';
-import { labelColors } from './render/palette';
-import { ClusterLabels, type ClusterLabelsState } from './labels/ClusterLabels';
-import { Minimap, type MinimapDebug } from './minimap/Minimap';
+import type { ClusterLabelsState } from './labels/ClusterLabels';
+import type { MinimapDebug } from './minimap/Minimap';
+import type { PointCloud } from './render/pointCloud';
+import { DatasetView, loadDataset, releaseLoadedDataset, type AppContext, type LoadedDataset } from './app/datasetView';
+import {
+  FALLBACK_CATALOG, parseCatalog, resolveDatasetParam, searchForDataset, type DatasetCatalog, type DatasetTarget,
+} from './data/catalog';
+import { DatasetSwitcher } from './app/datasetSwitcher';
+import { colorIndexHex } from './render/colorScheme';
+import type { DatasetKind } from './data/manifest';
 
 interface FrameStats { frames: number; meanMs: number; medianMs: number; p95Ms: number; maxMs: number }
+
+/** 表示中のデータセットと、切り替えの状態（検証用）。 */
+export interface DatasetState {
+  /** 表示中のデータセット（一覧の id。一覧にないパスで開いたときは null）・場所・名前・種類。表示中のものがなければ null */
+  current: { id: string | null; dir: string; name: string; kind: DatasetKind; count: number } | null;
+  /** 読み込み中か */
+  loading: boolean;
+  /** 直近の切り替えの失敗（成功すると null） */
+  error: string | null;
+  /** 切り替えが完了した回数（起動時の読み込みを含む） */
+  generation: number;
+}
 
 declare global {
   interface Window {
@@ -56,21 +67,44 @@ declare global {
       };
       /** ミニマップ（src/minimap/）。状態、ワールド座標とミニマップ上の位置の変換、表示の切り替え */
       minimap: MinimapDebug;
+      /** データセットの一覧・表示中のデータセット・切り替え（`?data=` と同じ形の値。失敗すると前の表示を保ってエラーを返す） */
+      dataset: {
+        getState(): DatasetState;
+        list(): DatasetCatalog;
+        switchTo(param: string): Promise<{ ok: boolean; error?: string }>;
+        /** 点ごとの表示用の文字列（単語のデータセットだけ。なければ null） */
+        text(index: number): string | null;
+        /** 点の色（'#rrggbb'。描画・ミニマップ・情報パネルと同じ規則） */
+        pointColor(index: number): string;
+      };
+      /** WebGL の資源の数（renderer.info.memory と programs） */
+      memory(): { geometries: number; textures: number; programs: number };
     };
   }
 }
 
+const MAX_PIXEL_RATIO = 2;
+
+async function loadCatalog(): Promise<DatasetCatalog> {
+  try {
+    const res = await fetch('data/datasets.json');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return parseCatalog(await res.json());
+  } catch (e) {
+    console.warn('データセットの一覧（data/datasets.json）を読めないので、MNIST だけを使います:', e);
+    return FALLBACK_CATALOG;
+  }
+}
+
 async function start(): Promise<void> {
-  const container = document.getElementById('app')!;
-  const hud = document.getElementById('hud')!;
-  const search = window.location.search;
-  const dataUrl = new URLSearchParams(search).get('data') ?? 'data/mnist/';
+  const doc = document;
+  const container = doc.getElementById('app')!;
+  const hud = doc.getElementById('hud')!;
 
   THREE.ColorManagement.enabled = false; // シェーダは sRGB の値をそのまま出力する
 
   const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
   // 描画バッファの倍率。ブラウザのズームや別のモニタへの移動で devicePixelRatio が変わるので、resize() と描画ループで追従する
-  const MAX_PIXEL_RATIO = 2;
   const currentPixelRatio = () => Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO);
   renderer.setPixelRatio(currentPixelRatio());
   renderer.setSize(window.innerWidth, window.innerHeight);
@@ -81,114 +115,148 @@ async function start(): Promise<void> {
   // クリップ面はデータを読んだあと、カメラの位置と点群の範囲（bounds）から毎フレーム決める（src/render/clip.ts）
   const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.0005, 12);
 
-  const [arrays, image] = await (async () => {
-    const a = await loadDatasetArrays(dataUrl);
-    return [a, await loadAtlasImage(dataUrl, a.manifest)] as const;
-  })();
-  const layout = atlasLayout(arrays.manifest.sprite, image.width, image.height);
-  const sizeParam = parsePositiveNumber(search, 'size');
-
-  const cloud = new PointCloud(
-    {
-      positions: arrays.positions,
-      labels: arrays.labels,
-      cellOrigins: cellOrigins(arrays.manifest.count, layout),
-      cellSize: [layout.cellU, layout.cellV],
-      labelCount: arrays.manifest.labels.names.length,
-      atlas: image,
-      inkIsDark: inkIsDark(measureBorderLuma(image)),
-    },
-    { fog: INTERIOR_FOG, ...(sizeParam ? { pointSize: sizeParam } : {}) },
-  );
-  scene.add(cloud.mesh);
-
-  // 点群の中心（バウンディングボックスの中心）。俯瞰モードの回転の中心になる
-  const cloudCenter = new THREE.Vector3(...arrays.bounds.min).add(new THREE.Vector3(...arrays.bounds.max)).multiplyScalar(0.5);
-  // 点群を含む球の中心。霧の距離の基準になる（俯瞰モードの回転の中心とは別）
-  const boundsCenter = new THREE.Vector3(...arrays.bounds.center);
-  // 密度に応じた速度の自動調整（manifest に density がなければ使わない）
-  const autoParams = autoSpeedParams(arrays.manifest.density);
-  // 空間索引は 1 つを、速度の自動調整とホバー・選択の「止まる距離」で共有する。
-  // 問い合わせは同期的に終わり、結果は都度コピーされる。JS は単一スレッドで、互いの問い合わせの途中に割り込まないので安全
-  const spatialIndex = new SpatialIndex(arrays.positions);
-  const autoSpeed = autoParams ? new AutoSpeed(spatialIndex, autoParams) : null;
-  const controller = new CameraRig(camera, renderer.domElement, cloudCenter, { autoSpeed });
-  bindAutoSpeedKey(window, controller); // T キーで有効・無効を切り替える
-  // ホームの視点: 点群全体（bounds の球）が画面に収まる位置。向きは manifest の overview.axes（第3軸の方向から見る）
-  const homeView = () => computeHomeView(arrays.bounds, camera.fov, camera.aspect, arrays.manifest.overview?.axes);
-  bindShortcut(window, 'KeyH', () => controller.goHome(homeView())); // H キーでホームの視点へ戻る
-  controller.setView(parseView(search, homeView())); // pos・look がなければホームの視点から始める
-
-  // カメラの位置に応じたクリップ面と霧。点群を含む球（bounds）の中心までの距離から決める
   let clipOverride: ClipPlanes | null = null;
-  const updateCameraDependent = () => {
-    const d = camera.position.distanceTo(boundsCenter);
-    const clip = clipOverride ?? clipPlanesForCamera(d, arrays.bounds.radius, { fovDeg: camera.fov, aspect: camera.aspect });
-    if (camera.near !== clip.near || camera.far !== clip.far) {
-      camera.near = clip.near;
-      camera.far = clip.far;
-      camera.updateProjectionMatrix();
-    }
-    cloud.set({ fog: fogForCamera(d, arrays.bounds.radius, INTERIOR_FOG) });
-  };
-  updateCameraDependent();
+  const ctx: AppContext = { renderer, scene, camera, doc, hud, clipOverride: () => clipOverride };
 
+  // ---- データセット（src/app/datasetView.ts）。切り替えのたびに作り直す ----
+  const catalog = await loadCatalog();
+  let view: DatasetView | null = null;
+  let target: DatasetTarget | null = null;
+  const state: DatasetState = { current: null, loading: false, error: null, generation: 0 };
+  let loadToken = 0;
+
+  const switcher = new DatasetSwitcher(doc, catalog, (id) => { void switchTo(id, { pushHistory: true }); });
+
+  const updateHud = () => {
+    if (!view) return;
+    const s = view.controller.getState();
+    renderHud(hud, {
+      datasetName: view.name,
+      pointCount: view.arrays.manifest.count,
+      pointSize: view.cloud.params.pointSize,
+      mode: s.mode,
+      speed: s.speed,
+      autoSpeed: { available: s.autoSpeed.available, enabled: s.autoSpeed.enabled, effectiveSpeed: s.effectiveSpeed },
+      viewParams: formatView({ pos: s.position, look: s.lookAt }),
+      labels: view.clusterLabels.available, // L キー（クラスタのないデータセットでは使えない）
+      minimap: true, // M キー
+    });
+  };
+
+  const showHudError = (message: string) => {
+    hud.textContent = `読み込みに失敗しました: ${message}`;
+    hud.classList.add('error');
+  };
+
+  /** 読み込んだデータで表示を作り直す。作れなければ前のデータで作り直して、エラーを投げる。 */
+  const install = (data: LoadedDataset, next: DatasetTarget, search: string | null) => {
+    const pointSize = search !== null ? parsePositiveNumber(search, 'size') : null;
+    const prev = view;
+    const prevTarget = target;
+    prev?.dispose();
+    view = null;
+    try {
+      view = new DatasetView(ctx, data, { pointSize });
+    } catch (e) {
+      // 作れなければ、前のデータで作り直して表示を保つ（視点はホーム）
+      if (prev && prevTarget) {
+        view = new DatasetView(ctx, prev.data, {});
+        view.controller.onChange(() => updateHud());
+        view.controller.setView(view.homeView());
+      }
+      throw e;
+    }
+    target = next;
+    if (prev && prev.data !== data) releaseLoadedDataset(prev.data);
+    view.controller.onChange(() => updateHud()); // モードと速度の変化はすぐに見せる
+    // URL の pos・look があればその視点、なければホームの視点から始める（切り替えでは常にホームの視点）
+    view.controller.setView(search !== null ? parseView(search, view.homeView()) : view.homeView());
+    view.updateCameraDependent();
+    hud.classList.remove('error');
+    state.current = {
+      id: next.entry?.id ?? null, dir: next.dir, name: view.name, kind: view.arrays.manifest.kind, count: view.arrays.manifest.count,
+    };
+    state.generation++;
+    switcher.setCurrent(next.entry?.id ?? null, next.entry ? null : next.dir);
+    updateHud();
+  };
+
+  /**
+   * `?data=` と同じ形の値でデータセットを開く。読み込みに失敗したら、表示中のデータセットを保ってエラーを表示する。
+   * `search` を渡すと、その pos・look・size を使う（起動時と、ブラウザの戻る・進む）。
+   */
+  const switchTo = async (param: string, opts: { pushHistory?: boolean; search?: string } = {}): Promise<{ ok: boolean; error?: string }> => {
+    const token = ++loadToken;
+    state.loading = true;
+    state.error = null;
+    switcher.setLoading(true);
+    let data: LoadedDataset | null = null;
+    try {
+      const next = resolveDatasetParam(param, catalog);
+      data = await loadDataset(next.dir);
+      if (token !== loadToken) { releaseLoadedDataset(data); return { ok: false, error: '別の切り替えで置き換えられました' }; }
+      install(data, next, opts.search ?? null);
+      explorer.ready = true;
+      delete explorer.error;
+      if (opts.pushHistory) {
+        const url = `${window.location.pathname}${searchForDataset(window.location.search, next)}${window.location.hash}`;
+        window.history.pushState({ data: next.entry?.id ?? next.dir }, '', url);
+      }
+      state.loading = false;
+      switcher.setLoading(false);
+      switcher.setError(null);
+      return { ok: true };
+    } catch (err) {
+      if (data && view?.data !== data) releaseLoadedDataset(data);
+      const message = err instanceof Error ? err.message : String(err);
+      if (token === loadToken) {
+        state.loading = false;
+        state.error = message;
+        switcher.setLoading(false);
+        switcher.setError(`読み込みに失敗しました: ${message}`);
+        switcher.setCurrent(target?.entry?.id ?? null, target && !target.entry ? target.dir : null); // 選択欄を表示中のものへ戻す
+        if (!view) showHudError(message);
+      }
+      console.warn('データセットの読み込みに失敗しました:', err);
+      return { ok: false, error: message };
+    }
+  };
+
+  // ブラウザの戻る・進むで、URL のデータセット（と視点）へ切り替える
+  window.addEventListener('popstate', () => {
+    const search = window.location.search;
+    void switchTo(new URLSearchParams(search).get('data') ?? '', { search });
+  });
+
+  // ---- 画面の大きさ ----
   const resize = () => {
     renderer.setPixelRatio(currentPixelRatio());
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
-    cloud.setViewportHeight(renderer.getDrawingBufferSize(new THREE.Vector2()).y);
-    // 画面上の大きさのパラメータは CSS ピクセルで持ち、描画バッファの画素へはこの倍率で直す
-    cloud.setPixelRatio(renderer.getPixelRatio());
+    view?.resize();
   };
   window.addEventListener('resize', resize);
   resize();
 
+  // ---- キー操作（表示中のデータセットに対して働く。データセットを切り替えても付け直さない）----
   // 点の大きさを [ ] キーで変える
   window.addEventListener('keydown', (e) => {
-    if ((e.key === '[' || e.key === ']') && !isFromEditable(e)) {
+    if (view && (e.key === '[' || e.key === ']') && !isFromEditable(e)) {
       const k = e.key === ']' ? 1.25 : 0.8;
-      cloud.set({ pointSize: Math.min(0.1, Math.max(0.0005, cloud.params.pointSize * k)) });
+      view.cloud.set({ pointSize: Math.min(0.1, Math.max(0.0005, view.cloud.params.pointSize * k)) });
     }
   });
-
   // O キーで飛行モードと俯瞰モードを切り替える
   window.addEventListener('keydown', (e) => {
-    if (isShortcutPress(e, 'KeyO')) controller.toggle();
+    if (view && isShortcutPress(e, 'KeyO')) view.controller.toggle();
   });
+  bindAutoSpeedKey(window, { toggleAutoSpeed: () => view?.controller.toggleAutoSpeed() }); // T キーで有効・無効を切り替える
+  bindShortcut(window, 'KeyH', () => view?.controller.goHome(view.homeView())); // H キーでホームの視点へ戻る
+  bindShortcut(window, 'KeyL', () => view?.clusterLabels.toggle()); // L キーで目印の表示・非表示
+  bindShortcut(window, 'KeyM', () => view?.minimap.toggle()); // M キーでミニマップの表示・非表示
 
-  // ---- クラスタの目印と現在地（src/labels/。粗い階層を使う。クラスタのないデータセットでは何もしない）----
-  const clusterLabels = new ClusterLabels({
-    document,
-    container: document.getElementById('cluster-labels')!,
-    locationEl: document.getElementById('cluster-location')!,
-    pointerTarget: renderer.domElement, // 目印の上のホイールとドラッグは、目印のない場所と同じようにカメラへ届ける
-    hud,
-    camera,
-    clusters: arrays.manifest.clusters?.levels[0]?.clusters ?? [],
-    boundsRadius: arrays.bounds.radius,
-    flyTo: (target, options) => controller.flyTo(target, options),
-  });
-  bindShortcut(window, 'KeyL', () => clusterLabels.toggle()); // L キーで表示・非表示
-  // ---- ここまで ----
-
-  const updateHud = () => {
-    const s = controller.getState();
-    renderHud(hud, {
-      datasetName: arrays.manifest.name,
-      pointCount: arrays.manifest.count,
-      pointSize: cloud.params.pointSize,
-      mode: s.mode,
-      speed: s.speed,
-      autoSpeed: { available: s.autoSpeed.available, enabled: s.autoSpeed.enabled, effectiveSpeed: s.effectiveSpeed },
-      viewParams: formatView({ pos: s.position, look: s.lookAt }),
-      labels: clusterLabels.available, // L キー（クラスタのないデータセットでは使えない）
-      minimap: true, // M キー
-    });
-  };
-  controller.onChange(() => updateHud()); // モードと速度の変化はすぐに見せる
-
+  // ---- 描画ループ ----
   let frameTimes: number[] | null = null;
   let frameWanted = 0;
   let frameArmed = false;
@@ -220,80 +288,33 @@ async function start(): Promise<void> {
     // 画面の倍率（devicePixelRatio）が変わったら、画面の大きさが変わったときと同じ経路で、描画バッファ・点の大きさ・
     // ミニマップを合わせ直す（ズームやモニタの移動では resize イベントが来ないことがある）
     if (currentPixelRatio() !== renderer.getPixelRatio()) resize();
-    controller.update(dt);
-    updateCameraDependent();
-    clusterLabels.update(window.innerWidth, window.innerHeight);
+    view?.update(dt, window.innerWidth, window.innerHeight);
     renderer.render(scene, camera);
-    minimap.render(); // 本体の描画のあと、右下の領域へ重ねて描く（src/minimap/）
+    view?.renderOverlay(); // 本体の描画のあと、右下の領域へ重ねて描く（src/minimap/）
 
     hudTimer += dt;
     if (hudTimer > 0.25) { hudTimer = 0; updateHud(); }
     requestAnimationFrame(tick);
   };
   requestAnimationFrame(tick);
-  updateHud();
 
-  // ---- ピッキング（src/picking/）----
-  const picker = new GpuPicker(renderer, cloud);
-  const picking = createPickingDebug(renderer, scene, camera, cloud, picker);
-  // ---- ここまで ----
-
-  // ---- ホバー・選択・ダブルクリックで点へ飛ぶ（src/interaction/）----
-  scene.add(cloud.highlight); // 輪の太さの倍率は resize() の setPixelRatio で設定する
-  const coarseLevel = arrays.manifest.clusters?.levels[0];
-  const coarseIds = arrays.clusterAssignments?.[0]?.ids;
-  const infoPanel = new InfoPanel(document, {
-    atlas: image,
-    cellSize: arrays.manifest.sprite.cellSize,
-    columns: arrays.manifest.sprite.columns,
-    labels: arrays.labels,
-    labelNames: arrays.manifest.labels.names,
-    labelColors: labelColors(arrays.manifest.labels.names.length),
-    coarse: coarseLevel && coarseIds
-      ? { ids: coarseIds, names: coarseLevel.clusters.map((c) => c.name), noise: arrays.manifest.clusters!.noise }
-      : null,
-  }, () => interaction.select(null));
-  const interaction = new InteractionController({
-    canvas: renderer.domElement,
-    camera,
-    cloud,
-    pick: (x, y) => picker.pick(camera, x, y).then((r) => (r ? r.index : null)),
-    index: spatialIndex, // 速度の自動調整と共有（上で構築）
-    panel: infoPanel,
-    flyTo: (target, options) => controller.flyTo(target, options),
-    bufferHeight: () => renderer.getDrawingBufferSize(new THREE.Vector2()).y,
-  });
-  // ---- ここまで ----
-
-  // ---- ミニマップ（src/minimap/）：右下に全体の俯瞰と現在位置・視線の向き。M キーで表示を切り替える ----
-  const minimap = new Minimap({
-    renderer,
-    camera,
-    positions: arrays.positions,
-    labels: arrays.labels,
-    labelCount: arrays.manifest.labels.names.length,
-    axes: arrays.manifest.overview?.axes,
-    selected: () => interaction.getState().selected,
-    moveTo: (view, seconds) => controller.goHome(view, seconds), // 位置と向きを滑らかに補間する（向きは同じなので位置だけ動く）
-    renderMain: () => renderer.render(scene, camera),
-    container: document.body,
-  });
-  window.addEventListener('resize', () => minimap.resize());
-  bindShortcut(window, 'KeyM', () => minimap.toggle());
-  // ---- ここまで ----
-
-  window.__explorer = {
-    ready: true,
-    pick: (x, y) => picker.pick(camera, x, y),
-    picking,
+  // ---- 検証用の窓口。表示中のデータセットの部品へ、呼ばれた時点で振り向ける ----
+  const v = () => {
+    if (!view) throw new Error('表示中のデータセットがありません');
+    return view;
+  };
+  const explorer = {
+    ready: false,
+    pick: (x, y) => v().picker.pick(camera, x, y),
+    get picking() { return v().picking; },
     interaction: {
-      getState: () => interaction.getState(),
-      stopDistance: (i) => interaction.stopDistance(i),
+      getState: () => v().interaction.getState(),
+      stopDistance: (i) => v().interaction.stopDistance(i),
     },
-    labels: { getState: () => clusterLabels.getState() },
-    setView: (v) => controller.setView(v),
-    homeView,
-    getState: () => controller.getState(),
+    labels: { getState: () => v().clusterLabels.getState() },
+    setView: (spec) => v().controller.setView(spec),
+    homeView: () => v().homeView(),
+    getState: () => v().controller.getState(),
     measureFrames: (n) =>
       new Promise((resolve) => {
         frameTimes = [];
@@ -301,16 +322,35 @@ async function start(): Promise<void> {
         frameWanted = n;
         frameResolve = resolve;
       }),
-    pointCloud: cloud,
-    minimap: minimap.debug,
+    get pointCloud() { return v().cloud; },
+    get minimap() { return v().minimap.debug; },
     clip: {
       get: () => ({ near: camera.near, far: camera.far }),
       override: (planes) => {
         clipOverride = planes ? { near: planes.near, far: planes.far } : null;
-        updateCameraDependent();
+        view?.updateCameraDependent();
       },
     },
-  };
+    dataset: {
+      getState: () => ({ ...state, current: state.current ? { ...state.current } : null }),
+      list: () => catalog,
+      switchTo: (param) => switchTo(param, { pushHistory: true }),
+      text: (i) => view?.text?.[i] ?? null,
+      pointColor: (i) => colorIndexHex(v().coloring.indices[i] ?? 0),
+    },
+    memory: () => ({
+      geometries: renderer.info.memory.geometries,
+      textures: renderer.info.memory.textures,
+      programs: renderer.info.programs?.length ?? 0,
+    }),
+  } as NonNullable<Window['__explorer']>;
+
+  // ---- 起動時のデータセット ----
+  // 起動時に失敗しても、選択欄（または dataset.switchTo）から別のデータセットを開けば、ready が true になって使える
+  const search = window.location.search;
+  const result = await switchTo(new URLSearchParams(search).get('data') ?? '', { search });
+  if (!result.ok) explorer.error = result.error ?? '不明なエラー';
+  window.__explorer = explorer;
 }
 
 start().catch((err: unknown) => {

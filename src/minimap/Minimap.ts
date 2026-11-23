@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { labelColors } from '../render/palette';
+import { colorIndexRgb } from '../render/colorScheme';
 import type { Vec3, ViewSpec } from '../render/view';
 import {
   clampRange, clampToFrame, computeExtent, computeLayout, depthFacing, depthHistogram, depthToGauge, describeMinimapStatus,
@@ -33,8 +33,8 @@ export interface MinimapDeps {
   renderer: THREE.WebGLRenderer;
   camera: THREE.PerspectiveCamera;
   positions: Float32Array;
-  labels: Uint8Array;
-  labelCount: number;
+  /** 長さ count。点ごとの色の番号（src/render/colorScheme.ts。本体の点と同じ色） */
+  colorIndices: Float32Array;
   axes?: readonly [Vec3, Vec3, Vec3] | null;
   /** 選択中の点の番号（なければ null） */
   selected(): number | null;
@@ -190,7 +190,12 @@ export class Minimap {
     const ws = new Float32Array(count);
     for (const i of order) ws[i] = toPlane([deps.positions[3 * i]!, deps.positions[3 * i + 1]!, deps.positions[3 * i + 2]!], this.basis)[2];
     order.sort((a, b) => ws[a]! - ws[b]! || a - b);
-    const colors = labelColors(Math.max(1, deps.labelCount));
+    const rgbCache = new Map<number, [number, number, number]>();
+    const colorOf = (ci: number) => {
+      let c = rgbCache.get(ci);
+      if (!c) rgbCache.set(ci, (c = colorIndexRgb(ci)));
+      return c;
+    };
     const pos = new Float32Array(3 * order.length);
     const col = new Float32Array(3 * order.length);
     order.forEach((i, k) => {
@@ -198,8 +203,7 @@ export class Minimap {
       pos[3 * k] = q[0];
       pos[3 * k + 1] = q[1];
       pos[3 * k + 2] = 0;
-      const rgb = colors[(deps.labels[i] ?? 0) % colors.length]!;
-      col.set(rgb, 3 * k);
+      col.set(colorOf(deps.colorIndices[i] ?? 0), 3 * k);
     });
     const geom = new THREE.BufferGeometry();
     geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));

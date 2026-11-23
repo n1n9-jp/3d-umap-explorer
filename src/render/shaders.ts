@@ -15,6 +15,11 @@
  * ラベル色は PALETTE_SIZE 色のパレットを繰り返して引く（ラベル番号を PALETTE_SIZE で割った余り）。
  * ラベルは uint8 なので、どのラベル（0..255）でも配列の範囲内を読む。
  *
+ * DOTS_ONLY を define すると、画像（アトラス）を使わず、すべての点を丸い点の場で描く（画像のないデータセット用）。
+ * 丸い点の半径は uDotRadius（ビルボードの 1 辺に対する比と、ピクセルでの上限）で決まり、ピッキングと強調表示の輪も同じ値を使う。
+ *
+ * 色の番号（instanceLabel）が負の点は、パレットではなく uNoiseColor（クラスタに属さない点の灰色）で描く。
+ *
  * PICKING を define すると、同じ形の判定のまま「点の番号」を出力する（GPU ピッキング用）。
  * 出力は index + 1 を RGB の24ビットに入れたもの（R が下位8ビット）で、0 は点なし。
  * 判定は、MSAA の半分以上のサンプルが覆われるかどうかに相当する「アルファ 0.5 以上」とする。
@@ -30,8 +35,10 @@ export const vertexShader = /* glsl */ `
 precision highp float;
 
 in vec3 instancePosition;
-in float instanceLabel;
+in float instanceLabel;   // 色の番号（負なら uNoiseColor）
+#ifndef DOTS_ONLY
 in vec2 instanceCell;
+#endif
 
 uniform float uPointSize;
 uniform float uMinPixelSize;
@@ -41,6 +48,7 @@ uniform vec2 uDigitPx;     // x: これ以下は丸い点, y: これ以上は数
 uniform vec2 uNearFade;    // x: 完全に消える距離, y: フェードが始まる距離
 uniform vec3 uFog;         // x: 霧の始まる距離, y: 霧が 1-1/e になるまでの距離, z: 霧の上限
 uniform vec3 uPalette[${PALETTE_SIZE}];
+uniform vec3 uNoiseColor;
 
 out vec2 vUv;
 out vec2 vLocal;
@@ -74,11 +82,20 @@ void main() {
   gl_Position = projectionMatrix * mv;
 
   vLocal = position.xy;                         // -0.5..0.5
+#ifdef DOTS_ONLY
+  vUv = vec2(0.0);
+  vDigit = 0.0;
+#else
   vec2 cornerUv = vec2(position.x + 0.5, 0.5 - position.y); // v は下向き（画像の上端が 0）
   vUv = instanceCell + cornerUv * uCellSize;
-  int label = clamp(int(instanceLabel + 0.5), 0, 255);
-  vColor = uPalette[label % ${PALETTE_SIZE}];
   vDigit = smoothstep(uDigitPx.x, uDigitPx.y, shownPx);
+#endif
+  if (instanceLabel < -0.5) {
+    vColor = uNoiseColor;
+  } else {
+    int label = clamp(int(instanceLabel + 0.5), 0, 65535);
+    vColor = uPalette[label % ${PALETTE_SIZE}];
+  }
   vPx = shownPx;
   vFade = fade;
   vFog = uFog.z * (1.0 - exp(-max(dist - uFog.x, 0.0) / uFog.y));
@@ -91,7 +108,9 @@ void main() {
 export const fragmentShader = /* glsl */ `
 precision highp float;
 
+#ifndef DOTS_ONLY
 uniform sampler2D uAtlas;
+#endif
 uniform float uInkIsDark;   // 1: 白地に黒インク（インク = 1 − 輝度）
 uniform float uOutline;     // 縁取りの幅（場の単位）
 uniform vec2 uDotRadius;    // 丸い点の半径 x: セル幅に対する比, y: ピクセルでの上限
@@ -117,8 +136,12 @@ float coverage(float f, float t) {
 }
 
 void main() {
+#ifdef DOTS_ONLY
+  float ink = 0.0;
+#else
   float lum = texture(uAtlas, vUv).r;
   float ink = mix(lum, 1.0 - lum, uInkIsDark);
+#endif
 
   // 丸い点の場（ピクセル単位）：半径の位置で 0.5。中距離の点が大きな円盤にならないよう半径に上限を設ける
   float radiusPx = min(uDotRadius.x * vPx, uDotRadius.y);
@@ -168,6 +191,7 @@ uniform float uPointSize;
 uniform float uMinPixelSize;
 uniform float uViewportHeight;
 uniform vec3 uRing;        // x: 半径の下限, y: 線の太さ, z: 縁取りの太さ（いずれも描画バッファのピクセル）
+uniform vec2 uDotRadius;   // 点群と共有（DOTS_ONLY のときだけ使う）
 
 out vec2 vPx;              // 中心からのずれ（ピクセル）
 out float vRadius;
@@ -181,8 +205,13 @@ void main() {
   }
   float pxPerUnit = 0.5 * uViewportHeight * projectionMatrix[1][1] / depth;
   float shownPx = max(uPointSize * pxPerUnit, uMinPixelSize);
+#ifdef DOTS_ONLY
+  // 丸い点（点群と同じ式の半径）より少し外側
+  float radius = max(min(uDotRadius.x * shownPx, uDotRadius.y) + 0.5 * uRing.y + 2.0, uRing.x);
+#else
   // 数字のセルの外接円（半辺 × √2）より少し外側
   float radius = max(0.72 * shownPx + 2.0, uRing.x);
+#endif
   float halfPx = radius + 0.5 * uRing.y + uRing.z + 2.0;
 
   vPx = position.xy * 2.0 * halfPx;
