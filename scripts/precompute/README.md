@@ -1,6 +1,6 @@
 # scripts/precompute
 
-MNIST 1万点（784次元）から3次元UMAP座標を事前計算し、`public/data/mnist/` へ配信用データを書き出します。
+MNIST 1万点（784次元）から3次元UMAP座標を事前計算し、`public/data/mnist/` へ配信用データ一式（座標、ラベル、スプライト、空間の構造）を書き出します。
 データ形式はリポジトリ直下の README.md の「データ形式」を参照してください。
 
 ## 再生成の手順
@@ -13,14 +13,16 @@ python3 -m venv .venv
 .venv/bin/python scripts/precompute/mnist_umap.py
 ```
 
-- 入力（`oss_data/` の3ファイル、約35MB）は、固定コミットから `scripts/precompute/.cache/` へ取得します。取得済みなら再利用します。取得し直すには `.cache/` を消してください。
-- UMAPは `random_state=42` で計算します（単一スレッド、約40秒〜1分）。同じ環境では同じ座標になります。
+- 入力（`oss_data/` の3ファイル、約35MB）は、固定コミットから `scripts/precompute/.cache/` へ取得します。3ファイルの SHA-256 はスクリプトに持ち、取得直後と `.cache/` の再利用時に照合します。一致しないファイルは取得し直します（取得し直すために `.cache/` を消す必要はありません）。`.cache/` へは一時ファイルへ書いてから名前を変えるので、途中で切れたファイルが残りません。
+- UMAPは `random_state=42`、`n_jobs=1`（単一スレッド）で計算します（約40秒〜1分）。同じ環境では同じ座標になります。
+- `umap-learn` 0.6 の既定値が将来変わっても結果が変わらないよう、`compatibility_layout=True`（0.5系と同じ処理）に固定しています。この値は manifest の `umap.compatibilityLayout` に記録します。
+- 座標とラベルのあと、続けて「空間の構造の追加」（下記）まで実行するので、このコマンド1回で配信用データ一式が再生成されます。`add_structure.py` を別に実行する必要はありません。
+- 配信用データは、作業用ディレクトリ（`public/data/` の下の `.mnist-staging-*`）に一式を作り、スプライトの検証と空間の構造の検証がすべて済んでから `public/data/mnist/` へ移します。途中で失敗しても `public/data/mnist/` は実行前のまま残り、作業用ディレクトリは消えます。
 - 最後に、座標の範囲、ラベル件数、3次元での10近傍の同ラベル率、最近傍点間距離の分布を表示します。
-- `umap-learn` 0.6 の既定値が将来変わっても結果が変わらないよう、`compatibility_layout=True`（0.5系と同じ処理）に固定しています。
 
 ## 空間の構造の追加（`add_structure.py`）
 
-配信用データに、全体の範囲（`bounds`）、密度（`density`）、俯瞰の向き（`overview`）、クラスタ（`clusters`）を追加します。項目の意味はリポジトリ直下の README.md の「データ形式」を参照してください。座標の計算（`mnist_umap.py`）が済んだ後に実行します。
+配信用データに、全体の範囲（`bounds`）、密度（`density`）、俯瞰の向き（`overview`）、クラスタ（`clusters`）を追加します。項目の意味はリポジトリ直下の README.md の「データ形式」を参照してください。`mnist_umap.py` が最後にこの処理を呼ぶので、通常は単独で実行する必要はありません。既存のデータセットの構造だけを計算し直したいときに、次のように単独で実行できます。
 
 ```sh
 .venv/bin/python scripts/precompute/add_structure.py public/data/mnist

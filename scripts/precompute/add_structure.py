@@ -262,11 +262,8 @@ def dump_json(obj, level: int = 0) -> str:
 
 # ---------- 実行 ----------
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("dataset", type=Path, help="manifest.json を含むデータセットのディレクトリ（例: public/data/mnist）")
-    ds: Path = ap.parse_args().dataset
-
+def add_structure(ds: Path) -> None:
+    """ds の manifest.json へ空間の構造を書き加え、クラスタ番号のファイルを ds へ書き出す。"""
     manifest, pos, labels, names = load_dataset(ds)
     count = len(pos)
 
@@ -312,6 +309,12 @@ def main() -> None:
         for c in lv["clusters"]:
             parent = "-" if c["parent"] is None else c["parent"]
             print(f"{c['id']:>3} {c['name']:<8} {c['size']:>6} {c['purity']:>7.3f} {c['radius']:>8.4f} {parent!s:>6}")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("dataset", type=Path, help="manifest.json を含むデータセットのディレクトリ（例: public/data/mnist）")
+    add_structure(ap.parse_args().dataset)
 
 
 if __name__ == "__main__":

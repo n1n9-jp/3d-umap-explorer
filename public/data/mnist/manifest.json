@@ -4,7 +4,7 @@
   "positions": {"file": "positions.f32", "dtype": "float32", "components": 3},
   "labels": {"file": "labels.u8", "dtype": "uint8", "names": ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]},
   "sprite": {"file": "sprite.png", "cellSize": [28, 28], "columns": 100, "rows": 100},
-  "umap": {"library": "umap-learn 0.6.0", "nComponents": 3, "nNeighbors": 15, "minDist": 0.1, "metric": "euclidean", "randomState": 42},
+  "umap": {"library": "umap-learn 0.6.0", "nComponents": 3, "nNeighbors": 15, "minDist": 0.1, "metric": "euclidean", "randomState": 42, "compatibilityLayout": true},
   "source": {"url": "https://github.com/tensorflow/embedding-projector-standalone", "commit": "6ff71f7233ac5947450409e7938b58ec14d1e24c"},
   "bounds": {"center": [0.0, 0.0, 0.0], "radius": 1.139497},
   "density": {"k": 8, "knnDistP05": 0.008562, "knnDistP50": 0.015665, "knnDistP95": 0.028776},
