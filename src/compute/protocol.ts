@@ -1,4 +1,6 @@
 /** メインスレッドと UMAP の Worker（`umapWorker.ts`）の間のメッセージ。 */
+import type { ManifestBounds, ManifestClusters, ManifestDensity, ManifestOverview } from '../data/manifest';
+import type { SpatialIndexData } from '../spatial/SpatialIndex';
 import type { UmapParams } from './params';
 
 export type ToWorker =
@@ -20,3 +22,26 @@ export type FromWorker =
   | { type: 'done'; id: number; positions: Float32Array; epochs: number; initMs: number; optimizeMs: number }
   | { type: 'cancelled'; id: number; epoch: number }
   | { type: 'error'; id: number; message: string };
+
+// ---------------------------------------------------------------- 空間の構造の計算（structureWorker.ts）
+
+/** 座標から空間の構造を計算する依頼（メインスレッド → 構造の Worker。座標とラベルはコピーして渡す） */
+export interface StructureRequest {
+  type: 'structure';
+  positions: Float32Array;
+  /** ラベル（ラベルのあるデータセットだけ） */
+  labels: Uint8Array | null;
+  names: string[] | null;
+}
+
+/** 構造の計算の結果（Worker → メインスレッド。空間索引の配列は transfer で渡す） */
+export type StructureReply =
+  | {
+    type: 'done';
+    bounds: ManifestBounds;
+    density: ManifestDensity;
+    overview: ManifestOverview;
+    groups: { clusters: ManifestClusters; ids: Uint16Array } | null;
+    index: SpatialIndexData;
+  }
+  | { type: 'error'; message: string };

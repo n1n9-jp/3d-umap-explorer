@@ -20,6 +20,11 @@
  *   - URL の nn・md・seed 付きで開くと、同じ結果が表示される
  *   - データセットを切り替えると、計算中の Worker が止まり、保持していた結果が破棄される
  *   - word2vec で計算でき、点の色が引き継がれ、目印が無効になり、ホバーと選択で単語が出る
+ *   - 空間の構造（範囲・密度・主成分軸・ラベルごとのまとまり）の計算は、別の Worker（structureWorker）で行い、その間も描画が続く
+ *   - 点の移動中（構造の計算中）にデータセットを切り替えても、`compute()`・`revert()` の Promise が「中断」で解決し、次の計算ができる
+ *   - Worker を意図的に失敗させる（`window.__explorer.faults.worker`）と、「切り替えによる中断」ではなくエラーとして報告し、パネルに原因が出て、次の計算ができる
+ *   - 進捗の読み上げは、開始と 25%・50%・75% の節目と、完了・中断・エラーの文だけ（画面の表示は細かく更新する）
+ *   - 計算の途中の座標を表示している間は、目印を隠し、ミニマップのそばに「計算中」を出す。終わると元に戻る
  *   - コンソールエラーがない
  * MNIST で近傍数 5・50、min_dist 0.0・0.8 の全体が見える視点のスクリーンショットを --out に保存する。
  * 計算とソフトウェア描画のため時間がかかる（10 分前後）。待つところは、時間ではなく状態の変化を待つ。
@@ -137,6 +142,7 @@ function knnMedianSample(p) {
 
 const consoleErrors = [];
 const requests = [];
+const workerUrls = [];
 
 async function openPage(browser, base, query) {
   const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 1 });
@@ -145,7 +151,10 @@ async function openPage(browser, base, query) {
   page.on('requestfailed', (r) => consoleErrors.push(`[requestfailed] ${r.url()}`));
   page.on('request', (r) => requests.push({ page, url: r.url() }));
   // Worker の中のエラーも数える
-  page.on('worker', (w) => w.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(`[worker error] ${m.text()}`); }));
+  page.on('worker', (w) => {
+    workerUrls.push({ page, url: w.url() });
+    w.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(`[worker error] ${m.text()}`); });
+  });
   await page.goto(`${base}?${query}`);
   await page.waitForFunction(() => window.__explorer && (window.__explorer.ready || window.__explorer.error), null, { timeout: 120000 });
   return page;
@@ -332,6 +341,12 @@ async function testFirstCompute(page, ctx) {
   });
   await frames(page, 30);
   const camBefore = await camState(page);
+  // 読み上げの領域（進捗の読み上げは、開始・節目・文の変化だけ）の変化を記録する
+  await page.evaluate(() => {
+    const live = document.querySelector('#umap-panel .sr-only[role="status"]');
+    window.__spoken = [];
+    if (live) new MutationObserver(() => window.__spoken.push(live.textContent)).observe(live, { childList: true, characterData: true, subtree: true });
+  });
   const p = { nNeighbors: 15, minDist: 0.1, seed: 42 };
   const t0 = Date.now();
   await computeViaPanel(page, p, { wait: false });
@@ -350,6 +365,16 @@ async function testFirstCompute(page, ctx) {
 
   const done = await waitIdle(page);
   const st = done.value;
+  const spoken = await page.evaluate(() => window.__spoken);
+  const attrs = await page.evaluate(() => {
+    const t = document.getElementById('umap-progress-text'), m = document.getElementById('umap-message');
+    return { progressLive: t.getAttribute('aria-live'), progressRole: t.getAttribute('role'), messageLive: m.getAttribute('aria-live'), messageRole: m.getAttribute('role') };
+  });
+  check('進捗の読み上げは、開始と 25%・50%・75% の節目と、完了の文だけ（5 エポックごとには読み上げない）',
+    spoken.length >= 4 && spoken.length <= 8 && spoken[0].includes('計算を始めました') && ['25%', '50%', '75%'].every((m) => spoken.some((t) => t.includes(m)))
+      && spoken.some((t) => /計算しました/.test(t)) && !spoken.some((t) => /エポック/.test(t)),
+    JSON.stringify(spoken));
+  check('進捗の表示の要素は、読み上げの対象にしない（画面の表示は細かく更新したまま）', attrs.progressLive === 'off' && attrs.progressRole === null && attrs.messageLive === 'off' && attrs.messageRole === null, JSON.stringify(attrs));
   const rec = await page.evaluate(() => { window.__rafStop = true; return window.__rafRec; });
   const stats = (phase) => {
     const d = [];
@@ -365,8 +390,16 @@ async function testFirstCompute(page, ctx) {
   check('完走して、ブラウザで計算した埋め込みを表示する', st && st.lastOutcome === 'done' && st.current.kind === 'computed' && st.current.key === urlKey(p),
     st ? `${((Date.now() - t0) / 1000).toFixed(1)} 秒（準備 ${(st.lastRun.initMs / 1000).toFixed(2)} 秒・最適化 ${(st.lastRun.optimizeMs / 1000).toFixed(2)} 秒）` : 'タイムアウト');
   ctx.firstRun = st?.lastRun;
+  const structureWorkers = workerUrls.filter((w) => w.page === page && /structureWorker/.test(w.url));
+  check('空間の構造の計算は、別の Worker（structureWorker）で行う', structureWorkers.length >= 1, structureWorkers.map((w) => w.url.replace(/^.*\//, '')).join(', '));
   const P = await getF32(page, 'positions');
   ctx.P15 = P;
+  // 修正の前後で、同じ座標から同じ構造が得られるかを比べるための記録（座標と、アプリが表示に使っている構造）
+  fs.writeFileSync(path.join(outDir, 'p15.f32'), Buffer.from(P.buffer, P.byteOffset, P.byteLength));
+  fs.writeFileSync(path.join(outDir, 'structure15.json'), JSON.stringify({
+    structure: await page.evaluate(() => window.__explorer.umap.structure()),
+    clusters: await page.evaluate(() => window.__explorer.umap.clusters()),
+  }, null, 2));
   const rate = sameLabelRate(P, mnist.labels);
   check(`3 次元の 10 近傍の同ラベル率が、事前計算（${PRECOMPUTED_SAME_LABEL_10}）から 0.03 以内`, Math.abs(rate - PRECOMPUTED_SAME_LABEL_10) <= 0.03, rate.toFixed(4));
   const c3 = bboxCenter(P);
@@ -502,7 +535,22 @@ async function testPreviewAndDeterminism(page, ctx) {
   const st = await umapState(page);
   check('「計算の途中を表示する」で、計算中に点群の座標が更新される', a.value && !sameBits(shownA, P0) && !sameBits(shownA, shownB),
     `途中の座標の反映 ${st.previewUpdates} 回（計算中: ${st.phase}、エポック ${st.epoch}）`);
+  // 途中の座標を表示している間は、目印を隠し、ミニマップのそばに「計算中」を出す（目印とミニマップは計算前の座標のまま）
+  const during = await page.evaluate(() => {
+    const b = document.getElementById('minimap-computing');
+    const m = window.__explorer.minimap.getState().map;
+    let badge = null;
+    if (b) {
+      const r = b.getBoundingClientRect();
+      badge = { text: b.textContent, hidden: b.hidden, inMap: r.left >= m.left - 1 && r.top >= m.top - 1 && r.right <= m.left + m.width + 1 && r.bottom <= m.top + m.height + 1 };
+    }
+    return { labelsEnabled: window.__explorer.labels.getState().enabled, containerHidden: document.getElementById('cluster-labels').hidden, badge };
+  });
+  check('途中の座標を表示している間は、目印を一時的に隠し、ミニマップの上に「計算中」を出す',
+    !during.labelsEnabled && during.containerHidden && during.badge && during.badge.text === '計算中' && !during.badge.hidden && during.badge.inMap, JSON.stringify(during));
   const d30 = await waitIdle(page);
+  const after30 = await page.evaluate(() => ({ labelsEnabled: window.__explorer.labels.getState().enabled, containerHidden: document.getElementById('cluster-labels').hidden, badge: document.getElementById('minimap-computing') !== null }));
+  check('計算が終わると、目印が元に戻り、「計算中」が消える', after30.labelsEnabled && !after30.containerHidden && !after30.badge, JSON.stringify(after30));
   check('近傍数 30 で計算でき、途中の表示のあとに新しい座標へ切り替わる', d30.value && d30.value.lastOutcome === 'done' && d30.value.current.key === 'nn=30&md=0.10&seed=42', `${(d30.ms / 1000).toFixed(1)} 秒`);
   await page.uncheck('#umap-preview');
 
@@ -536,6 +584,8 @@ async function testCancel(page) {
     `指示から停止まで ${lc ? lc.ms.toFixed(0) : '-'} ms（ページの中で測定。止まったエポック ${lc?.epoch}）、クリックから状態の確認まで ${ms} ms`);
   check('中断のあと、表示は計算前のまま（データの座標と、点群に描いている座標）', sameBits(after, before) && sameBits(shown, before) && stopped.value.current.key === stBefore.current.key,
     `表示中 ${stopped.value?.current.key ?? stopped.value?.current.kind}`);
+  const afterCancel = await page.evaluate(() => ({ labelsEnabled: window.__explorer.labels.getState().enabled, badge: document.getElementById('minimap-computing') !== null }));
+  check('中断すると、目印が元に戻り、「計算中」が消える', afterCancel.labelsEnabled && !afterCancel.badge, JSON.stringify(afterCancel));
   check('中断した計算の結果は保持しない', !stopped.value.cache.includes('nn=20&md=0.20&seed=1'), JSON.stringify(stopped.value.cache));
   await page.uncheck('#umap-preview');
 }
@@ -668,6 +718,66 @@ async function testWord2vec(page) {
   await page.screenshot({ path: path.join(outDir, 'word2vec-nn15.png') });
 }
 
+/** requestAnimationFrame を遅くして、点の移動（1 フレームの進みは上限があるので、約 10 フレーム）を長引かせる */
+const slowFrames = (page, ms) => page.evaluate((delay) => {
+  if (!window.__origRaf) window.__origRaf = window.requestAnimationFrame.bind(window);
+  window.requestAnimationFrame = (cb) => window.__origRaf((t) => setTimeout(() => cb(performance.now()), delay));
+}, ms);
+const normalFrames = (page) => page.evaluate(() => { if (window.__origRaf) window.requestAnimationFrame = window.__origRaf; });
+
+async function testSwitchDuringMorph(page) {
+  console.log('\n[点の移動中のデータセットの切り替え]');
+  // 表示中は word2vec（直前の検証で計算した結果を保持している）。事前計算へ戻したあと、保持している結果を表示する（compute）。
+  // そのあと切り替えた先で計算して、事前計算へ戻す（revert）
+  const p = { nNeighbors: 15, minDist: 0.1, seed: 42 };
+  const back = await page.evaluate(() => window.__explorer.umap.revert());
+  check('（準備）事前計算へ戻す', back.ok);
+
+  for (const kind of ['compute', 'revert']) {
+    // 表示を切り替えている途中（点の移動中）に、別のデータセットへ切り替える。
+    // 切り替えの読み込みの間に点の移動が終わらないよう、フレームを遅くしておく
+    if (kind === 'revert') {
+      const r = await page.evaluate((q) => window.__explorer.umap.compute(q), p); // 切り替えた先（MNIST）で計算して表示する
+      check('（準備）計算した埋め込みを表示する', r.ok, JSON.stringify(r));
+    }
+    await slowFrames(page, 400);
+    const workersBefore = workerUrls.length;
+    const out = await page.evaluate(async ({ kind, p }) => {
+      const ex = window.__explorer;
+      const waiting = kind === 'compute' ? ex.umap.compute(p) : ex.umap.revert();
+      const sw = ex.dataset.switchTo(kind === 'compute' ? 'mnist' : 'word2vec-10k');
+      const res = await Promise.race([waiting, new Promise((r) => setTimeout(() => r('timeout'), 60000))]);
+      const swRes = await sw;
+      return { res, swRes, phase: ex.umap.getState().phase };
+    }, { kind, p });
+    await normalFrames(page);
+    void workersBefore;
+    check(`点の移動中にデータセットを切り替えても、${kind === 'compute' ? 'compute()' : 'revert()'} の Promise が「中断」で解決する`,
+      out.res !== 'timeout' && out.res.ok === false && out.res.cancelled === true && out.swRes.ok && out.phase === 'idle', JSON.stringify(out));
+    await frames(page, 2);
+  }
+}
+
+async function testWorkerError(page) {
+  console.log('\n[Worker のエラー]');
+  // 表示中は word2vec。計算の Worker を、読み込みに失敗する Worker にする
+  await page.evaluate(() => { window.__explorer.faults.worker = 1; });
+  const errsBefore = consoleErrors.length;
+  const p = { nNeighbors: 15, minDist: 0.1, seed: 43 };
+  const r = await page.evaluate((q) => window.__explorer.umap.compute(q), p);
+  const st = await umapState(page);
+  const ui = await page.evaluate(() => ({ message: document.getElementById('umap-message').textContent, error: document.getElementById('umap-message').classList.contains('error'), hidden: document.getElementById('umap-message').hidden }));
+  check('Worker が失敗すると、「切り替えによる中断」ではなくエラーとして報告する', r.ok === false && !r.cancelled && /Worker/.test(r.error ?? '') && !/切り替わりました/.test(r.error ?? '') && st.lastOutcome === 'error', JSON.stringify(r));
+  check('パネルに、原因が分かる文（Worker を読み込めない・SIMD に対応していないブラウザでは使えない）がエラーの色で出る',
+    ui.error && !ui.hidden && /計算に失敗しました/.test(ui.message) && /Worker/.test(ui.message) && /SIMD/.test(ui.message), ui.message);
+  check('エラーのあとは待機に戻り（Worker は止まっている）、パネルの「計算」が押せる', st.phase === 'idle' && !st.workerStarted && st.error !== null && await page.evaluate(() => !document.getElementById('umap-run').disabled), `phase ${st.phase}`);
+  void errsBefore;
+  // 次の計算ができる（Worker を作り直す）
+  const r2 = await page.evaluate((q) => window.__explorer.umap.compute(q), p);
+  const st2 = await umapState(page);
+  check('そのあと、次の計算ができる（Worker を作り直し、結果を表示する）', r2.ok && st2.lastOutcome === 'done' && st2.current.kind === 'computed' && st2.workerStarted && st2.error === null, JSON.stringify(r2));
+}
+
 async function main() {
   if (!args.includes('--no-build')) {
     console.log('ビルド中…');
@@ -690,6 +800,8 @@ async function main() {
     await testUrl(browser, base, ctx);
     await testSwitchDuringCompute(page);
     await testWord2vec(page);
+    await testSwitchDuringMorph(page);
+    await testWorkerError(page);
     fs.writeFileSync(path.join(outDir, 'report.json'), JSON.stringify({ firstRun: ctx.firstRun, shots: ctx.shotStats, results, consoleErrors }, null, 2));
   } finally {
     if (browser) await browser.close();

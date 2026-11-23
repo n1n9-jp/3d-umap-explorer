@@ -13,12 +13,14 @@ import type { StopDistance } from './interaction/stopDistance';
 import type { ClusterLabelsState } from './labels/ClusterLabels';
 import type { MinimapDebug } from './minimap/Minimap';
 import type { PointCloud } from './render/pointCloud';
+import { faults, type Faults } from './app/faults';
 import { DatasetView, loadDataset, releaseLoadedDataset, type AppContext, type LoadedDataset } from './app/datasetView';
 import {
   FALLBACK_CATALOG, parseCatalog, resolveDatasetParam, searchForDataset, type DatasetCatalog, type DatasetTarget,
 } from './data/catalog';
 import { DatasetSwitcher } from './app/datasetSwitcher';
 import { colorIndexHex, type PointColoring } from './render/colorScheme';
+import type { SpatialIndex } from './spatial/SpatialIndex';
 import type { DatasetKind } from './data/manifest';
 import type { EmbeddingHost, UmapFeatureState } from './compute/host';
 import type { UmapFeature, UmapOutcome } from './compute/umapFeature';
@@ -86,6 +88,10 @@ declare global {
         getState(): WordLabelsState | null;
         setEnabled(enabled: boolean): void;
       };
+      /** 検証用の故障の注入（`src/app/faults.ts`）。次に起こす失敗の回数を書く */
+      faults: Faults;
+      /** 表示中の表示に出している、利用者への通知（単語の文字を作れなかったときなど。なければ null） */
+      notice(): string | null;
       /** WebGL の資源の数（renderer.info.memory と programs） */
       memory(): { geometries: number; textures: number; programs: number };
       /**
@@ -183,6 +189,7 @@ async function start(): Promise<void> {
       speed: s.speed,
       autoSpeed: { available: s.autoSpeed.available, enabled: s.autoSpeed.enabled, effectiveSpeed: s.effectiveSpeed },
       viewParams: formatView({ pos: s.position, look: s.lookAt }),
+      notice: view.notice ?? undefined,
       labels: view.clusterLabels.available, // L キー（クラスタのないデータセットでは使えない）
       words: view.words !== null, // K キー（単語のデータセットだけ）
       minimap: true, // M キー
@@ -206,7 +213,7 @@ async function start(): Promise<void> {
     } catch (e) {
       // 作れなければ、前のデータで作り直して表示を保つ（視点はホーム）
       if (prev && prevTarget) {
-        view = new DatasetView(ctx, prev.data, { coloring: prev.coloring, words: wordsEnabled });
+        view = new DatasetView(ctx, prev.data, { coloring: prev.coloring, words: wordsEnabled, spatialIndex: prev.spatialIndex });
         view.controller.onChange(() => updateHud());
         view.controller.setView(view.homeView());
       }
@@ -235,7 +242,7 @@ async function start(): Promise<void> {
    * 同じデータセットのまま、座標（ブラウザで計算した埋め込み）を差し替えて表示を作り直す。利用者の状態（点の大きさ・カメラ・モード・
    * 速度・自動調整・目印とミニマップの表示・選択）を引き継ぐ。読み込んだ画像は共有なので解放しない。
    */
-  const replaceView = (data: LoadedDataset, options: { coloring: PointColoring | null }): DatasetView => {
+  const replaceView = (data: LoadedDataset, options: { coloring: PointColoring | null; spatialIndex?: SpatialIndex }): DatasetView => {
     const prev = view;
     if (!prev) throw new Error('表示中のデータセットがありません');
     const ui = prev.captureUiState();
@@ -243,10 +250,10 @@ async function start(): Promise<void> {
     view = null;
     let next: DatasetView;
     try {
-      next = new DatasetView(ctx, data, { pointSize: ui.pointSize, coloring: options.coloring, words: wordsEnabled });
+      next = new DatasetView(ctx, data, { pointSize: ui.pointSize, coloring: options.coloring, words: wordsEnabled, spatialIndex: options.spatialIndex });
     } catch (e) {
-      // 作れなければ、前のデータで作り直して表示を保つ
-      view = new DatasetView(ctx, prev.data, { pointSize: ui.pointSize, coloring: prev.coloring, words: wordsEnabled });
+      // 作れなければ（作りかけのものは DatasetView が破棄している）、前のデータで作り直して表示を保つ
+      view = new DatasetView(ctx, prev.data, { pointSize: ui.pointSize, coloring: prev.coloring, words: wordsEnabled, spatialIndex: prev.spatialIndex });
       view.controller.onChange(() => updateHud());
       view.applyUiState(ui);
       throw e;
@@ -367,7 +374,7 @@ async function start(): Promise<void> {
   });
   bindAutoSpeedKey(window, { toggleAutoSpeed: () => view?.controller.toggleAutoSpeed() }); // T キーで有効・無効を切り替える
   bindShortcut(window, 'KeyH', () => view?.controller.goHome(view.homeView())); // H キーでホームの視点へ戻る
-  bindShortcut(window, 'KeyL', () => view?.clusterLabels.toggle()); // L キーで目印の表示・非表示
+  bindShortcut(window, 'KeyL', () => view?.toggleClusterLabels()); // L キーで目印の表示・非表示
   bindShortcut(window, 'KeyM', () => view?.minimap.toggle()); // M キーでミニマップの表示・非表示
   bindShortcut(window, 'KeyU', () => toggleUmapPanel(true)); // U キーで UMAP の再計算のパネルを開閉
   bindShortcut(window, 'KeyK', () => setWordsEnabled(!wordsEnabled)); // K キーで近くの単語の文字の表示・非表示
@@ -478,6 +485,8 @@ async function start(): Promise<void> {
       getState: () => v().words?.getState() ?? null,
       setEnabled: (enabled) => setWordsEnabled(enabled),
     },
+    faults,
+    notice: () => view?.notice ?? null,
     memory: () => ({
       geometries: renderer.info.memory.geometries,
       textures: renderer.info.memory.textures,

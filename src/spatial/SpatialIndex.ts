@@ -34,6 +34,21 @@ export interface NearestResult {
   distance: number;
 }
 
+/**
+ * 構築済みの索引の中身（`SpatialIndex.toData` で取り出し、`new SpatialIndex(positions, data)` で戻す）。
+ * Web Worker で構築して、配列を transfer でメインスレッドへ渡し、構築をやり直さずに使うためのもの。
+ */
+export interface SpatialIndexData {
+  count: number;
+  /** 木の順に並べ替えた座標（長さ 3N） */
+  pts: Float32Array;
+  /** 木の順の位置 → 入力での点の添字 */
+  ids: Int32Array;
+  splitAxis: Uint8Array;
+  /** 範囲ごとの点の外接箱（長さ 6N） */
+  boxes: Float32Array;
+}
+
 export interface KNearestResult {
   /** 近い順（同距離は添字の小さい順）の点の添字 */
   indices: Int32Array;
@@ -74,10 +89,27 @@ export class SpatialIndex {
    * @param positions 長さ 3N。点 i が [3i, 3i+1, 3i+2] に x, y, z。構築時にコピーするので、
    *   後から書き換えても索引には反映されない。NaN を含む場合は RangeError（NaN があると木の分割の
    *   前提が崩れ、正常な点の検索結果まで誤るため）。±Infinity は受け付ける。
+   * @param prebuilt 同じ `positions` から構築済みの索引の中身（`toData()` の結果）。渡すと構築しない
+   *   （配列は索引のものになる。座標の NaN の検査と、座標のコピーも省く）。長さが合わなければ RangeError。
    */
-  constructor(positions: Float32Array) {
+  constructor(positions: Float32Array, prebuilt?: SpatialIndexData) {
     if (positions.length % 3 !== 0) {
       throw new RangeError(`positions の長さは 3 の倍数である必要があります: ${positions.length}`);
+    }
+    if (prebuilt) {
+      const n = positions.length / 3;
+      if (
+        prebuilt.count !== n || prebuilt.pts.length !== 3 * n || prebuilt.ids.length !== n
+        || prebuilt.splitAxis.length !== n || prebuilt.boxes.length !== 6 * n
+      ) {
+        throw new RangeError(`構築済みの索引の大きさが、点の数 ${n} と一致しません`);
+      }
+      this.count = n;
+      this.pts = prebuilt.pts;
+      this.ids = prebuilt.ids;
+      this.splitAxis = prebuilt.splitAxis;
+      this.boxes = prebuilt.boxes;
+      return;
     }
     for (let i = 0; i < positions.length; i++) {
       if (positions[i] !== positions[i]) {
@@ -92,6 +124,13 @@ export class SpatialIndex {
     this.splitAxis = new Uint8Array(n);
     this.boxes = new Float32Array(6 * n);
     this.build();
+  }
+
+  /**
+   * 索引の中身（コピーしない）。Worker から transfer で渡すときに使う。渡したあとは、この索引を使わない。
+   */
+  toData(): SpatialIndexData {
+    return { count: this.count, pts: this.pts, ids: this.ids, splitAxis: this.splitAxis, boxes: this.boxes };
   }
 
   /** 最も近い点。`maxDistance` 以内（境界を含む）に点がなければ null。 */

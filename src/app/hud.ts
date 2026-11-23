@@ -32,6 +32,8 @@ export interface HudInfo {
   minimap?: boolean;
   /** 近くの単語の文字の表示があるか（K キーの説明を操作説明に含める。単語のデータセットだけ）。省略時は含めない。 */
   words?: boolean;
+  /** 利用者に知らせる文（単語の文字を作れず丸い点だけで表示しているときなど）。あれば 5 行目に出す。 */
+  notice?: string;
 }
 
 export interface HudAutoSpeed {
@@ -63,15 +65,17 @@ export function hudHelpItems(info: HudInfo): string[] {
   return items;
 }
 
-/** HUD の本文（改行区切りの 4 行）。 */
+/** HUD の本文（改行区切りの 4 行。通知があれば 5 行目に足す）。 */
 export function formatHud(info: HudInfo): string {
   const auto = info.autoSpeed ? `  ${formatAutoSpeed(info.autoSpeed, info.mode)}` : '';
-  return [
+  const lines = [
     `${info.datasetName}  ${info.pointCount.toLocaleString()} 点  点の大きさ ${info.pointSize.toPrecision(3)}（[ ] で変更）`,
     `モード ${MODE_LABEL[info.mode]}  飛行速度 ${formatSpeed(info.speed)}${auto}`,
     hudHelpItems(info).join(HELP_SEPARATOR),
     `?${info.viewParams}`,
-  ].join('\n');
+  ];
+  if (info.notice) lines.push(info.notice);
+  return lines.join('\n');
 }
 
 const rendered = new WeakMap<HTMLElement, string>();

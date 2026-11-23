@@ -14,13 +14,20 @@
 import { loadKnnGraph, type KnnGraph } from '../data/knn';
 import { UmapPanel } from '../app/umapPanel';
 import { applyTransform, meanDisplacement, normalizePositions, procrustes } from './align';
-import { buildEmbeddingData } from './embedding';
+import { takeFault } from '../app/faults';
+import type { SpatialIndex } from '../spatial/SpatialIndex';
+import { buildEmbeddingData, structureInputs } from './embedding';
 import type { EmbeddingHost, UmapFeatureState } from './host';
 import {
   UMAP_CHUNK_EPOCHS, UMAP_EPOCHS, UMAP_LIMITS, describeComputed, describePrecomputed, embeddingStatusText, formatUmapParams, paramsKey, validParams,
   type UmapParams,
 } from './params';
 import type { FromWorker, ToWorker } from './protocol';
+import { StructureAborted, startStructureJob, type StructureJob } from './structureClient';
+import { describeComputeError, describeWorkerError } from './workerError';
+
+/** `faults.worker` で使う、読み込みの時点で例外を投げる Worker（検証用）。 */
+const FAILING_WORKER_URL = `data:text/javascript;charset=utf-8,${encodeURIComponent('throw new Error("検証用に Worker を失敗させました");')}`;
 
 /** 新旧の座標の間を点が動く時間（秒） */
 export const MORPH_SECONDS = 1.0;
@@ -29,7 +36,10 @@ export const PREVIEW_INTERVAL_MS = 300;
 /** 保持する結果の数の上限（古いものから捨てる） */
 export const MAX_CACHED = 8;
 
-/** 計算・表示の結果。 */
+/** データセットが切り替わって打ち切ったときの、`UmapOutcome.error` の文 */
+const DATASET_CHANGED = 'データセットが切り替わりました';
+
+/** 計算・表示の結果。打ち切ったとき（データセットの切り替えなど）も、必ず `cancelled: true` で解決する。 */
 export interface UmapOutcome {
   ok: boolean;
   cancelled?: boolean;
@@ -65,7 +75,21 @@ interface Morph {
   to: Float32Array;
   buf: Float32Array;
   t: number;
-  done(): void;
+  /** 動かし終えたら true、途中で打ち切ったら false で呼ぶ（どちらでも `morphTo` の Promise は解決する） */
+  done(completed: boolean): void;
+}
+
+/**
+ * メインスレッドで同期的に動く区間の時間を、`performance.measure` に記録する（名前は `umap:` で始まる。計測用。
+ * scripts/spike/switch-stall/measure.cjs が読む）。結果はそのまま返す。
+ */
+function timed<T>(name: string, fn: () => T): T {
+  const start = performance.now();
+  try {
+    return fn();
+  } finally {
+    performance.measure(name, { start, end: performance.now() });
+  }
 }
 
 /** 0..1 の始まりと終わりを緩やかにする */
@@ -85,6 +109,10 @@ export class UmapFeature {
   private loading: RunningJob | null = null;
   private running: RunningJob | null = null;
   private morph: Morph | null = null;
+  /** 新しい座標の空間の構造を Worker で計算している間（点を動かしている間も含む） */
+  private structureJob: StructureJob | null = null;
+  /** 事前計算の座標の空間索引（事前計算へ戻すとき、作り直さずに使う） */
+  private baseSpatialIndex: SpatialIndex | null = null;
   private current: UmapFeatureState['current'] = { kind: 'precomputed' };
   private readonly cache = new Map<string, CacheEntry>();
   private epoch = 0;
@@ -174,7 +202,7 @@ export class UmapFeature {
   }
 
   private get phase(): UmapFeatureState['phase'] {
-    if (this.morph) return 'morphing';
+    if (this.morph || this.structureJob) return 'morphing';
     if (this.running) return 'running';
     if (this.loading) return 'loading';
     return 'idle';
@@ -186,7 +214,11 @@ export class UmapFeature {
     if (gen === this.gen) return;
     this.gen = gen;
     this.stopWorker();
+    this.structureJob?.abort();
+    this.structureJob = null;
+    this.morph?.done(false); // 表示を切り替えている途中なら、待っている処理（show・revert）を打ち切りで解決させる
     this.morph = null;
+    this.baseSpatialIndex = null;
     this.cache.clear();
     this.graph = null;
     this.graphPromise = null;
@@ -300,10 +332,10 @@ export class UmapFeature {
     const base = this.host.baseData();
     if (!base) return { ok: false, error: '表示中のデータセットがありません' };
     const gen = this.gen;
-    await this.morphTo(base.arrays.positions);
-    if (gen !== this.host.generation()) return { ok: false, error: 'データセットが切り替わりました' };
+    const morphed = await this.morphTo(base.arrays.positions);
+    if (!morphed || gen !== this.host.generation()) return this.cancelledBySwitch();
     try {
-      this.host.replaceView(base, { coloring: null });
+      this.host.replaceView(base, { coloring: null, spatialIndex: this.baseSpatialIndex ?? undefined });
     } catch (e) {
       this.restoreDisplay();
       return this.failShow(e);
@@ -320,7 +352,7 @@ export class UmapFeature {
     const m = this.morph;
     if (!m) return;
     const view = this.host.view();
-    if (!view || this.gen !== this.host.generation()) { this.morph = null; return; }
+    if (!view || this.gen !== this.host.generation()) { this.morph = null; m.done(false); return; }
     m.t = Math.min(1, m.t + Math.max(0, dt) / MORPH_SECONDS);
     const s = smoothstep(m.t);
     const { from, to, buf } = m;
@@ -328,12 +360,16 @@ export class UmapFeature {
     view.setDisplayPositions(buf);
     if (m.t >= 1) {
       this.morph = null;
-      m.done();
+      m.done(true);
     }
   }
 
   dispose(): void {
     this.stopWorker();
+    this.structureJob?.abort();
+    this.structureJob = null;
+    this.morph?.done(false);
+    this.morph = null;
     this.panel.dispose();
   }
 
@@ -353,13 +389,21 @@ export class UmapFeature {
       this.graph = g;
     }
     if (!this.worker) {
-      const w = new Worker(new URL('./umapWorker.ts', import.meta.url), { type: 'module', name: 'umap' });
+      const w = takeFault('worker')
+        ? new Worker(FAILING_WORKER_URL, { name: 'umap' })
+        : new Worker(new URL('./umapWorker.ts', import.meta.url), { type: 'module', name: 'umap' });
       w.onmessage = (ev: MessageEvent<FromWorker>) => this.onWorkerMessage(ev.data);
       w.onerror = (ev) => {
         ev.preventDefault();
+        if (this.worker !== w) return;
+        // Worker のエラーは、計算を「切り替えによる中断」にせず、エラーとして報告する（`stopWorker` は待っている計算を中断で解決してしまう）
         const job = this.running ?? this.loading;
-        this.stopWorker();
-        if (job) this.fail(job, `Worker でエラーが起きました: ${ev.message || '不明'}`);
+        this.running = null;
+        this.loading = null;
+        this.terminateWorker();
+        const message = describeWorkerError(ev.message);
+        if (job) this.fail(job, message);
+        else console.warn('UMAP の Worker でエラーが起きました:', message);
       };
       this.worker = w;
       const g = this.graph;
@@ -372,17 +416,23 @@ export class UmapFeature {
     this.worker?.postMessage(m, transfer);
   }
 
-  private stopWorker(): void {
+  /** Worker を止める（待っている計算には触れない）。 */
+  private terminateWorker(): void {
     if (this.worker) {
       this.worker.terminate();
       this.worker = null;
     }
+  }
+
+  /** データセットの切り替えなどで Worker を止める。待っている計算は、中断として解決する。 */
+  private stopWorker(): void {
+    this.terminateWorker();
     const job = this.running ?? this.loading;
     this.running = null;
     this.loading = null;
     if (job) {
       this.lastOutcome = 'cancelled';
-      job.resolve({ ok: false, cancelled: true, error: 'データセットが切り替わりました' });
+      job.resolve({ ok: false, cancelled: true, error: DATASET_CHANGED });
     }
   }
 
@@ -402,6 +452,7 @@ export class UmapFeature {
         const view = this.host.view();
         if (!view) break;
         const aligned = normalizePositions(applyTransform(m.positions, procrustes(m.positions, job.target)));
+        view.setComputingDisplay(true); // 目印とミニマップは計算前の座標のまま。目印を隠し、ミニマップに「計算中」を出す
         view.setDisplayPositions(aligned);
         this.previewShown = true;
         this.previewUpdates++;
@@ -426,7 +477,7 @@ export class UmapFeature {
         break;
       case 'error':
         this.running = null;
-        this.fail(job, m.message);
+        this.fail(job, describeComputeError(m.message));
         break;
     }
   }
@@ -454,27 +505,76 @@ export class UmapFeature {
   /** 点群の描画を、表示中の埋め込みの座標へ戻す（途中の座標を出していたとき）。 */
   private restoreDisplay(): void {
     const view = this.host.view();
-    if (view) view.setDisplayPositions(view.arrays.positions);
+    if (view) {
+      view.setDisplayPositions(view.arrays.positions);
+      view.setComputingDisplay(false);
+    }
     this.previewShown = false;
   }
 
-  /** 結果を表示中の座標へ位置合わせし、点を動かしてから、表示を作り直す。 */
+  /** データセットが切り替わって、表示の切り替えを打ち切ったときの結果。 */
+  private cancelledBySwitch(): UmapOutcome {
+    this.lastOutcome = 'cancelled';
+    return { ok: false, cancelled: true, error: DATASET_CHANGED };
+  }
+
+  /**
+   * 結果を表示中の座標へ位置合わせし、点を動かしてから、表示を作り直す。空間の構造（範囲・密度・主成分軸・ラベルごとの
+   * まとまり）と空間索引は、点を動かしている間に Worker で計算する（メインスレッドを止めない）。
+   * データセットが切り替わって打ち切ったときも、`cancelled: true` で解決する。想定外の例外も、失敗として解決する（拒否しない）。
+   */
   private async show(entry: CacheEntry, cached: boolean): Promise<UmapOutcome> {
+    try {
+      return await this.showEntry(entry, cached);
+    } catch (e) {
+      this.restoreDisplay();
+      return this.failShow(e);
+    }
+  }
+
+  private async showEntry(entry: CacheEntry, cached: boolean): Promise<UmapOutcome> {
     const view = this.host.view();
     const base = this.host.baseData();
     if (!view || !base) return { ok: false, error: '表示中のデータセットがありません' };
     const gen = this.gen;
     const target = view.arrays.positions;
-    const tr = procrustes(entry.normalized, target);
-    const aligned = normalizePositions(applyTransform(entry.normalized, tr));
+    if (this.current.kind === 'precomputed' && view.arrays === base.arrays) this.baseSpatialIndex ??= view.spatialIndex;
+    const { tr, aligned } = timed('umap:align', () => {
+      const t = procrustes(entry.normalized, target);
+      return { tr: t, aligned: normalizePositions(applyTransform(entry.normalized, t)) };
+    });
     this.lastAlignment = {
       key: entry.key, aligned: meanDisplacement(aligned, target), unaligned: meanDisplacement(entry.normalized, target), reflection: tr.reflection,
     };
-    await this.morphTo(aligned);
-    if (gen !== this.host.generation()) return { ok: false, error: 'データセットが切り替わりました' };
+    const { labels, names } = structureInputs(base.arrays);
+    const structureStart = performance.now();
+    const job = startStructureJob(aligned, labels, names);
+    // 点を動かし終えたところで受け取る（それまでの失敗を、未処理の拒否にしない）。Worker の起動から結果が届くまでの時間も記録する
+    job.promise.then(() => performance.measure('umap:structure-worker', { start: structureStart, end: performance.now() }), () => {});
+    this.structureJob = job;
+    const morphed = await this.morphTo(aligned);
+    if (!morphed || gen !== this.host.generation()) {
+      job.abort();
+      if (this.structureJob === job) this.structureJob = null;
+      return this.cancelledBySwitch();
+    }
+    let data;
     try {
-      const data = buildEmbeddingData(base.arrays, aligned, entry.params);
-      this.host.replaceView({ dir: base.dir, atlas: base.atlas, arrays: data.arrays }, { coloring: data.coloring });
+      const structure = await job.promise;
+      if (gen !== this.host.generation()) return this.cancelledBySwitch();
+      data = timed('umap:build', () => buildEmbeddingData(base.arrays, aligned, entry.params, structure));
+    } catch (e) {
+      if (e instanceof StructureAborted || gen !== this.host.generation()) return this.cancelledBySwitch();
+      this.restoreDisplay();
+      return this.failShow(e);
+    } finally {
+      if (this.structureJob === job) this.structureJob = null;
+    }
+    try {
+      const built = data;
+      timed('umap:replaceView', () => this.host.replaceView(
+        { dir: base.dir, atlas: base.atlas, arrays: built.arrays }, { coloring: built.coloring, spatialIndex: built.spatialIndex },
+      ));
     } catch (e) {
       this.restoreDisplay();
       return this.failShow(e);
@@ -497,10 +597,14 @@ export class UmapFeature {
     return { ok: false, error: message };
   }
 
-  /** 点群の描画を、いまの座標から `to` へ MORPH_SECONDS かけて動かす。 */
-  private morphTo(to: Float32Array): Promise<void> {
+  /**
+   * 点群の描画を、いまの座標から `to` へ MORPH_SECONDS かけて動かす。動かし終えたら true、打ち切られたら（データセットの切り替えなど）
+   * false で解決する。動かしている間は、目印を隠し、ミニマップに「計算中」を出す（描いている座標が表示中の埋め込みと違うため）。
+   */
+  private morphTo(to: Float32Array): Promise<boolean> {
     const view = this.host.view();
-    if (!view) return Promise.resolve();
+    if (!view) return Promise.resolve(false);
+    view.setComputingDisplay(true);
     return new Promise((resolve) => {
       const from = new Float32Array(view.shownPositions);
       this.morph = { from, to, buf: new Float32Array(from.length), t: 0, done: resolve };

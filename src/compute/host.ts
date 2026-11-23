@@ -4,6 +4,7 @@
  */
 import type { DatasetView, LoadedDataset } from '../app/datasetView';
 import type { PointColoring } from '../render/colorScheme';
+import type { SpatialIndex } from '../spatial/SpatialIndex';
 import type { UmapParams } from './params';
 
 export interface EmbeddingHost {
@@ -16,9 +17,10 @@ export interface EmbeddingHost {
   generation(): number;
   /**
    * 表示を `data` で作り直す（点の大きさ・カメラの位置と向き・モード・速度・自動調整・目印とミニマップの表示・選択を引き継ぐ）。
+   * `spatialIndex` は `data.arrays.positions` から構築済みの空間索引（渡すと作り直さない）。
    * 作れなければ前の表示を保ってエラーを投げる。
    */
-  replaceView(data: LoadedDataset, options: { coloring: PointColoring | null }): DatasetView;
+  replaceView(data: LoadedDataset, options: { coloring: PointColoring | null; spatialIndex?: SpatialIndex }): DatasetView;
   /** URL の nn・md・seed を書き換える（null で外す）。履歴は増やさない */
   setUrlParams(params: UmapParams | null): void;
   /** 常に見える表示（データセットの選択欄の横）の文面。`computed` はブラウザで計算した埋め込みか */
