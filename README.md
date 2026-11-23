@@ -98,6 +98,13 @@ npm test          # 単体テスト（Vitest）
 
 `window.__explorer`（検証用）には `interaction.getState()`（ホバー中の点 `hovered` と選択中の点 `selected` の番号。なければ null）、`interaction.stopDistance(i)`（点 `i` へ飛ぶときに止まる距離と、その内訳）、`getState()`（モード・位置・注視点・向き・速度・係数 `speedScale`・実速度 `effectiveSpeed`、自動調整の状態 `autoSpeed: { available, enabled, scale, distance }`。`distance` は係数を決めるのに採用した距離）と `setView({pos, look})`、`homeView()`（いまの画面の縦横比でのホームの視点）などがあります。`getState().homing` はホームへ移動中かどうかです。
 
+### 描画（`src/render/`）
+
+- **画面上の大きさ**：点の最小サイズ（3）、丸い点から数字へ切り替わる大きさ（8〜14）、丸い点の半径の上限（2.2）、強調表示の輪の太さは **CSS ピクセル**の値です。描画バッファへは `renderer.getPixelRatio()` を掛けて渡すので、高 DPI の画面（pixelRatio 2）でも見かけの大きさは変わりません。ピッキングと強調表示は描画とユニフォームを共有するので、形は描画と一致します。
+- **ラベル色**：10 色を繰り返して割り当てます（ラベル番号を 10 で割った余り）。manifest のラベル名は 256 個（uint8 の範囲）まで受け付け、どのラベルでもパレットの範囲内を読みます。
+- **霧**：距離に応じて背景色へ溶かします。上限は 0.4 で、上限まで溶けた色でも 10 色のどの 2 色も、通常の色覚と 1 型・2 型・3 型の模擬で ΔE76 が 12 以上離れます（`src/render/palette.test.ts`）。内部では 0.15 から始まり、深さ 0.6 で上限の 63% に達します。点群の外では、手前の表面から始まり、深さを点群の半径に合わせます。
+- **クリップ面**：カメラの位置と manifest の `bounds`（全点を含む球）から毎フレーム決めます。近接面は球の手前の表面までの距離の半分（内部では 0.0005）、遠方面は奥の表面までの距離の 1.1 倍です。全体が見える位置でも深度の分解能が細かく、半径の大きいデータセットでも全体が描画範囲に入ります（`src/render/clip.ts`）。
+
 ### 検証スクリプト
 
 いずれもビルドしてプレビューサーバーを起動し、ヘッドレス Chromium（Playwright。ソフトウェア描画で 1 フレーム約 200 ミリ秒）で動かします。コンソールエラーや失敗があれば終了コード 1 で終わります。`--no-build` で再ビルドを省けます。画像は `artifacts/`（git 管理外）へ出ます。
@@ -108,6 +115,8 @@ node scripts/verify/controls.cjs    # キー・ドラッグ・ホイール・O �
 node scripts/verify/home.cjs        # ホーム復帰の検証。起動時の視点（横長・縦長で全点が画面に収まる）、H キー（飛行・俯瞰モード、滑らかさ、W での中断）、真下を向く視点での O キーの往復
 node scripts/verify/interaction.cjs # ホバー・クリックでの選択・ドラッグとの区別・Esc・情報パネル（画像をアトラスと画素単位で比較）・ダブルクリックで飛ぶ（飛行・俯瞰モード）・強調表示がピッキングを変えないことの検証。画像は artifacts/interaction/
 node scripts/verify/autospeed.cjs   # 速度の自動調整の検証。点群の外から密なクラスタの中心へ W で進み、位置に対する係数と速度の表を出す（記録は artifacts/autospeed.json）
+node scripts/verify/pixelratio.cjs  # deviceScaleFactor 1 と 2 で、遠方の点と数字へ切り替わる大きさが CSS ピクセルで同じかを、面積と画像で比べる（artifacts/pixelratio/）
+node scripts/verify/depth.cjs       # 深度の精度。カメラを少しずつ動かしながら、固定のクリップ面・カメラの位置から決めるクリップ面・参照の3通りで描いて比べる（artifacts/depth/）
 ```
 
 ## データ形式

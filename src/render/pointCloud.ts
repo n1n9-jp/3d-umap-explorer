@@ -1,14 +1,15 @@
 import * as THREE from 'three';
-import { MAX_LABELS, fragmentShader, highlightFragmentShader, highlightVertexShader, vertexShader } from './shaders';
+import { PALETTE_SIZE, fragmentShader, highlightFragmentShader, highlightVertexShader, vertexShader } from './shaders';
 import { BACKGROUND_COLOR, hexToRgb, labelColors } from './palette';
+import { INTERIOR_FOG } from './fog';
 
 /** 描画パラメータ。距離はワールド単位（座標は [-1, 1] の立方体）。 */
 export interface PointCloudParams {
   /** ビルボード1辺の大きさ */
   pointSize: number;
-  /** 画面上の最小サイズ（CSS ではなく描画バッファのピクセル） */
+  /** 画面上の最小サイズ（CSS ピクセル。描画バッファへは pixelRatio を掛けて渡す） */
   minPixelSize: number;
-  /** 画面上の大きさがこの範囲で丸い点から数字へ切り替わる [点, 数字] */
+  /** 画面上の大きさ（CSS ピクセル）がこの範囲で丸い点から数字へ切り替わる [点, 数字] */
   digitPixelRange: [number, number];
   /** 近接フェード [完全に消える距離, フェードが始まる距離]。pointSize に対する倍率 */
   nearFadeFactors: [number, number];
@@ -16,7 +17,7 @@ export interface PointCloudParams {
   fog: [number, number, number];
   /** 数字の縁取りの幅（インクの濃さの単位、0 で縁取りなし） */
   outline: number;
-  /** 丸い点の半径 [セル幅に対する比, ピクセルでの上限] */
+  /** 丸い点の半径 [セル幅に対する比, CSS ピクセルでの上限] */
   dotRadius: [number, number];
 }
 
@@ -25,7 +26,7 @@ export const DEFAULT_PARAMS: PointCloudParams = {
   minPixelSize: 3,
   digitPixelRange: [8, 14],
   nearFadeFactors: [1.5, 5],
-  fog: [0.15, 0.9, 0.75],
+  fog: [...INTERIOR_FOG],
   outline: 0.22,
   dotRadius: [0.4, 2.2],
 };
@@ -33,7 +34,7 @@ export const DEFAULT_PARAMS: PointCloudParams = {
 /** 強調表示の種類。 */
 export type HighlightKind = 'hover' | 'selected';
 
-/** 強調表示の輪の見た目。ピクセルは描画バッファの単位（`setHighlightPixelRatio` で掛ける）。 */
+/** 強調表示の輪の見た目。ピクセルは CSS ピクセル（`setPixelRatio` の値を掛けて描画バッファの単位にする）。 */
 const HIGHLIGHT_STYLE: Record<HighlightKind, { color: number; minRadius: number; line: number; outline: number; order: number }> = {
   hover: { color: 0xf2f5fa, minRadius: 7, line: 1.5, outline: 1.5, order: 1 },
   selected: { color: 0xffc233, minRadius: 9, line: 2.5, outline: 1.5, order: 2 },
@@ -68,7 +69,7 @@ export class PointCloud {
   private readonly positions: Float32Array;
   private readonly highlightMeshes: Record<HighlightKind, THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial>>;
   private readonly highlighted: Record<HighlightKind, number | null> = { hover: null, selected: null };
-  private highlightPixelRatio = 1;
+  private pixelRatio = 1;
 
   constructor(data: PointCloudData, params: Partial<PointCloudParams> = {}) {
     this.params = { ...DEFAULT_PARAMS, ...params };
@@ -95,8 +96,8 @@ export class PointCloud {
     texture.needsUpdate = true;
     this.texture = texture;
 
-    const palette = labelColors(Math.min(data.labelCount, MAX_LABELS)).map((c) => new THREE.Vector3(...c));
-    while (palette.length < MAX_LABELS) palette.push(new THREE.Vector3(1, 1, 1));
+    // パレットはラベル数によらず PALETTE_SIZE 色。シェーダがラベル番号の余りで引く（10色の繰り返し）
+    const palette = labelColors(PALETTE_SIZE).map((c) => new THREE.Vector3(...c));
 
     const material = new THREE.ShaderMaterial({
       glslVersion: THREE.GLSL3,
@@ -198,15 +199,29 @@ export class PointCloud {
     return this.highlighted[kind];
   }
 
-  /** 輪の太さなどに掛ける倍率（描画バッファの画素 / CSS ピクセル）。 */
-  setHighlightPixelRatio(ratio: number): void {
+  /**
+   * 描画バッファの画素 / CSS ピクセル。画面上の大きさのパラメータ（最小サイズ、数字への切り替え範囲、丸い点の半径の上限、
+   * 輪の太さ）に掛けて、pixelRatio によらず同じ見かけの大きさにする。ピッキングと輪はユニフォームを共有するので、同じ値になる。
+   */
+  setPixelRatio(ratio: number): void {
     if (!(ratio > 0) || !Number.isFinite(ratio)) return;
-    this.highlightPixelRatio = ratio;
+    this.pixelRatio = ratio;
+    this.applyParams();
     this.applyHighlightStyle();
   }
 
+  /** `setPixelRatio` で設定した倍率。 */
+  getPixelRatio(): number {
+    return this.pixelRatio;
+  }
+
+  /** 画面上の最小サイズ（描画バッファの画素）。シェーダに渡している値。 */
+  minPixelSizeInBuffer(): number {
+    return this.params.minPixelSize * this.pixelRatio;
+  }
+
   private applyHighlightStyle(): void {
-    const r = this.highlightPixelRatio;
+    const r = this.pixelRatio;
     for (const k of ['hover', 'selected'] as const) {
       const s = HIGHLIGHT_STYLE[k];
       (this.highlightMeshes[k].material.uniforms.uRing!.value as THREE.Vector3).set(s.minRadius * r, s.line * r, s.outline * r);
@@ -231,13 +246,14 @@ export class PointCloud {
   private applyParams(): void {
     const u = this.mesh.material.uniforms;
     const p = this.params;
+    const r = this.pixelRatio; // CSS ピクセル → 描画バッファの画素
     u.uPointSize!.value = p.pointSize;
-    u.uMinPixelSize!.value = p.minPixelSize;
-    (u.uDigitPx!.value as THREE.Vector2).set(...p.digitPixelRange);
+    u.uMinPixelSize!.value = p.minPixelSize * r;
+    (u.uDigitPx!.value as THREE.Vector2).set(p.digitPixelRange[0] * r, p.digitPixelRange[1] * r);
     (u.uNearFade!.value as THREE.Vector2).set(p.nearFadeFactors[0] * p.pointSize, p.nearFadeFactors[1] * p.pointSize);
     (u.uFog!.value as THREE.Vector3).set(...p.fog);
     u.uOutline!.value = p.outline;
-    (u.uDotRadius!.value as THREE.Vector2).set(...p.dotRadius);
+    (u.uDotRadius!.value as THREE.Vector2).set(p.dotRadius[0], p.dotRadius[1] * r);
   }
 
   dispose(): void {

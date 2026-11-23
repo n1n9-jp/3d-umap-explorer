@@ -3,7 +3,8 @@ import { cellOrigins, atlasLayout, inkIsDark } from './data/atlas';
 import { loadAtlasImage, loadDatasetArrays, measureBorderLuma } from './data/loader';
 import { PointCloud } from './render/pointCloud';
 import { BACKGROUND_COLOR } from './render/palette';
-import { fogForCamera } from './render/fog';
+import { INTERIOR_FOG, fogForCamera } from './render/fog';
+import { clipPlanesForCamera, type ClipPlanes } from './render/clip';
 import { formatView, parsePositiveNumber, parseView, type ViewSpec } from './render/view';
 import { CameraRig, type CameraState } from './app/cameraRig';
 import { formatHud } from './app/hud';
@@ -33,6 +34,11 @@ declare global {
       getState(): CameraState;
       measureFrames(n: number): Promise<FrameStats>;
       pointCloud: PointCloud;
+      /** カメラのクリップ面（検証用）。override に値を渡すと、カメラの位置による決定の代わりにその値を使う（null で戻す） */
+      clip: {
+        get(): ClipPlanes;
+        override(planes: ClipPlanes | null): void;
+      };
       /** 画面上の位置（CSS ピクセル）に見えている点 */
       pick(clientX: number, clientY: number): Promise<PickResult | null>;
       /** ピッキングの検証用の補助 */
@@ -45,8 +51,6 @@ declare global {
     };
   }
 }
-
-const INTERIOR_FOG: [number, number, number] = [0.15, 0.9, 0.75];
 
 async function start(): Promise<void> {
   const container = document.getElementById('app')!;
@@ -63,7 +67,7 @@ async function start(): Promise<void> {
   container.appendChild(renderer.domElement);
 
   const scene = new THREE.Scene();
-  // 密な領域の最近傍点間距離は 0.003〜0.01 程度。近接クリップ面はそれより十分小さくする
+  // クリップ面はデータを読んだあと、カメラの位置と点群の範囲（bounds）から毎フレーム決める（src/render/clip.ts）
   const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.0005, 12);
 
   const [arrays, image] = await (async () => {
@@ -101,11 +105,27 @@ async function start(): Promise<void> {
   bindShortcut(window, 'KeyH', () => controller.goHome(homeView())); // H キーでホームの視点へ戻る
   controller.setView(parseView(search, homeView())); // pos・look がなければホームの視点から始める
 
+  // カメラの位置に応じたクリップ面と霧。点群を含む球（bounds）の中心までの距離から決める
+  let clipOverride: ClipPlanes | null = null;
+  const updateCameraDependent = () => {
+    const d = camera.position.distanceTo(boundsCenter);
+    const clip = clipOverride ?? clipPlanesForCamera(d, arrays.bounds.radius);
+    if (camera.near !== clip.near || camera.far !== clip.far) {
+      camera.near = clip.near;
+      camera.far = clip.far;
+      camera.updateProjectionMatrix();
+    }
+    cloud.set({ fog: fogForCamera(d, arrays.bounds.radius, INTERIOR_FOG) });
+  };
+  updateCameraDependent();
+
   const resize = () => {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
     cloud.setViewportHeight(renderer.getDrawingBufferSize(new THREE.Vector2()).y);
+    // 画面上の大きさのパラメータは CSS ピクセルで持ち、描画バッファの画素へはこの倍率で直す
+    cloud.setPixelRatio(renderer.getPixelRatio());
   };
   window.addEventListener('resize', resize);
   resize();
@@ -166,7 +186,7 @@ async function start(): Promise<void> {
     last = now;
 
     controller.update(dt);
-    cloud.set({ fog: fogForCamera(camera.position.distanceTo(boundsCenter), arrays.bounds.radius, INTERIOR_FOG) });
+    updateCameraDependent();
     renderer.render(scene, camera);
 
     hudTimer += dt;
@@ -182,10 +202,7 @@ async function start(): Promise<void> {
   // ---- ここまで ----
 
   // ---- ホバー・選択・ダブルクリックで点へ飛ぶ（src/interaction/）----
-  scene.add(cloud.highlight);
-  const syncHighlightRatio = () => cloud.setHighlightPixelRatio(renderer.getPixelRatio());
-  window.addEventListener('resize', syncHighlightRatio);
-  syncHighlightRatio();
+  scene.add(cloud.highlight); // 輪の太さの倍率は resize() の setPixelRatio で設定する
   const coarseLevel = arrays.manifest.clusters?.levels[0];
   const coarseIds = arrays.clusterAssignments?.[0]?.ids;
   const infoPanel = new InfoPanel(document, {
@@ -231,6 +248,13 @@ async function start(): Promise<void> {
         frameResolve = resolve;
       }),
     pointCloud: cloud,
+    clip: {
+      get: () => ({ near: camera.near, far: camera.far }),
+      override: (planes) => {
+        clipOverride = planes ? { near: planes.near, far: planes.far } : null;
+        updateCameraDependent();
+      },
+    },
   };
 }
 
