@@ -123,7 +123,7 @@ describe('FlyCameraControls: キー入力', () => {
     expect(r.camera.position.y).toBeLessThan(up);
   });
 
-  it('Shift を押している間は 3 倍速', () => {
+  it('Shift を押しても速さは変わらない', () => {
     const a = createRig();
     const b = createRig();
     a.controls.timeConstant = 0;
@@ -133,12 +133,32 @@ describe('FlyCameraControls: キー入力', () => {
     keydown(b, 'KeyW', { shiftKey: true });
     frames(a.controls, 1);
     frames(b.controls, 1);
-    expect(b.camera.position.length() / a.camera.position.length()).toBeCloseTo(3, 9);
-    // Shift を離したら通常速度へ戻る
+    // 既定の speed 0.45 で、Shift の有無によらず 1 秒に 0.45 進む
+    expect(a.camera.position.length()).toBeCloseTo(0.45, 9);
+    expect(b.camera.position.length()).toBeCloseTo(a.camera.position.length(), 9);
+    // Shift を離しても同じ
     keyup(b, 'ShiftLeft', { shiftKey: false });
     const before = b.camera.position.clone();
     frames(b.controls, 1);
     expect(b.camera.position.distanceTo(before)).toBeCloseTo(a.camera.position.length(), 9);
+  });
+
+  it('Shift を押しながらの移動キーは、Shift なしと同じに動く（全方向）', () => {
+    for (const code of ['KeyW', 'KeyS', 'KeyA', 'KeyD', 'KeyE', 'KeyQ', 'ArrowUp', 'ArrowLeft']) {
+      const a = createRig();
+      const b = createRig();
+      a.controls.timeConstant = 0;
+      b.controls.timeConstant = 0;
+      keydown(a, code);
+      const ev = keydown(b, code, { shiftKey: true });
+      expect(ev.defaultPrevented, code).toBe(true);
+      frames(a.controls, 1);
+      frames(b.controls, 1);
+      expect(a.camera.position.length(), code).toBeGreaterThan(0.4);
+      expect(b.camera.position.distanceTo(a.camera.position), code).toBeLessThan(1e-9);
+      keyup(b, code, { shiftKey: true });
+      keyup(a, code);
+    }
   });
 
   it('移動キーの keydown は既定動作を止める（矢印キーでページがスクロールしない）', () => {
@@ -282,8 +302,8 @@ describe('FlyCameraControls: 速度とイベント', () => {
     return r.el.emit('wheel', { deltaY, deltaMode, timeStamp: clock });
   };
 
-  it('既定値は speed 0.15 / minSpeed 0.005 / maxSpeed 2', () => {
-    expect(r.controls.speed).toBe(0.15);
+  it('既定値は speed 0.45 / minSpeed 0.005 / maxSpeed 2', () => {
+    expect(r.controls.speed).toBe(0.45);
     expect(r.controls.minSpeed).toBe(0.005);
     expect(r.controls.maxSpeed).toBe(2);
   });
@@ -293,18 +313,18 @@ describe('FlyCameraControls: 速度とイベント', () => {
     r.controls.addEventListener('speedchange', (e) => speeds.push(e.speed));
     const ev = wheel(-100);
     expect(ev.defaultPrevented).toBe(true);
-    expect(r.controls.speed).toBeCloseTo(0.165, 12);
+    expect(r.controls.speed).toBeCloseTo(0.495, 12);
     wheel(100);
-    expect(r.controls.speed).toBeCloseTo(0.15, 12);
+    expect(r.controls.speed).toBeCloseTo(0.45, 12);
     expect(speeds).toHaveLength(2);
-    expect(speeds[0]).toBeCloseTo(0.165, 12);
+    expect(speeds[0]).toBeCloseTo(0.495, 12);
   });
 
   it('deltaMode が行・ページのときも 1 ノッチ相当で換算する', () => {
     wheel(-3, 1);
-    expect(r.controls.speed).toBeCloseTo(0.165, 12);
+    expect(r.controls.speed).toBeCloseTo(0.495, 12);
     wheel(-1, 2);
-    expect(r.controls.speed).toBeCloseTo(0.15 * 1.1 * 1.1, 12);
+    expect(r.controls.speed).toBeCloseTo(0.45 * 1.1 * 1.1, 12);
   });
 
   it('上下限で止まり、変化がなければ speedchange を出さない', () => {
@@ -434,7 +454,7 @@ describe('FlyCameraControls: enabled と dispose', () => {
     r.el.emit('pointerdown', { button: 0, pointerId: 1, clientX: 0, clientY: 0 });
     r.el.emit('pointermove', { pointerId: 1, clientX: 50, clientY: 0 });
     expect(r.el.emit('wheel', { deltaY: -100, deltaMode: 0 }).defaultPrevented).toBe(false);
-    expect(r.controls.speed).toBe(0.15);
+    expect(r.controls.speed).toBe(0.45);
     expect(r.controls.update(1 / 60)).toBe(false);
     r.controls.flyTo(new Vector3(0, 0, -1));
     expect(r.controls.isFlying).toBe(false);
@@ -484,7 +504,7 @@ describe('FlyCameraControls: speedScale', () => {
     r.controls.speedScale = 0.2;
     r.controls.speedScale = 5;
     expect(r.controls.speedScale).toBe(5);
-    expect(r.controls.speed).toBe(0.15);
+    expect(r.controls.speed).toBe(0.45);
     expect(speeds).toHaveLength(0);
   });
 
@@ -499,14 +519,14 @@ describe('FlyCameraControls: speedScale', () => {
     frames(a.controls, 1);
     frames(b.controls, 1);
     expect(b.camera.position.length() / a.camera.position.length()).toBeCloseTo(0.5, 9);
-    expect(b.controls.speed).toBe(0.15);
+    expect(b.controls.speed).toBe(0.45);
   });
 
   it('ユーザーのホイール操作で決めた speed は、係数を変えても上書きされない', () => {
     const r = createRig();
     r.el.emit('wheel', { deltaY: -100, deltaMode: 0, timeStamp: 0 });
     const userSpeed = r.controls.speed;
-    expect(userSpeed).toBeCloseTo(0.165, 12);
+    expect(userSpeed).toBeCloseTo(0.495, 12);
     r.controls.speedScale = 0.3;
     r.controls.speedScale = 3;
     r.controls.speedScale = 1;
@@ -562,20 +582,20 @@ describe('FlyCameraControls: ホイールの払い（マウスとタッチパッ
 
   it('マウスホイール: deltaY=100 を 1 回で約 1.1 倍に減速し、-100 で約 1.1 倍に加速する', () => {
     send(100, 0);
-    expect(r.controls.speed / 0.15).toBeCloseTo(1 / 1.1, 12);
+    expect(r.controls.speed / 0.45).toBeCloseTo(1 / 1.1, 12);
     const r2 = createRig();
     r2.el.emit('wheel', { deltaY: -100, deltaMode: 0, timeStamp: 0 });
-    expect(r2.controls.speed / 0.15).toBeCloseTo(1.1, 12);
+    expect(r2.controls.speed / 0.45).toBeCloseTo(1.1, 12);
   });
 
   it('マウスホイール: 間をあけた 1 ノッチずつは、毎回 1.1 倍ずつ効く', () => {
     for (let i = 0; i < 10; i++) send(-100, i * 400);
-    expect(r.controls.speed / 0.15).toBeCloseTo(1.1 ** 10, 9);
+    expect(r.controls.speed / 0.45).toBeCloseTo(1.1 ** 10, 9);
   });
 
   it('マウスホイール: 素早く回した数ノッチ（上限以内）は、そのまま 1.1^n 倍', () => {
     for (let i = 0; i < 4; i++) send(-100, i * 30);
-    expect(r.controls.speed / 0.15).toBeCloseTo(1.1 ** 4, 9);
+    expect(r.controls.speed / 0.45).toBeCloseTo(1.1 ** 4, 9);
   });
 
   it('タッチパッド: 合計 2000 ピクセルの 1 回の払いで、速度の変化が 2 倍以内（加速・減速とも）', () => {
@@ -585,7 +605,7 @@ describe('FlyCameraControls: ホイールの払い（マウスとタッチパッ
 
     // 減速（下へ払う）
     for (const e of flick) send(e.deltaY, e.timeStamp);
-    const slowRatio = r.controls.speed / 0.15;
+    const slowRatio = r.controls.speed / 0.45;
     expect(slowRatio).toBeLessThanOrEqual(1);
     expect(1 / slowRatio).toBeLessThanOrEqual(2);
     expect(1 / slowRatio).toBeGreaterThan(1.5); // 払いはちゃんと効く
@@ -593,7 +613,7 @@ describe('FlyCameraControls: ホイールの払い（マウスとタッチパッ
     // 加速（上へ払う）
     const up = createRig();
     for (const e of flick) up.el.emit('wheel', { deltaY: -e.deltaY, deltaMode: 0, timeStamp: e.timeStamp });
-    const fastRatio = up.controls.speed / 0.15;
+    const fastRatio = up.controls.speed / 0.45;
     expect(fastRatio).toBeLessThanOrEqual(2);
     expect(fastRatio).toBeGreaterThan(1.5);
   });
@@ -602,7 +622,7 @@ describe('FlyCameraControls: ホイールの払い（マウスとタッチパッ
     for (const total of [1000, 1500, 2000, 2500, 3000]) {
       const rig = createRig();
       for (const e of touchpadFlick(total)) rig.el.emit('wheel', { deltaY: -e.deltaY, deltaMode: 0, timeStamp: e.timeStamp });
-      const ratio = rig.controls.speed / 0.15;
+      const ratio = rig.controls.speed / 0.45;
       expect(ratio, `${total}px`).toBeLessThanOrEqual(2);
       expect(ratio, `${total}px`).toBeGreaterThan(1.4);
     }
@@ -614,7 +634,7 @@ describe('FlyCameraControls: ホイールの払い（マウスとタッチパッ
     let max = 0;
     for (let i = 0; i < 312; i++) {
       rig.el.emit('wheel', { deltaY: -12, deltaMode: 0, timeStamp: i * 16 });
-      max = Math.max(max, rig.controls.speed / 0.15);
+      max = Math.max(max, rig.controls.speed / 0.45);
     }
     expect(max).toBeLessThanOrEqual(2);
   });
@@ -641,42 +661,42 @@ describe('FlyCameraControls: ホイールの払い（マウスとタッチパッ
     const ev = send(-100, 0, { ctrlKey: true });
     expect(ev.defaultPrevented).toBe(true);
     for (const e of touchpadFlick(2000)) send(-e.deltaY, e.timeStamp + 1000, { ctrlKey: true });
-    expect(r.controls.speed).toBe(0.15);
+    expect(r.controls.speed).toBe(0.45);
     expect(count).toBe(0);
     // ピンチは払いの累積にも数えない
     send(-100, 5000);
-    expect(r.controls.speed / 0.15).toBeCloseTo(1.1, 12);
+    expect(r.controls.speed / 0.45).toBeCloseTo(1.1, 12);
   });
 
-  it('マウスホイール: ピクセル単位の ±100 を 50 ミリ秒間隔で 20 回続けても、制限されず 1.1^20 倍になる', () => {
-    for (let i = 0; i < 20; i++) send(-100, i * 50);
-    expect(r.controls.speed / 0.15).toBeCloseTo(1.1 ** 20, 9);
+  it('マウスホイール: ピクセル単位の ±100 を 50 ミリ秒間隔で 10 回続けても、制限されず 1.1^10 倍になる', () => {
+    for (let i = 0; i < 10; i++) send(-100, i * 50);
+    expect(r.controls.speed / 0.45).toBeCloseTo(1.1 ** 10, 9);
 
     const down = createRig();
-    for (let i = 0; i < 20; i++) down.el.emit('wheel', { deltaY: 100, deltaMode: 0, timeStamp: i * 50 });
-    expect(down.controls.speed / 0.15).toBeCloseTo(1 / 1.1 ** 20, 9);
+    for (let i = 0; i < 10; i++) down.el.emit('wheel', { deltaY: 100, deltaMode: 0, timeStamp: i * 50 });
+    expect(down.controls.speed / 0.45).toBeCloseTo(1 / 1.1 ** 10, 9);
   });
 
-  it('マウスホイール: 行単位（deltaMode=1）の ±3 を連続で 20 回送っても、制限されず 1.1^20 倍になる', () => {
-    for (let i = 0; i < 20; i++) r.el.emit('wheel', { deltaY: -3, deltaMode: 1, timeStamp: i * 50 });
-    expect(r.controls.speed / 0.15).toBeCloseTo(1.1 ** 20, 9);
+  it('マウスホイール: 行単位（deltaMode=1）の ±3 を連続で 10 回送っても、制限されず 1.1^10 倍になる', () => {
+    for (let i = 0; i < 10; i++) r.el.emit('wheel', { deltaY: -3, deltaMode: 1, timeStamp: i * 50 });
+    expect(r.controls.speed / 0.45).toBeCloseTo(1.1 ** 10, 9);
 
     const down = createRig();
-    for (let i = 0; i < 20; i++) down.el.emit('wheel', { deltaY: 3, deltaMode: 1, timeStamp: i * 50 });
-    expect(down.controls.speed / 0.15).toBeCloseTo(1 / 1.1 ** 20, 9);
+    for (let i = 0; i < 10; i++) down.el.emit('wheel', { deltaY: 3, deltaMode: 1, timeStamp: i * 50 });
+    expect(down.controls.speed / 0.45).toBeCloseTo(1 / 1.1 ** 10, 9);
   });
 
   it('マウスホイール: ページ単位（deltaMode=2）の ±1 も、連続で送って制限されない', () => {
-    for (let i = 0; i < 20; i++) r.el.emit('wheel', { deltaY: -1, deltaMode: 2, timeStamp: i * 50 });
-    expect(r.controls.speed / 0.15).toBeCloseTo(1.1 ** 20, 9);
+    for (let i = 0; i < 10; i++) r.el.emit('wheel', { deltaY: -1, deltaMode: 2, timeStamp: i * 50 });
+    expect(r.controls.speed / 0.45).toBeCloseTo(1.1 ** 10, 9);
   });
 
   it('マウスホイール: 1 イベントあたり 3 ノッチの上限は、ノッチ扱いのイベントにも掛かる', () => {
     send(-1000, 0);
-    expect(r.controls.speed / 0.15).toBeCloseTo(1.1 ** 3, 12);
+    expect(r.controls.speed / 0.45).toBeCloseTo(1.1 ** 3, 12);
     const rig = createRig();
     rig.el.emit('wheel', { deltaY: -30, deltaMode: 1, timeStamp: 0 });
-    expect(rig.controls.speed / 0.15).toBeCloseTo(1.1 ** 3, 12);
+    expect(rig.controls.speed / 0.45).toBeCloseTo(1.1 ** 3, 12);
   });
 
   it('タッチパッド: 50 ピクセル未満の小さな移動量だけの列（合計約 2000 ピクセル）は、これまでどおり 2 倍以内', () => {
@@ -685,33 +705,33 @@ describe('FlyCameraControls: ホイールの払い（マウスとタッチパッ
     expect(Math.max(...flick.map((e) => e.deltaY))).toBeLessThan(50);
 
     for (const e of flick) send(-e.deltaY, e.timeStamp);
-    const fast = r.controls.speed / 0.15;
+    const fast = r.controls.speed / 0.45;
     expect(fast).toBeLessThanOrEqual(2);
     expect(fast).toBeGreaterThan(1.9); // 上限（1.1^7）まで効く
 
     const down = createRig();
     for (const e of flick) down.el.emit('wheel', { deltaY: e.deltaY, deltaMode: 0, timeStamp: e.timeStamp });
-    expect(0.15 / down.controls.speed).toBeLessThanOrEqual(2);
+    expect(0.45 / down.controls.speed).toBeLessThanOrEqual(2);
   });
 
   it('タッチパッド: 立ち上がりのあとの最速部分が 50 ピクセルを越えても、払い全体は 2 倍以内', () => {
     const flick = touchpadFlick(3000);
     expect(Math.max(...flick.map((e) => e.deltaY))).toBeGreaterThan(50);
     for (const e of flick) send(-e.deltaY, e.timeStamp);
-    expect(r.controls.speed / 0.15).toBeLessThanOrEqual(2);
+    expect(r.controls.speed / 0.45).toBeLessThanOrEqual(2);
   });
 
   it('マウスのノッチと小さな移動量のイベントが混在すると、払い全体（先に反映したノッチを含む）で 7 ノッチに収まる', () => {
     // 払いの頭にあるノッチ 3 つは、小さな移動量がまだ来ていないので、そのまま 3 ノッチ反映される。
     for (let i = 0; i < 3; i++) send(-100, i * 50);
-    expect(r.controls.speed / 0.15).toBeCloseTo(1.1 ** 3, 9);
+    expect(r.controls.speed / 0.45).toBeCloseTo(1.1 ** 3, 9);
     // そのあと小さな移動量が続くと払いはタッチパッドと判明し、先に反映した 3 ノッチも数えて、全体で 7 ノッチで止まる。
     // （以前は先に反映した分を数えず、3 + 7 = 10 ノッチまで効いていた。）
     for (let i = 0; i < 100; i++) send(i % 5 === 4 ? -100 : -20, 116 + i * 16);
-    expect(r.controls.speed / 0.15).toBeCloseTo(1.1 ** 7, 9);
+    expect(r.controls.speed / 0.45).toBeCloseTo(1.1 ** 7, 9);
     // 間をあけて払いが変われば、ノッチはまた制限なく効く。
     for (let i = 0; i < 5; i++) send(-100, 5000 + i * 50);
-    expect(r.controls.speed / 0.15).toBeCloseTo(1.1 ** (7 + 5), 9);
+    expect(r.controls.speed / 0.45).toBeCloseTo(1.1 ** (7 + 5), 9);
   });
 
   it('タッチパッド: 50 ピクセル以上のイベント数個で始まり、小さなイベントが続く払いは、速度の変化が 2 倍以内（加速・減速とも）', () => {
@@ -722,10 +742,10 @@ describe('FlyCameraControls: ホイールの払い（マウスとタッチパッ
         // 立ち上がりに 150 ピクセル（1.5 ノッチ）のイベントが lead 個。ここまでは小さなイベントが来ていないので、そのまま反映される。
         for (let i = 0; i < lead; i++, t += 16) rig.el.emit('wheel', { deltaY: dir * 150, deltaMode: 0, timeStamp: t });
         const afterLead = rig.controls.speed;
-        expect(afterLead / 0.15, `lead=${lead}`).toBeCloseTo(dir < 0 ? 1.1 ** (1.5 * lead) : 1.1 ** (-1.5 * lead), 9);
+        expect(afterLead / 0.45, `lead=${lead}`).toBeCloseTo(dir < 0 ? 1.1 ** (1.5 * lead) : 1.1 ** (-1.5 * lead), 9);
         // 小さなイベント（合計 2000 ピクセル）が慣性つきで続く。払い全体で 7 ノッチ（1.1^7 ≈ 1.95 倍）に収まる。
         for (let i = 0; i < 150; i++, t += 16) rig.el.emit('wheel', { deltaY: dir * 20, deltaMode: 0, timeStamp: t });
-        const ratio = dir < 0 ? rig.controls.speed / 0.15 : 0.15 / rig.controls.speed;
+        const ratio = dir < 0 ? rig.controls.speed / 0.45 : 0.45 / rig.controls.speed;
         expect(ratio, `lead=${lead} dir=${dir}`).toBeCloseTo(1.1 ** 7, 9);
         expect(ratio, `lead=${lead} dir=${dir}`).toBeLessThanOrEqual(2);
       }
@@ -736,7 +756,7 @@ describe('FlyCameraControls: ホイールの払い（マウスとタッチパッ
     // 300 ピクセル（3 ノッチ）を 3 個 = 9 ノッチ。タッチパッドと判明する前なのでそのまま反映される。
     for (let i = 0; i < 3; i++) send(-300, i * 16);
     const afterLead = r.controls.speed;
-    expect(afterLead / 0.15).toBeCloseTo(1.1 ** 9, 9);
+    expect(afterLead / 0.45).toBeCloseTo(1.1 ** 9, 9);
     // 小さなイベントが続いても、同じ向きには反映しない。
     for (let i = 0; i < 100; i++) send(-20, 48 + i * 16);
     expect(r.controls.speed).toBe(afterLead);
@@ -749,7 +769,7 @@ describe('FlyCameraControls: ホイールの払い（マウスとタッチパッ
     // 小さな移動量（0.2 ノッチ）だけで 7 ノッチ分を使い切ったあとは、ノッチを混ぜても増えない。
     for (let i = 0; i < 100; i++) send(-20, i * 16);
     const saturated = r.controls.speed;
-    expect(saturated / 0.15).toBeCloseTo(1.1 ** 7, 9);
+    expect(saturated / 0.45).toBeCloseTo(1.1 ** 7, 9);
     send(-100, 100 * 16);
     send(-20, 101 * 16);
     expect(r.controls.speed).toBe(saturated);
@@ -759,7 +779,7 @@ describe('FlyCameraControls: ホイールの払い（マウスとタッチパッ
     // 小さな移動量で上限（7 ノッチ）まで使い切る。最後のイベントは 99 * 16 = 1584 ミリ秒。
     for (let i = 0; i < 100; i++) send(-20, i * 16);
     const saturated = r.controls.speed;
-    expect(saturated / 0.15).toBeCloseTo(1.1 ** 7, 9);
+    expect(saturated / 0.45).toBeCloseTo(1.1 ** 7, 9);
 
     // 150 ミリ秒未満の間隔で横スクロールが続く。払いが続いているなら、最後の縦スクロールから 150 ミリ秒を越える。
     let count = 0;
@@ -782,7 +802,7 @@ describe('FlyCameraControls: ホイールの払い（マウスとタッチパッ
       send(-20, i * 16);
       r.el.emit('wheel', { deltaY: 0, deltaX: 40, deltaMode: 0, timeStamp: i * 16 + 8 });
     }
-    expect(r.controls.speed / 0.15).toBeCloseTo(1.1 ** 7, 9);
+    expect(r.controls.speed / 0.45).toBeCloseTo(1.1 ** 7, 9);
   });
 
   it('ホイール操作は飛行を中断しない（払いの制限を入れても変わらない）', () => {

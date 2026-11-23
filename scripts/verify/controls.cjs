@@ -101,14 +101,16 @@ async function testMovement(page, view) {
     check(`${key} (${names[key]}): 動いて、期待の向きに進む`, dist > 0.02 && c > 0.97, `移動量 ${dist.toFixed(4)}, 期待の向きとの cos ${c.toFixed(4)}`);
     check(`${key}: 視線の向きは変わらない`, maxAbsDiff(before.direction, after.direction) < 1e-6);
   }
-  // Shift で加速
+  // Shift を押しても速さは変わらない（Shift+W は W と同じに進む）
   await setView(page, view.pos, view.look);
   await frames(page, 2);
   const b = await state(page);
   await holdKeys(page, ['ShiftLeft', 'KeyW'], 8);
   const a = await state(page);
-  const boosted = len(sub(a.position, b.position));
-  check('Shift+W は W より速く進む（約 3 倍）', boosted > dists.KeyW * 1.8, `W ${dists.KeyW.toFixed(4)} → Shift+W ${boosted.toFixed(4)}（${(boosted / dists.KeyW).toFixed(2)} 倍）`);
+  const withShift = sub(a.position, b.position);
+  const shiftDist = len(withShift);
+  check('Shift+W は W と同じ速さで進む', shiftDist > 0.02 && Math.abs(shiftDist / dists.KeyW - 1) < 0.15, `W ${dists.KeyW.toFixed(4)} → Shift+W ${shiftDist.toFixed(4)}（${(shiftDist / dists.KeyW).toFixed(2)} 倍）`);
+  check('Shift+W は W と同じ向きに進む', cos(withShift, expectDirs.KeyW(b.direction)) > 0.97, `期待の向きとの cos ${cos(withShift, expectDirs.KeyW(b.direction)).toFixed(4)}`);
 }
 
 async function testDrag(page) {
@@ -309,7 +311,7 @@ async function main() {
     await setView(page, edge.pos, edge.look);
     await frames(page, 3);
     const s0 = await state(page);
-    await holdKeys(page, ['KeyW'], 28);
+    await holdKeys(page, ['KeyW'], 9); // 速度が既定 0.45（旧 0.15 の 3 倍）なので、旧 28 フレームと同じ距離になる 9 フレーム
     const s1 = await state(page);
     const d0 = len(sub(s0.position, L)), d1 = len(sub(s1.position, L));
     await page.screenshot({ path: path.join(outDir, 'controls-fly-inside.png') });

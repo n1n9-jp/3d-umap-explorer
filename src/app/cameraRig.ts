@@ -25,7 +25,7 @@ export interface CameraState {
   pivot: [number, number, number] | null;
   /** 実際の移動速度に掛けている係数（`fly.speedScale`）。 */
   speedScale: number;
-  /** 実際の移動速度（`speed × speedScale`、Shift の加速は含まない）。 */
+  /** 実際の移動速度（`speed × speedScale`）。 */
   effectiveSpeed: number;
   autoSpeed: AutoSpeedState;
   /** ホームの視点へ移動中か（`goHome` の途中）。 */

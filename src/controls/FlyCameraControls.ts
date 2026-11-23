@@ -36,8 +36,6 @@ const KEY_MAP: Record<string, keyof MoveInput | undefined> = {
   ArrowRight: 'right',
   KeyE: 'up',
   KeyQ: 'down',
-  ShiftLeft: 'boost',
-  ShiftRight: 'boost',
 };
 
 /**
@@ -67,7 +65,7 @@ function isEditableTarget(target: EventTarget | null): boolean {
 /**
  * 点群の内部を飛び回るための一人称の飛行カメラ操作。
  *
- * - 移動: W/S 前後、A/D 左右、E/Q 上下（ワールド）、矢印キーは WASD と同じ、Shift で加速
+ * - 移動: W/S 前後、A/D 左右、E/Q 上下（ワールド）、矢印キーは WASD と同じ
  * - 視点: 左ボタンのドラッグ（ドラッグした向きへ視線が動く）
  * - 速度: ホイール（乗算的。1 ノッチ ≈ 1.1 倍。連続したイベントは 1 回の払いとみなし、
  *   1 回の払いで変わる倍率は約 2 倍までに抑える。ピンチ（ctrlKey つき）は速度を変えない）
@@ -349,14 +347,9 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
     const action = KEY_MAP[e.code];
     if (!action) return;
     if (isEditableTarget(eventOrigin(e))) return;
-    if (action === 'boost') {
-      this.input.boost = true;
-      return;
-    }
     // Ctrl / Meta / Alt との組み合わせはブラウザやOSのショートカットに任せる。
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     this.input[action] = true;
-    this.input.boost = e.shiftKey;
     e.preventDefault();
   };
 
@@ -369,7 +362,6 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
     const action = KEY_MAP[e.code];
     if (!action) return;
     this.input[action] = false;
-    if (action !== 'boost') this.input.boost = e.shiftKey;
   };
 
   private readonly onBlur = (): void => {
@@ -377,7 +369,7 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
     this.endDrag();
   };
 
-  /** 移動キーと Shift の押下状態をすべて消す。 */
+  /** 移動キーの押下状態をすべて消す。 */
   private clearKeys(): void {
     Object.assign(this.input, createMoveInput());
   }

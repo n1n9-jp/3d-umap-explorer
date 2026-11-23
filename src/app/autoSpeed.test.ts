@@ -78,7 +78,7 @@ describe('scaleForDistance（距離から係数への写像）', () => {
   });
 
   it('MNIST の密度で、密な領域では小さく、何もない空間では既定の数倍', () => {
-    // 密な領域（8 近傍の平均 ≈ knnDistP05）では、既定の速度 0.15 の実速度が約 0.022 単位/秒
+    // 密な領域（8 近傍の平均 ≈ knnDistP05）では、既定の速度 0.45 の実速度が約 0.066 単位/秒
     const dense = scaleForDistance(MNIST_DENSITY.knnDistP05, params);
     expect(dense).toBeGreaterThan(0.08);
     expect(dense).toBeLessThan(0.15);
@@ -210,6 +210,20 @@ describe('AutoSpeed', () => {
     expect(toward.targetScale).toBeLessThan(still.targetScale);
   });
 
+  it('先読みの距離は実測の速度に比例する（速度が 3 倍なら、3 倍遠くまで見る）', () => {
+    const pos = { x: 0.4, y: 0, z: 0 };
+    const dist = (velocity: { x: number; y: number; z: number }, at = pos) => {
+      const a = new AutoSpeed(cluster, params);
+      a.update({ position: at, velocity, dt: 0.016 });
+      return a.distance as number;
+    };
+    const v = { x: -0.3, y: 0, z: 0 }; // 0.3 秒で 0.09 進む。先は x = 0.31 で、まだ塊の外
+    const v3 = { x: -0.9, y: 0, z: 0 }; // 3 倍の速度なら 0.27 進む。先は x = 0.13
+    expect(dist(v)).toBeCloseTo(dist(zero, { x: 0.4 - 0.3 * params.lookaheadSeconds, y: 0, z: 0 }), 9);
+    expect(dist(v3)).toBeCloseTo(dist(zero, { x: 0.4 - 0.9 * params.lookaheadSeconds, y: 0, z: 0 }), 9);
+    expect(dist(v3)).toBeLessThan(dist(v));
+  });
+
   it('空間索引が点を返さないときは上限、density がないときは使わない', () => {
     const a = new AutoSpeed(emptyIndex, params);
     expect(a.update({ position: zero, velocity: zero, dt: 0.016 })).toBe(params.maxScale);
@@ -233,7 +247,7 @@ describe('AutoSpeed', () => {
 
   it('近づく飛行のシミュレーションで、外では上限、塊の中では小さく、変化は上限の速さ以内', () => {
     const a = new AutoSpeed(cluster, params);
-    const speed = 0.15;
+    const speed = 0.45;
     let x = 1.5, v = 0, prev = NaN;
     for (let i = 0; i < 6000 && x > 0; i++) {
       const dt = 1 / 60;
