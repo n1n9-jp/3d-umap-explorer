@@ -7,6 +7,15 @@
  *   一様グリッドと違い、密な塊と広い空白が混在する分布でも、問い合わせが O(log N) で済む。
  * - 距離の定義: 座標は Float32 の値を倍精度に広げて計算する（`dx*dx + dy*dy + dz*dz`）。
  *   範囲の判定（maxDistance・radius）は、この二乗距離と `r*r` の比較で、境界を含む（<=）。
+ * - 枝刈り: 遠い側の子へ降りるかは、その子の範囲の点までの二乗距離の下限で決める。下限は 2 段で作る。
+ *   (1) 軸ごとのずれの二乗和。問い合わせ点から、分割面で切った領域（kd 木の節点の箱）までの軸ごとの
+ *   ずれを持ち、分割面を越えて遠い側へ降りるたびに、その分割軸のずれだけを「分割面までの差」に
+ *   差し替える増分計算で、メモリを読まずに求まる。分割面 1 枚までの距離だけで判断するより厳しい。
+ *   (2) (1) で刈れなかったときだけ、遠い側の範囲の点の外接箱（`boxes`）までの距離で締める。
+ *   領域は外側へ無限に伸びているので、点が小さな塊に分かれた分布では (1) だけでは、塊から離れた
+ *   問い合わせ（特に点群の外側）で多くの節点を訪れる。外接箱は領域に収まるので、(2) は (1) 以上になる。
+ *   どちらの下限も、点の二乗距離と同じ式・同じ足し順で作るので、浮動小数点の丸めでも範囲内の点の
+ *   二乗距離を超えない（境界の点を誤って刈ることはない）。
  * - 同じ距離の点は、添字の小さい方を先にする。結果は構築や木の形に依らず決まる。
  * - 問い合わせの作業領域（探索スタック・kNearest のヒープ・within の収集用バッファ）は
  *   インスタンスが持ち回して使う。戻り値のオブジェクトと配列だけが問い合わせごとに作られる。
@@ -41,22 +50,39 @@ export class SpatialIndex {
   private readonly ids: Int32Array;
   /** 位置 mid が分割点のときの分割軸（0:x, 1:y, 2:z） */
   private readonly splitAxis: Uint8Array;
+  /**
+   * 範囲ごとの点の外接箱（Float32 で 6 要素: minX, minY, minZ, maxX, maxY, maxZ）。
+   * 範囲 [lo, hi) の箱は、その中央 (lo + hi) >> 1 の位置の `6 * 位置` から入る
+   * （範囲どうしは重ならないので、位置が衝突しない）。
+   */
+  private readonly boxes: Float32Array;
 
   // 問い合わせの作業領域
   private readonly stackLo = new Int32Array(STACK_SIZE);
   private readonly stackHi = new Int32Array(STACK_SIZE);
+  /** 積んだ範囲の領域までの二乗距離の下限 */
   private readonly stackBound = new Float64Array(STACK_SIZE);
+  /** 積んだ範囲の領域までの、軸ごとのずれ（問い合わせ点から領域の箱までの符号付きの差。箱の内側なら 0） */
+  private readonly stackOffX = new Float64Array(STACK_SIZE);
+  private readonly stackOffY = new Float64Array(STACK_SIZE);
+  private readonly stackOffZ = new Float64Array(STACK_SIZE);
   private heapD: Float64Array = new Float64Array(16);
   private heapI: Int32Array = new Int32Array(16);
   private collected: Int32Array = new Int32Array(64);
 
   /**
    * @param positions 長さ 3N。点 i が [3i, 3i+1, 3i+2] に x, y, z。構築時にコピーするので、
-   *   後から書き換えても索引には反映されない。
+   *   後から書き換えても索引には反映されない。NaN を含む場合は RangeError（NaN があると木の分割の
+   *   前提が崩れ、正常な点の検索結果まで誤るため）。±Infinity は受け付ける。
    */
   constructor(positions: Float32Array) {
     if (positions.length % 3 !== 0) {
       throw new RangeError(`positions の長さは 3 の倍数である必要があります: ${positions.length}`);
+    }
+    for (let i = 0; i < positions.length; i++) {
+      if (positions[i] !== positions[i]) {
+        throw new RangeError(`positions に NaN が含まれています: 点 ${Math.floor(i / 3)} の ${'xyz'[i % 3]} 座標`);
+      }
     }
     const n = positions.length / 3;
     this.count = n;
@@ -64,6 +90,7 @@ export class SpatialIndex {
     this.ids = new Int32Array(n);
     for (let i = 0; i < n; i++) this.ids[i] = i;
     this.splitAxis = new Uint8Array(n);
+    this.boxes = new Float32Array(6 * n);
     this.build();
   }
 
@@ -76,6 +103,9 @@ export class SpatialIndex {
     const stackLo = this.stackLo;
     const stackHi = this.stackHi;
     const stackBound = this.stackBound;
+    const stackOffX = this.stackOffX;
+    const stackOffY = this.stackOffY;
+    const stackOffZ = this.stackOffZ;
 
     let best = maxDistance * maxDistance;
     let bestPos = -1;
@@ -84,6 +114,9 @@ export class SpatialIndex {
     stackLo[0] = 0;
     stackHi[0] = this.count;
     stackBound[0] = 0;
+    stackOffX[0] = 0;
+    stackOffY[0] = 0;
+    stackOffZ[0] = 0;
     sp = 1;
 
     while (sp > 0) {
@@ -91,7 +124,9 @@ export class SpatialIndex {
       if (stackBound[sp] > best) continue;
       let lo = stackLo[sp];
       let hi = stackHi[sp];
-      const nodeBound = stackBound[sp];
+      const ox = stackOffX[sp];
+      const oy = stackOffY[sp];
+      const oz = stackOffZ[sp];
 
       while (hi - lo > LEAF_SIZE) {
         const mid = (lo + hi) >> 1;
@@ -107,25 +142,38 @@ export class SpatialIndex {
         }
         const axis = splitAxis[mid];
         const diff = axis === 0 ? dx : axis === 1 ? dy : dz;
-        const planeD2 = diff * diff;
-        const farBound = planeD2 > nodeBound ? planeD2 : nodeBound;
+        // 遠い側の子の領域までのずれ: 分割軸のずれだけを分割面までの差に差し替える
+        // （近い側の子は、この節点と同じずれのまま）。下限は、軸ごとのずれの二乗和。
+        // 無限大どうしの差で下限が NaN になっても刈らないよう、刈る条件は `下限 > 上限` の否定で書く。
+        const fx = axis === 0 ? diff : ox;
+        const fy = axis === 1 ? diff : oy;
+        const fz = axis === 2 ? diff : oz;
+        let farBound = fx * fx + fy * fy + fz * fz;
+        // diff < 0 なら左が近い側。遠い側の範囲を後回しにし、近い側へ降りる
+        let farLo: number;
+        let farHi: number;
         if (diff < 0) {
-          // 左が近い側。右を後回しにする
-          if (farBound <= best) {
-            stackLo[sp] = mid + 1;
-            stackHi[sp] = hi;
-            stackBound[sp] = farBound;
-            sp++;
-          }
+          farLo = mid + 1;
+          farHi = hi;
           hi = mid;
         } else {
-          if (farBound <= best) {
-            stackLo[sp] = lo;
-            stackHi[sp] = mid;
+          farLo = lo;
+          farHi = mid;
+          lo = mid + 1;
+        }
+        // 先に軸ごとのずれの下限で足切りし、残ったときだけ、遠い側の点の外接箱までの距離で締める
+        if (!(farBound > best)) {
+          const boxD2 = this.boxDistance2(x, y, z, farLo, farHi);
+          if (boxD2 > farBound) farBound = boxD2;
+          if (!(farBound > best)) {
+            stackLo[sp] = farLo;
+            stackHi[sp] = farHi;
             stackBound[sp] = farBound;
+            stackOffX[sp] = fx;
+            stackOffY[sp] = fy;
+            stackOffZ[sp] = fz;
             sp++;
           }
-          lo = mid + 1;
         }
       }
       for (let i = lo; i < hi; i++) {
@@ -174,6 +222,9 @@ export class SpatialIndex {
     const stackLo = this.stackLo;
     const stackHi = this.stackHi;
     const stackBound = this.stackBound;
+    const stackOffX = this.stackOffX;
+    const stackOffY = this.stackOffY;
+    const stackOffZ = this.stackOffZ;
 
     // heapD/heapI は最大ヒープ。根が「採用中で最も遠い」点（同距離なら添字が大きい方）。
     let size = 0;
@@ -184,6 +235,9 @@ export class SpatialIndex {
     stackLo[0] = 0;
     stackHi[0] = this.count;
     stackBound[0] = 0;
+    stackOffX[0] = 0;
+    stackOffY[0] = 0;
+    stackOffZ[0] = 0;
     sp = 1;
 
     while (sp > 0) {
@@ -191,7 +245,9 @@ export class SpatialIndex {
       if (stackBound[sp] > limit) continue;
       let lo = stackLo[sp];
       let hi = stackHi[sp];
-      const nodeBound = stackBound[sp];
+      const ox = stackOffX[sp];
+      const oy = stackOffY[sp];
+      const oz = stackOffZ[sp];
 
       while (hi - lo > LEAF_SIZE) {
         const mid = (lo + hi) >> 1;
@@ -206,24 +262,38 @@ export class SpatialIndex {
         }
         const axis = splitAxis[mid];
         const diff = axis === 0 ? dx : axis === 1 ? dy : dz;
-        const planeD2 = diff * diff;
-        const farBound = planeD2 > nodeBound ? planeD2 : nodeBound;
+        // 遠い側の子の領域までのずれ: 分割軸のずれだけを分割面までの差に差し替える
+        // （近い側の子は、この節点と同じずれのまま）。下限は、軸ごとのずれの二乗和。
+        // 無限大どうしの差で下限が NaN になっても刈らないよう、刈る条件は `下限 > 上限` の否定で書く。
+        const fx = axis === 0 ? diff : ox;
+        const fy = axis === 1 ? diff : oy;
+        const fz = axis === 2 ? diff : oz;
+        let farBound = fx * fx + fy * fy + fz * fz;
+        // diff < 0 なら左が近い側。遠い側の範囲を後回しにし、近い側へ降りる
+        let farLo: number;
+        let farHi: number;
         if (diff < 0) {
-          if (farBound <= limit) {
-            stackLo[sp] = mid + 1;
-            stackHi[sp] = hi;
-            stackBound[sp] = farBound;
-            sp++;
-          }
+          farLo = mid + 1;
+          farHi = hi;
           hi = mid;
         } else {
-          if (farBound <= limit) {
-            stackLo[sp] = lo;
-            stackHi[sp] = mid;
+          farLo = lo;
+          farHi = mid;
+          lo = mid + 1;
+        }
+        // 先に軸ごとのずれの下限で足切りし、残ったときだけ、遠い側の点の外接箱までの距離で締める
+        if (!(farBound > limit)) {
+          const boxD2 = this.boxDistance2(x, y, z, farLo, farHi);
+          if (boxD2 > farBound) farBound = boxD2;
+          if (!(farBound > limit)) {
+            stackLo[sp] = farLo;
+            stackHi[sp] = farHi;
             stackBound[sp] = farBound;
+            stackOffX[sp] = fx;
+            stackOffY[sp] = fy;
+            stackOffZ[sp] = fz;
             sp++;
           }
-          lo = mid + 1;
         }
       }
       for (let i = lo; i < hi; i++) {
@@ -268,6 +338,9 @@ export class SpatialIndex {
     const stackLo = this.stackLo;
     const stackHi = this.stackHi;
     const stackBound = this.stackBound;
+    const stackOffX = this.stackOffX;
+    const stackOffY = this.stackOffY;
+    const stackOffZ = this.stackOffZ;
     const limit = radius * radius;
 
     let found = 0;
@@ -277,6 +350,9 @@ export class SpatialIndex {
     stackLo[0] = 0;
     stackHi[0] = this.count;
     stackBound[0] = 0;
+    stackOffX[0] = 0;
+    stackOffY[0] = 0;
+    stackOffZ[0] = 0;
     sp = 1;
 
     while (sp > 0) {
@@ -284,7 +360,9 @@ export class SpatialIndex {
       if (stackBound[sp] > limit) continue;
       let lo = stackLo[sp];
       let hi = stackHi[sp];
-      const nodeBound = stackBound[sp];
+      const ox = stackOffX[sp];
+      const oy = stackOffY[sp];
+      const oz = stackOffZ[sp];
 
       while (hi - lo > LEAF_SIZE) {
         const mid = (lo + hi) >> 1;
@@ -298,24 +376,38 @@ export class SpatialIndex {
         }
         const axis = splitAxis[mid];
         const diff = axis === 0 ? dx : axis === 1 ? dy : dz;
-        const planeD2 = diff * diff;
-        const farBound = planeD2 > nodeBound ? planeD2 : nodeBound;
+        // 遠い側の子の領域までのずれ: 分割軸のずれだけを分割面までの差に差し替える
+        // （近い側の子は、この節点と同じずれのまま）。下限は、軸ごとのずれの二乗和。
+        // 無限大どうしの差で下限が NaN になっても刈らないよう、刈る条件は `下限 > 上限` の否定で書く。
+        const fx = axis === 0 ? diff : ox;
+        const fy = axis === 1 ? diff : oy;
+        const fz = axis === 2 ? diff : oz;
+        let farBound = fx * fx + fy * fy + fz * fz;
+        // diff < 0 なら左が近い側。遠い側の範囲を後回しにし、近い側へ降りる
+        let farLo: number;
+        let farHi: number;
         if (diff < 0) {
-          if (farBound <= limit) {
-            stackLo[sp] = mid + 1;
-            stackHi[sp] = hi;
-            stackBound[sp] = farBound;
-            sp++;
-          }
+          farLo = mid + 1;
+          farHi = hi;
           hi = mid;
         } else {
-          if (farBound <= limit) {
-            stackLo[sp] = lo;
-            stackHi[sp] = mid;
+          farLo = lo;
+          farHi = mid;
+          lo = mid + 1;
+        }
+        // 先に軸ごとのずれの下限で足切りし、残ったときだけ、遠い側の点の外接箱までの距離で締める
+        if (!(farBound > limit)) {
+          const boxD2 = this.boxDistance2(x, y, z, farLo, farHi);
+          if (boxD2 > farBound) farBound = boxD2;
+          if (!(farBound > limit)) {
+            stackLo[sp] = farLo;
+            stackHi[sp] = farHi;
             stackBound[sp] = farBound;
+            stackOffX[sp] = fx;
+            stackOffY[sp] = fy;
+            stackOffZ[sp] = fz;
             sp++;
           }
-          lo = mid + 1;
         }
       }
       for (let i = lo; i < hi; i++) {
@@ -332,6 +424,27 @@ export class SpatialIndex {
     const result = buf.slice(0, found);
     result.sort();
     return result;
+  }
+
+  /**
+   * 点 (x, y, z) から、範囲 [lo, hi) の点の外接箱までの二乗距離（箱の内側なら 0）。
+   * 範囲内のどの点の二乗距離（`dx*dx + dy*dy + dz*dz`）も、これ以上になる。
+   * 軸ごとの差は点の距離と同じ計算（Float32 の値を倍精度で引く）で、足す順も同じなので、
+   * 浮動小数点の丸めでも箱の中の点を下回らない。
+   */
+  private boxDistance2(x: number, y: number, z: number, lo: number, hi: number): number {
+    const boxes = this.boxes;
+    const b = ((lo + hi) >> 1) * 6;
+    const minX = boxes[b];
+    const minY = boxes[b + 1];
+    const minZ = boxes[b + 2];
+    const maxX = boxes[b + 3];
+    const maxY = boxes[b + 4];
+    const maxZ = boxes[b + 5];
+    const dx = x < minX ? x - minX : x > maxX ? x - maxX : 0;
+    const dy = y < minY ? y - minY : y > maxY ? y - maxY : 0;
+    const dz = z < minZ ? z - minZ : z > maxZ ? z - maxZ : 0;
+    return dx * dx + dy * dy + dz * dz;
   }
 
   // ---------------------------------------------------------------- kNearest のヒープ
@@ -409,7 +522,6 @@ export class SpatialIndex {
       sp--;
       const l = lo[sp];
       const h = hi[sp];
-      if (h - l <= LEAF_SIZE) continue;
 
       // 外接箱で最も長い軸
       let minX = Infinity, minY = Infinity, minZ = Infinity;
@@ -423,6 +535,17 @@ export class SpatialIndex {
         if (pz < minZ) minZ = pz;
         if (pz > maxZ) maxZ = pz;
       }
+      // 葉を含む全ての範囲の外接箱を、範囲の中央の位置に記録する（問い合わせの枝刈り用）
+      const boxes = this.boxes;
+      const b = ((l + h) >> 1) * 6;
+      boxes[b] = minX;
+      boxes[b + 1] = minY;
+      boxes[b + 2] = minZ;
+      boxes[b + 3] = maxX;
+      boxes[b + 4] = maxY;
+      boxes[b + 5] = maxZ;
+      if (h - l <= LEAF_SIZE) continue;
+
       const ex = maxX - minX, ey = maxY - minY, ez = maxZ - minZ;
       const axis = ex >= ey && ex >= ez ? 0 : ey >= ez ? 1 : 2;
 

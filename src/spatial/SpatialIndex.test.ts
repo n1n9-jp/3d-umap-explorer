@@ -398,6 +398,35 @@ describe('SpatialIndex（縮退したデータ）', () => {
   it('positions の長さが 3 の倍数でなければ例外', () => {
     expect(() => new SpatialIndex(new Float32Array(4))).toThrow(RangeError);
   });
+
+  it('座標に NaN を含むと RangeError（どの成分・どの位置でも）', () => {
+    expect(() => new SpatialIndex(new Float32Array([0, 0, NaN]))).toThrow(RangeError);
+    expect(() => new SpatialIndex(new Float32Array([NaN, 0, 0]))).toThrow(RangeError);
+    // 葉に収まらない大きさの入力の、末尾・中ほどの NaN
+    const rand = mulberry32(8);
+    for (const at of [0, 1234, 3 * 500 - 1]) {
+      const p = new Float32Array(3 * 500);
+      for (let i = 0; i < p.length; i++) p[i] = rand() * 2 - 1;
+      p[at] = NaN;
+      expect(() => new SpatialIndex(p)).toThrow(RangeError);
+    }
+  });
+
+  it('無限大の座標は受け付け、有限の点の検索結果が正しい', () => {
+    const rand = mulberry32(31);
+    const n = 200;
+    const p = new Float32Array(3 * n);
+    for (let i = 0; i < p.length; i++) p[i] = rand() * 2 - 1;
+    p[3 * 7] = Infinity;
+    p[3 * 50 + 1] = -Infinity;
+    p[3 * 120 + 2] = Infinity;
+    const idx = new SpatialIndex(p);
+    expect(idx.count).toBe(n);
+    for (let t = 0; t < 40; t++) {
+      const q: [number, number, number] = [rand() * 4 - 2, rand() * 4 - 2, rand() * 4 - 2];
+      expectMatchesBrute(idx, p, q, 1 + (t % 9), 0.2 + 0.1 * t, 0.1 * t);
+    }
+  });
 });
 
 // ---------------------------------------------------------------- 別の分布・規模
@@ -430,5 +459,57 @@ describe('SpatialIndex（規模の大きいデータ）', () => {
       }
       expectMatchesBrute(idx, positions, q, [1, 8, 100][t % 3], [0.01, 0.1, 1][t % 3], [0.005, 0.05, 0.5][(t + 1) % 3]);
     }
+  });
+});
+
+describe('SpatialIndex（小さな塊が並ぶ分布）', () => {
+  it('幅 0.02 程度の塊 20 個で、遠方（距離 10 以上）を含む問い合わせが総当たりと一致する', () => {
+    const rand = mulberry32(2718);
+    const gauss = makeGaussian(rand);
+    const nb = 20;
+    const n = 6000;
+    const centers: [number, number, number][] = [];
+    for (let b = 0; b < nb; b++) centers.push([rand() * 2 - 1, rand() * 2 - 1, rand() * 2 - 1]);
+    const p = new Float32Array(3 * n);
+    for (let i = 0; i < n; i++) {
+      const c = centers[i % nb];
+      p[3 * i] = c[0] + 0.02 * gauss();
+      p[3 * i + 1] = c[1] + 0.02 * gauss();
+      p[3 * i + 2] = c[2] + 0.02 * gauss();
+    }
+    const idx = new SpatialIndex(p);
+
+    const queries: [number, number, number][] = [];
+    // 塊の内部・塊のすぐ近く・塊と塊の間
+    for (let t = 0; t < 40; t++) {
+      const c = centers[t % nb];
+      const s = [0.005, 0.03, 0.15][t % 3];
+      queries.push([c[0] + s * gauss(), c[1] + s * gauss(), c[2] + s * gauss()]);
+    }
+    for (let t = 0; t < 30; t++) queries.push([rand() * 2 - 1, rand() * 2 - 1, rand() * 2 - 1]);
+    // 立方体の外側: 距離 3 の位置（x=3）と、距離 10・100・1000 の無作為な方向
+    for (let t = 0; t < 10; t++) queries.push([3, rand() * 2 - 1, rand() * 2 - 1]);
+    for (const r of [10, 10, 25, 100, 100, 1000]) {
+      for (let t = 0; t < 8; t++) {
+        const a = gauss();
+        const b = gauss();
+        const c = gauss();
+        const l = Math.hypot(a, b, c);
+        queries.push([(a / l) * r, (b / l) * r, (c / l) * r]);
+      }
+    }
+    expect(queries.some((q) => Math.hypot(q[0], q[1], q[2]) >= 10)).toBe(true);
+
+    const ks = [1, 3, 16, 100];
+    const radii = [0.01, 0.05, 0.4, 2, 50];
+    const maxDistances = [0.01, 0.1, 1, 20, 200];
+    queries.forEach((q, i) => {
+      expectMatchesBrute(idx, p, q, ks[i % ks.length], maxDistances[(i >> 1) % maxDistances.length], radii[(i >> 2) % radii.length]);
+    });
+    // 遠方では、maxDistance が届かなければ null / 空
+    expect(idx.nearest(100, 0, 0, 50)).toBeNull();
+    expect(idx.within(100, 0, 0, 50).length).toBe(0);
+    // 遠方の within は、半径が十分大きければ全点
+    expect(idx.within(100, 0, 0, 1000).length).toBe(n);
   });
 });
