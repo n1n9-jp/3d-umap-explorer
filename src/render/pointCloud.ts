@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { MAX_LABELS, fragmentShader, vertexShader } from './shaders';
+import { MAX_LABELS, fragmentShader, highlightFragmentShader, highlightVertexShader, vertexShader } from './shaders';
 import { BACKGROUND_COLOR, hexToRgb, labelColors } from './palette';
 
 /** 描画パラメータ。距離はワールド単位（座標は [-1, 1] の立方体）。 */
@@ -30,6 +30,15 @@ export const DEFAULT_PARAMS: PointCloudParams = {
   dotRadius: [0.4, 2.2],
 };
 
+/** 強調表示の種類。 */
+export type HighlightKind = 'hover' | 'selected';
+
+/** 強調表示の輪の見た目。ピクセルは描画バッファの単位（`setHighlightPixelRatio` で掛ける）。 */
+const HIGHLIGHT_STYLE: Record<HighlightKind, { color: number; minRadius: number; line: number; outline: number; order: number }> = {
+  hover: { color: 0xf2f5fa, minRadius: 7, line: 1.5, outline: 1.5, order: 1 },
+  selected: { color: 0xffc233, minRadius: 9, line: 2.5, outline: 1.5, order: 2 },
+};
+
 export interface PointCloudData {
   positions: Float32Array;
   labels: Uint8Array;
@@ -50,7 +59,16 @@ export class PointCloud {
    */
   readonly pickingMaterial: THREE.ShaderMaterial;
   readonly params: PointCloudParams;
+  /**
+   * 強調表示（ホバー・選択）の輪。シーンへ点群のメッシュとは別に追加する。深度テストなしで点群の後に描くので、
+   * ほかの点に隠れていても位置が分かる。ピッキングは点群のメッシュだけを描くので、選ばれる形は変わらない。
+   */
+  readonly highlight = new THREE.Group();
   private readonly texture: THREE.Texture;
+  private readonly positions: Float32Array;
+  private readonly highlightMeshes: Record<HighlightKind, THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial>>;
+  private readonly highlighted: Record<HighlightKind, number | null> = { hover: null, selected: null };
+  private highlightPixelRatio = 1;
 
   constructor(data: PointCloudData, params: Partial<PointCloudParams> = {}) {
     this.params = { ...DEFAULT_PARAMS, ...params };
@@ -125,7 +143,74 @@ export class PointCloud {
 
     this.mesh = new THREE.Mesh(geometry, material);
     this.mesh.frustumCulled = false;
+
+    this.positions = data.positions;
+    const ringQuad = new THREE.PlaneGeometry(1, 1);
+    const makeRing = (kind: HighlightKind) => {
+      const style = HIGHLIGHT_STYLE[kind];
+      const m = new THREE.Mesh(ringQuad, new THREE.ShaderMaterial({
+        glslVersion: THREE.GLSL3,
+        vertexShader: highlightVertexShader,
+        fragmentShader: highlightFragmentShader,
+        uniforms: {
+          // 画面上の大きさは点群と同じ式で求めるので、ユニフォームを共有する
+          uPointSize: material.uniforms.uPointSize!,
+          uMinPixelSize: material.uniforms.uMinPixelSize!,
+          uViewportHeight: material.uniforms.uViewportHeight!,
+          uBackground: material.uniforms.uBackground!,
+          uCenter: { value: new THREE.Vector3() },
+          uColor: { value: new THREE.Vector3(...hexToRgb(`#${style.color.toString(16).padStart(6, '0')}`)) },
+          uRing: { value: new THREE.Vector3() },
+        },
+        transparent: true,
+        depthTest: false,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      }));
+      m.frustumCulled = false;
+      m.visible = false;
+      m.renderOrder = 10 + style.order; // 選択の輪をホバーの輪より手前に
+      this.highlight.add(m);
+      return m;
+    };
+    this.highlightMeshes = { hover: makeRing('hover'), selected: makeRing('selected') };
+    this.applyHighlightStyle();
     this.applyParams();
+  }
+
+  /** 強調表示する点を設定する（null で消す）。ホバーと選択が同じ点のときは、選択の輪だけを描く。 */
+  setHighlight(kind: HighlightKind, index: number | null): void {
+    const valid = index !== null && Number.isInteger(index) && index >= 0 && 3 * index + 2 < this.positions.length;
+    this.highlighted[kind] = valid ? index : null;
+    for (const k of ['hover', 'selected'] as const) {
+      const i = this.highlighted[k];
+      const mesh = this.highlightMeshes[k];
+      mesh.visible = i !== null && !(k === 'hover' && i === this.highlighted.selected);
+      if (i !== null) {
+        (mesh.material.uniforms.uCenter!.value as THREE.Vector3).set(
+          this.positions[3 * i]!, this.positions[3 * i + 1]!, this.positions[3 * i + 2]!);
+      }
+    }
+  }
+
+  /** 強調表示されている点の番号。 */
+  getHighlight(kind: HighlightKind): number | null {
+    return this.highlighted[kind];
+  }
+
+  /** 輪の太さなどに掛ける倍率（描画バッファの画素 / CSS ピクセル）。 */
+  setHighlightPixelRatio(ratio: number): void {
+    if (!(ratio > 0) || !Number.isFinite(ratio)) return;
+    this.highlightPixelRatio = ratio;
+    this.applyHighlightStyle();
+  }
+
+  private applyHighlightStyle(): void {
+    const r = this.highlightPixelRatio;
+    for (const k of ['hover', 'selected'] as const) {
+      const s = HIGHLIGHT_STYLE[k];
+      (this.highlightMeshes[k].material.uniforms.uRing!.value as THREE.Vector3).set(s.minRadius * r, s.line * r, s.outline * r);
+    }
   }
 
   /** パラメータを部分的に更新する。 */
@@ -160,5 +245,8 @@ export class PointCloud {
     this.mesh.material.dispose();
     this.pickingMaterial.dispose();
     this.texture.dispose();
+    this.highlightMeshes.hover.geometry.dispose();
+    this.highlightMeshes.hover.material.dispose();
+    this.highlightMeshes.selected.material.dispose();
   }
 }

@@ -14,6 +14,10 @@ import { AutoSpeed, autoSpeedParams } from './app/autoSpeed';
 import { bindAutoSpeedKey } from './app/autoSpeedKey';
 import { computeHomeView } from './app/homeView';
 import { bindShortcut, isShortcutPress, isFromEditable } from './app/keyEvents';
+import { InteractionController, type InteractionState } from './interaction/InteractionController';
+import { InfoPanel } from './interaction/infoPanel';
+import type { StopDistance } from './interaction/stopDistance';
+import { labelColors } from './render/palette';
 
 interface FrameStats { frames: number; meanMs: number; medianMs: number; p95Ms: number; maxMs: number }
 
@@ -33,6 +37,11 @@ declare global {
       pick(clientX: number, clientY: number): Promise<PickResult | null>;
       /** ピッキングの検証用の補助 */
       picking: PickingDebug;
+      /** ホバー・選択（src/interaction/）。ホバー中と選択中の点の番号、点へ飛ぶときに止まる距離 */
+      interaction: {
+        getState(): InteractionState;
+        stopDistance(index: number): StopDistance;
+      };
     };
   }
 }
@@ -172,10 +181,45 @@ async function start(): Promise<void> {
   const picking = createPickingDebug(renderer, scene, camera, cloud, picker);
   // ---- ここまで ----
 
+  // ---- ホバー・選択・ダブルクリックで点へ飛ぶ（src/interaction/）----
+  scene.add(cloud.highlight);
+  const syncHighlightRatio = () => cloud.setHighlightPixelRatio(renderer.getPixelRatio());
+  window.addEventListener('resize', syncHighlightRatio);
+  syncHighlightRatio();
+  const coarseLevel = arrays.manifest.clusters?.levels[0];
+  const coarseIds = arrays.clusterAssignments?.[0]?.ids;
+  const infoPanel = new InfoPanel(document, {
+    atlas: image,
+    cellSize: arrays.manifest.sprite.cellSize,
+    columns: arrays.manifest.sprite.columns,
+    labels: arrays.labels,
+    labelNames: arrays.manifest.labels.names,
+    labelColors: labelColors(arrays.manifest.labels.names.length),
+    coarse: coarseLevel && coarseIds
+      ? { ids: coarseIds, names: coarseLevel.clusters.map((c) => c.name), noise: arrays.manifest.clusters!.noise }
+      : null,
+  }, () => interaction.select(null));
+  const interaction = new InteractionController({
+    canvas: renderer.domElement,
+    camera,
+    cloud,
+    pick: (x, y) => picker.pick(camera, x, y).then((r) => (r ? r.index : null)),
+    // 速度の自動調整の索引とは別に持つ（索引は再入を想定しないので、使い手ごとに分ける）
+    index: new SpatialIndex(arrays.positions),
+    panel: infoPanel,
+    flyTo: (target, options) => controller.flyTo(target, options),
+    bufferHeight: () => renderer.getDrawingBufferSize(new THREE.Vector2()).y,
+  });
+  // ---- ここまで ----
+
   window.__explorer = {
     ready: true,
     pick: (x, y) => picker.pick(camera, x, y),
     picking,
+    interaction: {
+      getState: () => interaction.getState(),
+      stopDistance: (i) => interaction.stopDistance(i),
+    },
     setView: (v) => controller.setView(v),
     homeView,
     getState: () => controller.getState(),

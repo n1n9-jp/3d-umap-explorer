@@ -1,6 +1,6 @@
 import { Euler, Vector3 } from 'three';
 import type { PerspectiveCamera } from 'three';
-import { FlyCameraControls } from '../controls/FlyCameraControls';
+import { FlyCameraControls, type FlyToOptions } from '../controls/FlyCameraControls';
 import { viewAngles, type ViewAngles, type ViewSpec } from '../render/view';
 import { OverviewControls } from './overviewControls';
 import type { AutoSpeed } from './autoSpeed';
@@ -79,6 +79,8 @@ export class CameraRig {
   private readonly domElement: HTMLElement;
   /** ホームの視点へ移動中なら、その移動。 */
   private flight: HomeFlight | null = null;
+  /** flyTo による自動移動の最中（速度の自動調整を止めている） */
+  private flying = false;
 
   constructor(camera: PerspectiveCamera, domElement: HTMLElement, center: Vector3, options: CameraRigOptions = {}) {
     this.camera = camera;
@@ -170,6 +172,9 @@ export class CameraRig {
    * 移動の間は、速度の自動調整は働かない（終わったあと、着いた位置から調整し直す）。
    */
   goHome(view: ViewSpec, durationSeconds: number = HOME_DURATION_SECONDS): void {
+    // 点への自動移動（flyTo）の途中なら中断する（ホームへの移動が終わったあとに再開しないように）
+    this.fly.cancelFlyTo();
+    this.flying = false;
     const from = this.currentPose();
     const to: FlightPose = { position: [...view.pos], ...viewAngles(view, from) };
     this.flight = new HomeFlight(from, to, durationSeconds);
@@ -185,6 +190,17 @@ export class CameraRig {
     this.notify();
   }
 
+  /**
+   * `target` を注視する位置へ自動移動する（`FlyCameraControls.flyTo`）。俯瞰モードなら飛行モードへ切り替えてから。
+   * 移動中は速度の自動調整を止め（移動の速さは所要時間で決まり、係数には依らない）、着いたら止まった状態として測り直す。
+   */
+  flyTo(target: Vector3, options?: FlyToOptions): void {
+    this.cancelHome(); // ホームへの移動中なら中断して、その場から飛ぶ
+    this.setMode('fly');
+    this.fly.flyTo(target, options);
+    this.flying = this.fly.isFlying;
+  }
+
   update(dt: number): void {
     if (this.flight) {
       this.stepFlight(dt);
@@ -193,6 +209,12 @@ export class CameraRig {
     if (this._mode !== 'fly') return;
     this.prevPosition.copy(this.camera.position);
     this.fly.update(dt);
+    if (this.flying) {
+      if (this.fly.isFlying) return;
+      this.flying = false; // 着いた（または操作で中断した）
+      this.autoSpeed?.reset();
+      return;
+    }
     if (!this._autoSpeedEnabled || !this.autoSpeed) return;
     // 速度は、このフレームの移動量から求める（setView などによる瞬間移動はフレームの外で起きるので含まない）。
     if (dt > 0 && Number.isFinite(dt)) this.velocity.subVectors(this.camera.position, this.prevPosition).divideScalar(dt);
