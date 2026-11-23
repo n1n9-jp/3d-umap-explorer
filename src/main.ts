@@ -19,6 +19,7 @@ import { InteractionController, type InteractionState } from './interaction/Inte
 import { InfoPanel } from './interaction/infoPanel';
 import type { StopDistance } from './interaction/stopDistance';
 import { labelColors } from './render/palette';
+import { ClusterLabels, type ClusterLabelsState } from './labels/ClusterLabels';
 
 interface FrameStats { frames: number; meanMs: number; medianMs: number; p95Ms: number; maxMs: number }
 
@@ -47,6 +48,10 @@ declare global {
       interaction: {
         getState(): InteractionState;
         stopDistance(index: number): StopDistance;
+      };
+      /** クラスタの目印と現在地（src/labels/）。クラスタのないデータセットでは available が false */
+      labels: {
+        getState(): ClusterLabelsState;
       };
     };
   }
@@ -146,9 +151,23 @@ async function start(): Promise<void> {
     if (isShortcutPress(e, 'KeyO')) controller.toggle();
   });
 
+  // ---- クラスタの目印と現在地（src/labels/。粗い階層を使う。クラスタのないデータセットでは何もしない）----
+  const clusterLabels = new ClusterLabels({
+    document,
+    container: document.getElementById('cluster-labels')!,
+    locationEl: document.getElementById('cluster-location')!,
+    hud,
+    camera,
+    clusters: arrays.manifest.clusters?.levels[0]?.clusters ?? [],
+    boundsRadius: arrays.bounds.radius,
+    flyTo: (target, options) => controller.flyTo(target, options),
+  });
+  bindShortcut(window, 'KeyL', () => clusterLabels.toggle()); // L キーで表示・非表示
+  // ---- ここまで ----
+
   const updateHud = () => {
     const s = controller.getState();
-    hud.textContent = formatHud({
+    hud.textContent = clusterLabels.decorateHud(formatHud({
       datasetName: arrays.manifest.name,
       pointCount: arrays.manifest.count,
       pointSize: cloud.params.pointSize,
@@ -156,7 +175,7 @@ async function start(): Promise<void> {
       speed: s.speed,
       autoSpeed: { available: s.autoSpeed.available, enabled: s.autoSpeed.enabled, effectiveSpeed: s.effectiveSpeed },
       viewParams: formatView({ pos: s.position, look: s.lookAt }),
-    });
+    }));
   };
   controller.onChange(() => updateHud()); // モードと速度の変化はすぐに見せる
 
@@ -190,6 +209,7 @@ async function start(): Promise<void> {
 
     controller.update(dt);
     updateCameraDependent();
+    clusterLabels.update(window.innerWidth, window.innerHeight);
     renderer.render(scene, camera);
 
     hudTimer += dt;
@@ -239,6 +259,7 @@ async function start(): Promise<void> {
       getState: () => interaction.getState(),
       stopDistance: (i) => interaction.stopDistance(i),
     },
+    labels: { getState: () => clusterLabels.getState() },
     setView: (v) => controller.setView(v),
     homeView,
     getState: () => controller.getState(),
