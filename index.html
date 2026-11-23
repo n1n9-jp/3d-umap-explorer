@@ -17,6 +17,32 @@
         text-shadow: 0 0 4px #000;
       }
       #hud.error { color: #ff8080; }
+      #cluster-labels { position: fixed; inset: 0; z-index: 0; overflow: hidden; pointer-events: none; }
+      #cluster-labels[hidden] { display: none; }
+      .cluster-label {
+        position: absolute; left: 0; top: 0; margin: 0; pointer-events: auto; cursor: pointer;
+        display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
+        padding: 3px 11px 3px 8px; border-radius: 999px; border: 2px solid var(--c, #fff);
+        background: rgba(7, 8, 12, 0.84); color: #fff; opacity: var(--o, 1);
+        font: 700 16px/1.3 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        text-shadow: 0 0 3px #000; user-select: none; -webkit-user-select: none; touch-action: manipulation;
+        box-shadow: 0 0 0 1px rgba(7, 8, 12, 0.6);
+      }
+      .cluster-label.is-hidden { visibility: hidden; pointer-events: none; }
+      .cluster-label:hover { opacity: 1; background: rgba(7, 8, 12, 0.96); z-index: 1; }
+      .cluster-label:focus-visible { opacity: 1; outline: 2px solid #ffc233; outline-offset: 2px; z-index: 1; }
+      .cluster-label-swatch { width: 10px; height: 10px; border-radius: 50%; background: var(--c, #fff); flex: none; }
+      #cluster-location {
+        position: fixed; left: 12px; bottom: calc(var(--hud-height, 96px) + 18px); z-index: 1;
+        display: flex; align-items: center; gap: 8px; pointer-events: none;
+        max-width: calc(100vw - 48px); padding: 6px 12px; border-radius: 6px;
+        background: rgba(7, 8, 12, 0.82); color: #e8ecf4;
+        font: 600 14px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        text-shadow: 0 0 4px #000;
+      }
+      #cluster-location[hidden] { display: none; }
+      #cluster-location[data-kind="nearest"] { color: #b4bccb; }
+      .cluster-location-swatch { width: 12px; height: 12px; border-radius: 50%; flex: none; }
       #info {
         position: fixed; right: 12px; top: 12px; z-index: 2;
         display: flex; gap: 12px; align-items: flex-start;
@@ -53,6 +79,7 @@
   <body>
     <div id="app"></div>
     <div id="hud">読み込み中…</div>
+    <div id="cluster-location" hidden></div>
     <div id="info-live" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
     <section id="info" role="region" aria-labelledby="info-heading" hidden>
       <h2 id="info-heading" class="sr-only">選択中の点</h2>
@@ -68,6 +95,8 @@
       <button id="info-close" type="button" aria-label="選択を解除"><span aria-hidden="true">×</span></button>
     </section>
     <div id="hover-label" aria-hidden="true" hidden></div>
+    <!-- 目印は Tab の順で情報パネルのあと。見た目の重なりは z-index（HUD・情報パネルより下） -->
+    <div id="cluster-labels" role="group" aria-label="クラスタの目印" hidden></div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
