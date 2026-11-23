@@ -26,6 +26,7 @@ from PIL import Image
 from scipy.spatial import cKDTree
 
 import add_structure
+import knn as knn_mod
 from datasets import COMMIT, DATASETS, OUT_ROOT, REPO_URL, UMAP_PARAMS, DatasetConfig, SourceFile
 
 CACHE = Path(__file__).resolve().parent / ".cache"
@@ -118,7 +119,7 @@ def normalize(y: np.ndarray) -> np.ndarray:
     return y.astype("<f4")
 
 
-def build_manifest(cfg: DatasetConfig, sprite_src: Path | None, umap_version: str) -> dict:
+def build_manifest(cfg: DatasetConfig, sprite_src: Path | None, umap_version: str, quality: dict | None) -> dict:
     """スプライト（あれば）を検証し、初期状態の manifest を返す。"""
     manifest: dict = {
         "name": cfg.name,
@@ -150,6 +151,10 @@ def build_manifest(cfg: DatasetConfig, sprite_src: Path | None, umap_version: st
         "compatibilityLayout": UMAP_PARAMS["compatibility_layout"],
     }
     manifest["source"] = {"url": REPO_URL, "commit": COMMIT}
+    if cfg.knn_k:
+        manifest["knn"] = knn_mod.knn_manifest(cfg.count, cfg.knn_k, cfg.metric)
+    if quality:
+        manifest["quality"] = quality
     return manifest
 
 
@@ -161,13 +166,15 @@ def write_outputs(
     words: list[str] | None,
     paths: dict[str, Path],
     umap_version: str,
+    graph: tuple[np.ndarray, np.ndarray] | None,
+    quality: dict | None,
 ) -> list[str]:
     """配信用データ一式を作り、すべての検証を終えてから out へまとめて置く。警告（あれば）の一覧を返す。
 
     作業用ディレクトリ（out と同じファイルシステム）に一式を作って検証し、
     最後にファイルごとに名前を変えて out へ移す。途中で失敗しても out は実行前のまま残る。
     """
-    manifest = build_manifest(cfg, paths.get("sprite"), umap_version)
+    manifest = build_manifest(cfg, paths.get("sprite"), umap_version, quality)
 
     out.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=f".{out.name}-staging-", dir=out.parent))
@@ -179,15 +186,25 @@ def write_outputs(
             shutil.copyfile(paths["sprite"], stage / "sprite.png")
         if words is not None:
             (stage / "text.json").write_text(json.dumps(words, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
+        if graph is not None:
+            knn_mod.write_knn(stage, *graph)
         (stage / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
         # クラスタ・密度・全体範囲を計算し、manifest へ追記する（検証に失敗すると異常終了する）
         warnings = add_structure.add_structure(stage, cfg.cluster_overrides)
+        if graph is not None:  # 書いたファイルを読み直して、メモリ上の kNN グラフと一致し、形式を満たすことを確かめる
+            saved = knn_mod.read_knn(stage, json.loads((stage / "manifest.json").read_text()))
+            knn_mod.verify_knn(*saved, cfg.count)
+            if not (np.array_equal(saved[0], graph[0]) and np.array_equal(saved[1], graph[1])):
+                raise SystemExit("書き出した kNN グラフが計算結果と一致しません")
 
         out.mkdir(parents=True, exist_ok=True)
         names = sorted(p.name for p in stage.iterdir())
         # manifest.json は最後に置く（他のファイルが揃ってから、それを指す manifest に切り替わる）
         for name in [n for n in names if n != "manifest.json"] + ["manifest.json"]:
             os.replace(stage / name, out / name)
+        for old in out.glob("knn-*"):  # kNN グラフを作らない設定（または点数で拡張子が変わる）のとき、前の実行のファイルを消す
+            if old.name not in names:
+                old.unlink()
     finally:
         shutil.rmtree(stage, ignore_errors=True)
     return warnings
@@ -203,6 +220,27 @@ def neighbor_indices(x: np.ndarray, metric: str, k: int) -> np.ndarray:
         row = idx[i][idx[i] != i][:k]
         out[i] = row
     return out
+
+
+QUALITY_KS = (10, 50)  # 埋め込みの質の指標に使う近傍数（kNN グラフの k 以下のものだけ）
+
+
+def low_dim_neighbors(pos: np.ndarray, k: int) -> np.ndarray:
+    """3次元座標での近傍 k 点（自分自身を除く）の番号。距離の小さい順。"""
+    _, idx = cKDTree(pos.astype(np.float64)).query(pos.astype(np.float64), k=k + 1)
+    out = np.empty((len(pos), k), dtype=np.int64)
+    for i in range(len(pos)):  # 座標が重なる点があっても、自分自身の番号だけを除く
+        out[i] = idx[i][idx[i] != i][:k]
+    return out
+
+
+def compute_quality(idx: np.ndarray, pos: np.ndarray) -> dict | None:
+    """元の空間の k 近傍（kNN グラフ）と3次元の k 近傍の重なりの割合（全点平均）。manifest の `quality`。"""
+    ks = [k for k in QUALITY_KS if k <= idx.shape[1]]
+    if not ks:
+        return None
+    low = low_dim_neighbors(pos, max(ks))
+    return {"neighborOverlap": [{"k": k, "mean": round(knn_mod.neighbor_overlap(idx, low, k), add_structure.DIGITS)} for k in ks]}
 
 
 def report(cfg: DatasetConfig, out: Path, x: np.ndarray, pos: np.ndarray, labels: np.ndarray | None, words: list[str] | None) -> None:
@@ -233,7 +271,13 @@ def report(cfg: DatasetConfig, out: Path, x: np.ndarray, pos: np.ndarray, labels
     orig = neighbor_indices(x, cfg.metric, 10)
     low = idx[:, 1:]
     overlap = np.mean([len(set(a) & set(b)) / 10 for a, b in zip(orig, low)])
-    print(f"10-NN overlap ({cfg.dim}D {cfg.metric} vs 3D, mean over all points): {overlap:.4f}")
+    print(f"10-NN overlap ({cfg.dim}D {cfg.metric} vs 3D, mean over all points, sklearn brute): {overlap:.4f}")
+    if cfg.knn_k:
+        info = json.loads((out / "manifest.json").read_text())
+        ki, kd = knn_mod.read_knn(out, info)
+        print(f"knn: k={cfg.knn_k}, {(out / info['knn']['indices']['file']).name} {(out / info['knn']['indices']['file']).stat().st_size} bytes, "
+              f"{(out / info['knn']['distances']['file']).name} {(out / info['knn']['distances']['file']).stat().st_size} bytes")
+        print(f"quality (manifest): {info.get('quality')}")
 
     if words is not None:
         index = {w: i for i, w in enumerate(words)}
@@ -259,7 +303,16 @@ def build(key: str) -> None:
     print(f"UMAP computation time: {time.perf_counter() - t0:.1f} s")
 
     pos = normalize(np.asarray(y)).reshape(-1)
-    warnings = write_outputs(cfg, out, pos, labels, words, paths, umap_version)
+
+    graph = quality = None
+    if cfg.knn_k:
+        t0 = time.perf_counter()
+        idx, dst, stats = knn_mod.compute_knn(x, cfg.metric, cfg.knn_k)
+        knn_mod.verify_knn(idx, dst, cfg.count)
+        print(f"kNN computation time (exact, k={cfg.knn_k}, {cfg.metric}): {time.perf_counter() - t0:.1f} s, {stats}")
+        graph = (idx, dst)
+        quality = compute_quality(idx, pos.reshape(cfg.count, 3))
+    warnings = write_outputs(cfg, out, pos, labels, words, paths, umap_version, graph, quality)
     report(cfg, out, x, pos.reshape(cfg.count, 3), labels, words)
     print(f"clustering warnings: {len(warnings)}")
     print("written to", out)

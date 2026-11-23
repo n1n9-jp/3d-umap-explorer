@@ -7,6 +7,20 @@
   "sprite": {"file": "sprite.png", "cellSize": [28, 28], "columns": 100, "rows": 100},
   "umap": {"library": "umap-learn 0.6.0", "nComponents": 3, "nNeighbors": 15, "minDist": 0.1, "metric": "euclidean", "randomState": 42, "compatibilityLayout": true},
   "source": {"url": "https://github.com/tensorflow/embedding-projector-standalone", "commit": "6ff71f7233ac5947450409e7938b58ec14d1e24c"},
+  "knn": {
+    "k": 50,
+    "metric": "euclidean",
+    "includesSelf": false,
+    "exact": true,
+    "indices": {"file": "knn-indices.u16", "dtype": "uint16"},
+    "distances": {"file": "knn-distances.f32", "dtype": "float32"}
+  },
+  "quality": {
+    "neighborOverlap": [
+      {"k": 10, "mean": 0.3513},
+      {"k": 50, "mean": 0.427276}
+    ]
+  },
   "bounds": {"center": [0.0, 0.0, 0.0], "radius": 1.139497},
   "density": {"k": 8, "knnDistP05": 0.008562, "knnDistP50": 0.015665, "knnDistP95": 0.028776},
   "overview": {"axes": [[0.935867, 0.243862, 0.254331], [-0.237131, 0.969787, -0.057293], [-0.260618, -0.006691, 0.965419]]},
