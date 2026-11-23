@@ -1,0 +1,2113 @@
+{
+  "runs": {
+    "10k_n15_atlas_def": {
+      "id": "10k_n15_atlas_def",
+      "cfg": {
+        "id": "10k_n15_atlas_def",
+        "engine": "atlas",
+        "nEpochs": 0,
+        "dataset": "10k",
+        "n": 15,
+        "seed": 42,
+        "minDist": 0.1,
+        "warmRun": true,
+        "repeat": true,
+        "save": "10k_n15_atlas_def"
+      },
+      "trialA": {
+        "cfg": {
+          "id": "10k_n15_atlas_def",
+          "engine": "atlas",
+          "nEpochs": 0,
+          "dataset": "10k",
+          "n": 15,
+          "seed": 42,
+          "minDist": 0.1,
+          "warmRun": true,
+          "repeat": true,
+          "save": "10k_n15_atlas_def"
+        },
+        "startupMs": 20,
+        "workerEvalMs": 14.099999999976717,
+        "run1": {
+          "initMs": 649.3999999999651,
+          "optimizeMs": 18421,
+          "totalMs": 19090.399999999965,
+          "wallFromSpawnMs": 19094.099999999977,
+          "epochs": 500,
+          "epochsDone": 500,
+          "cancelled": false,
+          "mem": null,
+          "hash": "46991b5f49b893ec69c8c50a55a529ee902db0c66a25d38e3fab40812aa98308"
+        },
+        "idle": {
+          "count": 36,
+          "median": 16.699999999999932,
+          "p95": 16.799999999999955,
+          "max": 16.799999999999955,
+          "mean": 16.66666666666667
+        },
+        "raf": {
+          "count": 1145,
+          "median": 16.69999999999891,
+          "p95": 16.700000000000728,
+          "max": 16.80000000000291,
+          "mean": 16.66602620087336
+        },
+        "run2": {
+          "initMs": 478.79999999998836,
+          "optimizeMs": 18802.099999999977,
+          "totalMs": 19280.899999999965,
+          "epochsDone": 500,
+          "hash": "46991b5f49b893ec69c8c50a55a529ee902db0c66a25d38e3fab40812aa98308"
+        },
+        "sameWorkerBitIdentical": true
+      },
+      "memA": {
+        "baseAnonMB": 69.55078125,
+        "peakAnonMB": 121.48828125,
+        "deltaAnonMB": 51.9375,
+        "baseRendererRssMB": 92.3984375,
+        "peakRendererRssMB": 152.9921875
+      },
+      "trialB": {
+        "cfg": {
+          "id": "10k_n15_atlas_def",
+          "engine": "atlas",
+          "nEpochs": 0,
+          "dataset": "10k",
+          "n": 15,
+          "seed": 42,
+          "minDist": 0.1,
+          "warmRun": false,
+          "repeat": true,
+          "save": "10k_n15_atlas_def_B"
+        },
+        "startupMs": 22.70000000001164,
+        "workerEvalMs": 16.400000000023283,
+        "run1": {
+          "initMs": 711.6000000000349,
+          "optimizeMs": 18752.399999999965,
+          "totalMs": 19486.70000000001,
+          "wallFromSpawnMs": 19490,
+          "epochs": 500,
+          "epochsDone": 500,
+          "cancelled": false,
+          "mem": null,
+          "hash": "46991b5f49b893ec69c8c50a55a529ee902db0c66a25d38e3fab40812aa98308"
+        },
+        "idle": {
+          "count": 36,
+          "median": 16.69999999999709,
+          "p95": 16.700000000004366,
+          "max": 16.700000000004366,
+          "mean": 16.666666666666668
+        },
+        "raf": {
+          "count": 1169,
+          "median": 16.69999999999709,
+          "p95": 16.700000000004366,
+          "max": 16.80000000000291,
+          "mean": 16.66595380667237
+        }
+      },
+      "crossWorkerBitIdentical": true
+    },
+    "10k_n15_atlas_e200": {
+      "id": "10k_n15_atlas_e200",
+      "cfg": {
+        "id": "10k_n15_atlas_e200",
+        "engine": "atlas",
+        "nEpochs": 200,
+        "dataset": "10k",
+        "n": 15,
+        "seed": 42,
+        "minDist": 0.1,
+        "warmRun": true,
+        "repeat": true,
+        "save": "10k_n15_atlas_e200"
+      },
+      "trialA": {
+        "cfg": {
+          "id": "10k_n15_atlas_e200",
+          "engine": "atlas",
+          "nEpochs": 200,
+          "dataset": "10k",
+          "n": 15,
+          "seed": 42,
+          "minDist": 0.1,
+          "warmRun": true,
+          "repeat": true,
+          "save": "10k_n15_atlas_e200"
+        },
+        "startupMs": 21.600000000034925,
+        "workerEvalMs": 17,
+        "run1": {
+          "initMs": 698.4000000000233,
+          "optimizeMs": 7167.79999999993,
+          "totalMs": 7887.799999999988,
+          "wallFromSpawnMs": 7891.000000000058,
+          "epochs": 200,
+          "epochsDone": 200,
+          "cancelled": false,
+          "mem": null,
+          "hash": "63fe3cb7988332fde0b5a9358603098460faefcbf1b988513482424960905cec"
+        },
+        "idle": {
+          "count": 36,
+          "median": 16.699999999999932,
+          "p95": 16.800000000000068,
+          "max": 16.800000000000068,
+          "mean": 16.66388888888889
+        },
+        "raf": {
+          "count": 473,
+          "median": 16.699999999999818,
+          "p95": 16.700000000000728,
+          "max": 16.80000000000109,
+          "mean": 16.66596194503171
+        },
+        "run2": {
+          "initMs": 470.69999999995343,
+          "optimizeMs": 7285.600000000093,
+          "totalMs": 7756.300000000047,
+          "epochsDone": 200,
+          "hash": "63fe3cb7988332fde0b5a9358603098460faefcbf1b988513482424960905cec"
+        },
+        "sameWorkerBitIdentical": true
+      },
+      "memA": {
+        "baseAnonMB": 69.7421875,
+        "peakAnonMB": 122.48046875,
+        "deltaAnonMB": 52.73828125,
+        "baseRendererRssMB": 92.75390625,
+        "peakRendererRssMB": 151.27734375
+      },
+      "trialB": {
+        "cfg": {
+          "id": "10k_n15_atlas_e200",
+          "engine": "atlas",
+          "nEpochs": 200,
+          "dataset": "10k",
+          "n": 15,
+          "seed": 42,
+          "minDist": 0.1,
+          "warmRun": false,
+          "repeat": true,
+          "save": "10k_n15_atlas_e200_B"
+        },
+        "startupMs": 22.099999999976717,
+        "workerEvalMs": 17.599999999976717,
+        "run1": {
+          "initMs": 656.6999999999534,
+          "optimizeMs": 7186.099999999977,
+          "totalMs": 7864.899999999907,
+          "wallFromSpawnMs": 7866.899999999907,
+          "epochs": 200,
+          "epochsDone": 200,
+          "cancelled": false,
+          "mem": null,
+          "hash": "63fe3cb7988332fde0b5a9358603098460faefcbf1b988513482424960905cec"
+        },
+        "idle": {
+          "count": 36,
+          "median": 16.700000000000728,
+          "p95": 16.700000000000728,
+          "max": 16.80000000000291,
+          "mean": 16.663888888888827
+        },
+        "raf": {
+          "count": 471,
+          "median": 16.69999999999709,
+          "p95": 16.799999999999272,
+          "max": 16.80000000000291,
+          "mean": 16.66602972399151
+        }
+      },
+      "crossWorkerBitIdentical": true
+    },
+    "10k_n15_umapjs_def": {
+      "id": "10k_n15_umapjs_def",
+      "cfg": {
+        "id": "10k_n15_umapjs_def",
+        "engine": "umapjs",
+        "nEpochs": 0,
+        "dataset": "10k",
+        "n": 15,
+        "seed": 42,
+        "minDist": 0.1,
+        "warmRun": true,
+        "repeat": true,
+        "save": "10k_n15_umapjs_def"
+      },
+      "trialA": {
+        "cfg": {
+          "id": "10k_n15_umapjs_def",
+          "engine": "umapjs",
+          "nEpochs": 0,
+          "dataset": "10k",
+          "n": 15,
+          "seed": 42,
+          "minDist": 0.1,
+          "warmRun": true,
+          "repeat": true,
+          "save": "10k_n15_umapjs_def"
+        },
+        "startupMs": 12,
+        "workerEvalMs": 8.300000000046566,
+        "run1": {
+          "convertMs": 15.199999999953434,
+          "initMs": 1813.9000000000233,
+          "optimizeMs": 4135.599999999977,
+          "firstStepMs": 1.099999999976717,
+          "totalMs": 5976.699999999953,
+          "wallFromSpawnMs": 5979.900000000023,
+          "epochs": 200,
+          "epochsDone": 200,
+          "cancelled": false,
+          "mem": null,
+          "hash": "f825fc86218ba525408142a9ea356aee50dd76cb8811db41cad657cbeae74a62"
+        },
+        "idle": {
+          "count": 36,
+          "median": 16.699999999999932,
+          "p95": 16.700000000000045,
+          "max": 16.799999999999955,
+          "mean": 16.666666666666668
+        },
+        "raf": {
+          "count": 357,
+          "median": 16.699999999999818,
+          "p95": 16.799999999999272,
+          "max": 16.800000000000182,
+          "mean": 16.666106442577032
+        },
+        "run2": {
+          "convertMs": 12,
+          "initMs": 2393.0999999999767,
+          "optimizeMs": 5811.199999999953,
+          "firstStepMs": 2.400000000023283,
+          "totalMs": 8216.29999999993,
+          "epochsDone": 200,
+          "hash": "f825fc86218ba525408142a9ea356aee50dd76cb8811db41cad657cbeae74a62"
+        },
+        "sameWorkerBitIdentical": true
+      },
+      "memA": {
+        "baseAnonMB": 69.69921875,
+        "peakAnonMB": 520.265625,
+        "deltaAnonMB": 450.56640625,
+        "baseRendererRssMB": 93.19140625,
+        "peakRendererRssMB": 552.09375
+      },
+      "trialB": {
+        "cfg": {
+          "id": "10k_n15_umapjs_def",
+          "engine": "umapjs",
+          "nEpochs": 0,
+          "dataset": "10k",
+          "n": 15,
+          "seed": 42,
+          "minDist": 0.1,
+          "warmRun": false,
+          "repeat": true,
+          "save": "10k_n15_umapjs_def_B"
+        },
+        "startupMs": 12.300000000046566,
+        "workerEvalMs": 6.900000000023283,
+        "run1": {
+          "convertMs": 12,
+          "initMs": 1829.9000000000233,
+          "optimizeMs": 4080.6999999999534,
+          "firstStepMs": 1,
+          "totalMs": 5934.900000000023,
+          "wallFromSpawnMs": 5937.300000000047,
+          "epochs": 200,
+          "epochsDone": 200,
+          "cancelled": false,
+          "mem": null,
+          "hash": "f825fc86218ba525408142a9ea356aee50dd76cb8811db41cad657cbeae74a62"
+        },
+        "idle": {
+          "count": 36,
+          "median": 16.69999999999891,
+          "p95": 16.80000000000109,
+          "max": 16.80000000000109,
+          "mean": 16.663888888888877
+        },
+        "raf": {
+          "count": 356,
+          "median": 16.69999999999709,
+          "p95": 16.799999999999272,
+          "max": 16.80000000000291,
+          "mean": 16.666011235955057
+        }
+      },
+      "crossWorkerBitIdentical": true
+    },
+    "10k_n15_umapjs_e500": {
+      "id": "10k_n15_umapjs_e500",
+      "cfg": {
+        "id": "10k_n15_umapjs_e500",
+        "engine": "umapjs",
+        "nEpochs": 500,
+        "dataset": "10k",
+        "n": 15,
+        "seed": 42,
+        "minDist": 0.1,
+        "warmRun": false,
+        "repeat": false,
+        "save": "10k_n15_umapjs_e500"
+      },
+      "trialA": {
+        "cfg": {
+          "id": "10k_n15_umapjs_e500",
+          "engine": "umapjs",
+          "nEpochs": 500,
+          "dataset": "10k",
+          "n": 15,
+          "seed": 42,
+          "minDist": 0.1,
+          "warmRun": false,
+          "repeat": false,
+          "save": "10k_n15_umapjs_e500"
+        },
+        "startupMs": 9,
+        "workerEvalMs": 6,
+        "run1": {
+          "convertMs": 13,
+          "initMs": 2011,
+          "optimizeMs": 10643.79999999993,
+          "firstStepMs": 1.099999999976717,
+          "totalMs": 12676.79999999993,
+          "wallFromSpawnMs": 12679.800000000047,
+          "epochs": 500,
+          "epochsDone": 500,
+          "cancelled": false,
+          "mem": null,
+          "hash": "8d6ce5f72b621b0ecdb1d4b2011e4ce76b5dfcf2d36511245605c2717bd4aac5"
+        },
+        "idle": {
+          "count": 36,
+          "median": 16.699999999999932,
+          "p95": 16.800000000000068,
+          "max": 16.800000000000068,
+          "mean": 16.669444444444448
+        },
+        "raf": {
+          "count": 760,
+          "median": 16.699999999999818,
+          "p95": 16.799999999999272,
+          "max": 16.80000000000109,
+          "mean": 16.66605263157895
+        }
+      },
+      "memA": {
+        "baseAnonMB": 69.78515625,
+        "peakAnonMB": 393.23828125,
+        "deltaAnonMB": 323.453125,
+        "baseRendererRssMB": 92.74609375,
+        "peakRendererRssMB": 423.265625
+      }
+    },
+    "10k_n50_atlas_def": {
+      "id": "10k_n50_atlas_def",
+      "cfg": {
+        "id": "10k_n50_atlas_def",
+        "engine": "atlas",
+        "nEpochs": 0,
+        "dataset": "10k",
+        "n": 50,
+        "seed": 42,
+        "minDist": 0.1,
+        "warmRun": true,
+        "repeat": true,
+        "save": "10k_n50_atlas_def"
+      },
+      "trialA": {
+        "cfg": {
+          "id": "10k_n50_atlas_def",
+          "engine": "atlas",
+          "nEpochs": 0,
+          "dataset": "10k",
+          "n": 50,
+          "seed": 42,
+          "minDist": 0.1,
+          "warmRun": true,
+          "repeat": true,
+          "save": "10k_n50_atlas_def"
+        },
+        "startupMs": 17.899999999906868,
+        "workerEvalMs": 13.70000000006985,
+        "run1": {
+          "initMs": 1168.8000000000466,
+          "optimizeMs": 28126,
+          "totalMs": 29312.699999999953,
+          "wallFromSpawnMs": 29320,
+          "epochs": 500,
+          "epochsDone": 500,
+          "cancelled": false,
+          "mem": null,
+          "hash": "6c6b65dede1bee11fe12f0c9b52f2f4ca444f2a9efa54b95abcb1f84faf76828"
+        },
+        "idle": {
+          "count": 36,
+          "median": 16.699999999999932,
+          "p95": 16.700000000000045,
+          "max": 16.799999999999955,
+          "mean": 16.663888888888888
+        },
+        "raf": {
+          "count": 1758,
+          "median": 16.699999999999818,
+          "p95": 16.700000000000728,
+          "max": 16.80000000000291,
+          "mean": 16.665984072810012
+        },
+        "run2": {
+          "initMs": 868.0999999999767,
+          "optimizeMs": 28165.70000000007,
+          "totalMs": 29033.800000000047,
+          "epochsDone": 500,
+          "hash": "6c6b65dede1bee11fe12f0c9b52f2f4ca444f2a9efa54b95abcb1f84faf76828"
+        },
+        "sameWorkerBitIdentical": true
+      },
+      "memA": {
+        "baseAnonMB": 69.3671875,
+        "peakAnonMB": 156.20703125,
+        "deltaAnonMB": 86.83984375,
+        "baseRendererRssMB": 92.79296875,
+        "peakRendererRssMB": 188.875
+      },
+      "trialB": {
+        "cfg": {
+          "id": "10k_n50_atlas_def",
+          "engine": "atlas",
+          "nEpochs": 0,
+          "dataset": "10k",
+          "n": 50,
+          "seed": 42,
+          "minDist": 0.1,
+          "warmRun": false,
+          "repeat": true,
+          "save": "10k_n50_atlas_def_B"
+        },
+        "startupMs": 24.899999999906868,
+        "workerEvalMs": 19.199999999953434,
+        "run1": {
+          "initMs": 1220.2000000000698,
+          "optimizeMs": 28318.199999999953,
+          "totalMs": 29563.29999999993,
+          "wallFromSpawnMs": 29578.899999999907,
+          "epochs": 500,
+          "epochsDone": 500,
+          "cancelled": false,
+          "mem": null,
+          "hash": "6c6b65dede1bee11fe12f0c9b52f2f4ca444f2a9efa54b95abcb1f84faf76828"
+        },
+        "idle": {
+          "count": 36,
+          "median": 16.69999999999709,
+          "p95": 16.80000000000291,
+          "max": 16.80000000000291,
+          "mean": 16.66388888888893
+        },
+        "raf": {
+          "count": 1773,
+          "median": 16.69999999999709,
+          "p95": 16.70000000001164,
+          "max": 16.80000000000291,
+          "mean": 16.665989847715732
+        }
+      },
+      "crossWorkerBitIdentical": true
+    },
+    "10k_n50_atlas_e200": {
+      "id": "10k_n50_atlas_e200",
+      "cfg": {
+        "id": "10k_n50_atlas_e200",
+        "engine": "atlas",
+        "nEpochs": 200,
+        "dataset": "10k",
+        "n": 50,
+        "seed": 42,
+        "minDist": 0.1,
+        "warmRun": true,
+        "repeat": true,
+        "save": "10k_n50_atlas_e200"
+      },
+      "trialA": {
+        "cfg": {
+          "id": "10k_n50_atlas_e200",
+          "engine": "atlas",
+          "nEpochs": 200,
+          "dataset": "10k",
+          "n": 50,
+          "seed": 42,
+          "minDist": 0.1,
+          "warmRun": true,
+          "repeat": true,
+          "save": "10k_n50_atlas_e200"
+        },
+        "startupMs": 22.599999999976717,
+        "workerEvalMs": 18.300000000046566,
+        "run1": {
+          "initMs": 1104.1999999999534,
+          "optimizeMs": 11064.199999999953,
+          "totalMs": 12190.999999999884,
+          "wallFromSpawnMs": 12197.599999999977,
+          "epochs": 200,
+          "epochsDone": 200,
+          "cancelled": false,
+          "mem": null,
+          "hash": "0f8431f9f2774a7c9f2eb0a74fb870d5ee5ecef32ec83a51224c68de44233ee4"
+        },
+        "idle": {
+          "count": 36,
+          "median": 16.700000000000045,
+          "p95": 16.700000000000045,
+          "max": 16.799999999999955,
+          "mean": 16.669444444444444
+        },
+        "raf": {
+          "count": 731,
+          "median": 16.699999999999818,
+          "p95": 16.700000000000728,
+          "max": 16.80000000000109,
+          "mean": 16.66593707250342
+        },
+        "run2": {
+          "initMs": 970,
+          "optimizeMs": 11116.399999999907,
+          "totalMs": 12086.399999999907,
+          "epochsDone": 200,
+          "hash": "0f8431f9f2774a7c9f2eb0a74fb870d5ee5ecef32ec83a51224c68de44233ee4"
+        },
+        "sameWorkerBitIdentical": true
+      },
+      "memA": {
+        "baseAnonMB": 69.69140625,
+        "peakAnonMB": 157.7578125,
+        "deltaAnonMB": 88.06640625,
+        "baseRendererRssMB": 92.7578125,
+        "peakRendererRssMB": 187.38671875
+      },
+      "trialB": {
+        "cfg": {
+          "id": "10k_n50_atlas_e200",
+          "engine": "atlas",
+          "nEpochs": 200,
+          "dataset": "10k",
+          "n": 50,
+          "seed": 42,
+          "minDist": 0.1,
+          "warmRun": false,
+          "repeat": true,
+          "save": "10k_n50_atlas_e200_B"
+        },
+        "startupMs": 18.5,
+        "workerEvalMs": 13.699999999953434,
+        "run1": {
+          "initMs": 1091.8000000000466,
+          "optimizeMs": 11144.400000000023,
+          "totalMs": 12254.70000000007,
+          "wallFromSpawnMs": 12259,
+          "epochs": 200,
+          "epochsDone": 200,
+          "cancelled": false,
+          "mem": null,
+          "hash": "0f8431f9f2774a7c9f2eb0a74fb870d5ee5ecef32ec83a51224c68de44233ee4"
+        },
+        "idle": {
+          "count": 36,
+          "median": 16.700000000000728,
+          "p95": 16.80000000000291,
+          "max": 16.80000000000291,
+          "mean": 16.663888888888827
+        },
+        "raf": {
+          "count": 735,
+          "median": 16.69999999999709,
+          "p95": 16.799999999995634,
+          "max": 16.80000000000291,
+          "mean": 16.665986394557827
+        }
+      },
+      "crossWorkerBitIdentical": true
+    },
+    "10k_n50_umapjs_def": {
+      "id": "10k_n50_umapjs_def",
+      "cfg": {
+        "id": "10k_n50_umapjs_def",
+        "engine": "umapjs",
+        "nEpochs": 0,
+        "dataset": "10k",
+        "n": 50,
+        "seed": 42,
+        "minDist": 0.1,
+        "warmRun": true,
+        "repeat": true,
+        "save": "10k_n50_umapjs_def"
+      },
+      "trialA": {
+        "cfg": {
+          "id": "10k_n50_umapjs_def",
+          "engine": "umapjs",
+          "nEpochs": 0,
+          "dataset": "10k",
+          "n": 50,
+          "seed": 42,
+          "minDist": 0.1,
+          "warmRun": true,
+          "repeat": true,
+          "save": "10k_n50_umapjs_def"
+        },
+        "startupMs": 10.5,
+        "workerEvalMs": 6.5,
+        "run1": {
+          "convertMs": 30.800000000046566,
+          "initMs": 8645.199999999953,
+          "optimizeMs": 6305.5,
+          "firstStepMs": 2,
+          "totalMs": 14992,
+          "wallFromSpawnMs": 14998.599999999977,
+          "epochs": 200,
+          "epochsDone": 200,
+          "cancelled": false,
+          "mem": null,
+          "hash": "e2cb4d7258636cda15a58400bb54ecdb88dfa03d268811a9d176d39ea509f507"
+        },
+        "idle": {
+          "count": 36,
+          "median": 16.699999999999932,
+          "p95": 16.799999999999955,
+          "max": 16.800000000000068,
+          "mean": 16.666666666666668
+        },
+        "raf": {
+          "count": 899,
+          "median": 16.69999999999891,
+          "p95": 16.700000000000728,
+          "max": 16.80000000000109,
+          "mean": 16.66607341490545
+        },
+        "run2": {
+          "convertMs": 20.29999999993015,
+          "initMs": 9621,
+          "optimizeMs": 8094.400000000023,
+          "firstStepMs": 3.800000000046566,
+          "totalMs": 17735.699999999953,
+          "epochsDone": 200,
+          "hash": "e2cb4d7258636cda15a58400bb54ecdb88dfa03d268811a9d176d39ea509f507"
+        },
+        "sameWorkerBitIdentical": true
+      },
+      "memA": {
+        "baseAnonMB": 69.5546875,
+        "peakAnonMB": 1078.53515625,
+        "deltaAnonMB": 1008.98046875,
+        "baseRendererRssMB": 92.4375,
+        "peakRendererRssMB": 1108.50390625
+      },
+      "trialB": {
+        "cfg": {
+          "id": "10k_n50_umapjs_def",
+          "engine": "umapjs",
+          "nEpochs": 0,
+          "dataset": "10k",
+          "n": 50,
+          "seed": 42,
+          "minDist": 0.1,
+          "warmRun": false,
+          "repeat": true,
+          "save": "10k_n50_umapjs_def_B"
+        },
+        "startupMs": 10.600000000093132,
+        "workerEvalMs": 7.199999999953434,
+        "run1": {
+          "convertMs": 22.099999999976717,
+          "initMs": 9028.70000000007,
+          "optimizeMs": 6329.79999999993,
+          "firstStepMs": 1.900000000023283,
+          "totalMs": 15391.20000000007,
+          "wallFromSpawnMs": 15396,
+          "epochs": 200,
+          "epochsDone": 200,
+          "cancelled": false,
+          "mem": null,
+          "hash": "e2cb4d7258636cda15a58400bb54ecdb88dfa03d268811a9d176d39ea509f507"
+        },
+        "idle": {
+          "count": 36,
+          "median": 16.69999999999709,
+          "p95": 16.700000000004366,
+          "max": 16.700000000004366,
+          "mean": 16.66388888888893
+        },
+        "raf": {
+          "count": 923,
+          "median": 16.69999999999709,
+          "p95": 16.700000000004366,
+          "max": 16.80000000000291,
+          "mean": 16.66598049837486
+        }
+      },
+      "crossWorkerBitIdentical": true
+    },
+    "10k_n50_umapjs_e500": {
+      "id": "10k_n50_umapjs_e500",
+      "cfg": {
+        "id": "10k_n50_umapjs_e500",
+        "engine": "umapjs",
+        "nEpochs": 500,
+        "dataset": "10k",
+        "n": 50,
+        "seed": 42,
+        "minDist": 0.1,
+        "warmRun": false,
+        "repeat": false,
+        "save": "10k_n50_umapjs_e500"
+      },
+      "trialA": {
+        "cfg": {
+          "id": "10k_n50_umapjs_e500",
+          "engine": "umapjs",
+          "nEpochs": 500,
+          "dataset": "10k",
+          "n": 50,
+          "seed": 42,
+          "minDist": 0.1,
+          "warmRun": false,
+          "repeat": false,
+          "save": "10k_n50_umapjs_e500"
+        },
+        "startupMs": 10.699999999953434,
+        "workerEvalMs": 6.5,
+        "run1": {
+          "convertMs": 30.5,
+          "initMs": 8830.099999999977,
+          "optimizeMs": 16524.400000000023,
+          "firstStepMs": 2,
+          "totalMs": 25395.699999999953,
+          "wallFromSpawnMs": 25402,
+          "epochs": 500,
+          "epochsDone": 500,
+          "cancelled": false,
+          "mem": null,
+          "hash": "a65f3c16a65387a6f8ace6206a9e6eadbbd53fb17c677745f693655ac86fed5d"
+        },
+        "idle": {
+          "count": 36,
+          "median": 16.700000000000045,
+          "p95": 16.800000000000068,
+          "max": 16.800000000000068,
+          "mean": 16.663888888888888
+        },
+        "raf": {
+          "count": 1523,
+          "median": 16.69999999999891,
+          "p95": 16.700000000000728,
+          "max": 16.80000000000291,
+          "mean": 16.665988181221273
+        }
+      },
+      "memA": {
+        "baseAnonMB": 69.8671875,
+        "peakAnonMB": 1079.265625,
+        "deltaAnonMB": 1009.3984375,
+        "baseRendererRssMB": 92.83203125,
+        "peakRendererRssMB": 1108.94140625
+      }
+    },
+    "70k_n15_atlas_def": {
+      "id": "70k_n15_atlas_def",
+      "cfg": {
+        "id": "70k_n15_atlas_def",
+        "engine": "atlas",
+        "nEpochs": 0,
+        "dataset": "70k",
+        "n": 15,
+        "seed": 42,
+        "minDist": 0.1,
+        "warmRun": false,
+        "repeat": false,
+        "save": "70k_n15_atlas_def"
+      },
+      "trialA": {
+        "cfg": {
+          "id": "70k_n15_atlas_def",
+          "engine": "atlas",
+          "nEpochs": 0,
+          "dataset": "70k",
+          "n": 15,
+          "seed": 42,
+          "minDist": 0.1,
+          "warmRun": false,
+          "repeat": false,
+          "save": "70k_n15_atlas_def"
+        },
+        "startupMs": 33.4000000001397,
+        "workerEvalMs": 15,
+        "run1": {
+          "initMs": 4122.199999999953,
+          "optimizeMs": 45018.10000000009,
+          "totalMs": 49173.700000000186,
+          "wallFromSpawnMs": 49175.5,
+          "epochs": 200,
+          "epochsDone": 200,
+          "cancelled": false,
+          "mem": null,
+          "hash": "ff59995ad599fb31768648fc9735915a21c949039caf3f29fa7c5c4b94cc1819"
+        },
+        "idle": {
+          "count": 36,
+          "median": 16.699999999999932,
+          "p95": 16.800000000000068,
+          "max": 16.800000000000068,
+          "mean": 16.663888888888884
+        },
+        "raf": {
+          "count": 2950,
+          "median": 16.69999999999709,
+          "p95": 16.700000000004366,
+          "max": 16.80000000000291,
+          "mean": 16.665966101694917
+        }
+      },
+      "memA": {
+        "baseAnonMB": 69.48828125,
+        "peakAnonMB": 226.71484375,
+        "deltaAnonMB": 157.2265625,
+        "baseRendererRssMB": 93.2421875,
+        "peakRendererRssMB": 261.40625
+      }
+    },
+    "70k_n15_atlas_e200": {
+      "id": "70k_n15_atlas_e200",
+      "cfg": {
+        "id": "70k_n15_atlas_e200",
+        "engine": "atlas",
+        "nEpochs": 200,
+        "dataset": "70k",
+        "n": 15,
+        "seed": 42,
+        "minDist": 0.1,
+        "warmRun": false,
+        "repeat": false,
+        "save": "70k_n15_atlas_e200"
+      },
+      "trialA": {
+        "cfg": {
+          "id": "70k_n15_atlas_e200",
+          "engine": "atlas",
+          "nEpochs": 200,
+          "dataset": "70k",
+          "n": 15,
+          "seed": 42,
+          "minDist": 0.1,
+          "warmRun": false,
+          "repeat": false,
+          "save": "70k_n15_atlas_e200"
+        },
+        "startupMs": 24.600000000093132,
+        "workerEvalMs": 17.100000000093132,
+        "run1": {
+          "initMs": 4036,
+          "optimizeMs": 43028.39999999991,
+          "totalMs": 47089,
+          "wallFromSpawnMs": 47091.30000000005,
+          "epochs": 200,
+          "epochsDone": 200,
+          "cancelled": false,
+          "mem": null,
+          "hash": "ff59995ad599fb31768648fc9735915a21c949039caf3f29fa7c5c4b94cc1819"
+        },
+        "idle": {
+          "count": 36,
+          "median": 16.700000000000045,
+          "p95": 16.700000000000045,
+          "max": 16.700000000000045,
+          "mean": 16.66388888888889
+        },
+        "raf": {
+          "count": 2825,
+          "median": 16.69999999999709,
+          "p95": 16.700000000004366,
+          "max": 16.80000000000291,
+          "mean": 16.666017699115045
+        }
+      },
+      "memA": {
+        "baseAnonMB": 69.77734375,
+        "peakAnonMB": 226.02734375,
+        "deltaAnonMB": 156.25,
+        "baseRendererRssMB": 92.3984375,
+        "peakRendererRssMB": 260.2734375
+      }
+    },
+    "70k_n15_umapjs_def": {
+      "id": "70k_n15_umapjs_def",
+      "cfg": {
+        "id": "70k_n15_umapjs_def",
+        "engine": "umapjs",
+        "nEpochs": 0,
+        "dataset": "70k",
+        "n": 15,
+        "seed": 42,
+        "minDist": 0.1,
+        "warmRun": false,
+        "repeat": false,
+        "save": "70k_n15_umapjs_def"
+      },
+      "trialA": {
+        "cfg": {
+          "id": "70k_n15_umapjs_def",
+          "engine": "umapjs",
+          "nEpochs": 0,
+          "dataset": "70k",
+          "n": 15,
+          "seed": 42,
+          "minDist": 0.1,
+          "warmRun": false,
+          "repeat": false,
+          "save": "70k_n15_umapjs_def"
+        },
+        "startupMs": 18.0999999998603,
+        "workerEvalMs": 14.199999999953434,
+        "run1": {
+          "convertMs": 136.10000000009313,
+          "initMs": 29244.100000000093,
+          "optimizeMs": 44983,
+          "firstStepMs": 2.5999999998603016,
+          "totalMs": 74381.30000000005,
+          "wallFromSpawnMs": 74383.59999999986,
+          "epochs": 200,
+          "epochsDone": 200,
+          "cancelled": false,
+          "mem": null,
+          "hash": "00132a258825ecb6ddb966b501eec0112565a558ed1e09c1ae57d627abc7b0db"
+        },
+        "idle": {
+          "count": 36,
+          "median": 16.700000000000045,
+          "p95": 16.799999999999955,
+          "max": 16.799999999999955,
+          "mean": 16.66388888888889
+        },
+        "raf": {
+          "count": 4463,
+          "median": 16.69999999999709,
+          "p95": 16.70000000001164,
+          "max": 16.80000000000291,
+          "mean": 16.666009410710284
+        }
+      },
+      "memA": {
+        "baseAnonMB": 69.4765625,
+        "peakAnonMB": 1915.25390625,
+        "deltaAnonMB": 1845.77734375,
+        "baseRendererRssMB": 93.1796875,
+        "peakRendererRssMB": 1951.98046875
+      }
+    },
+    "70k_n50_atlas_def": {
+      "id": "70k_n50_atlas_def",
+      "cfg": {
+        "id": "70k_n50_atlas_def",
+        "engine": "atlas",
+        "nEpochs": 0,
+        "dataset": "70k",
+        "n": 50,
+        "seed": 42,
+        "minDist": 0.1,
+        "warmRun": false,
+        "repeat": false,
+        "save": "70k_n50_atlas_def"
+      },
+      "trialA": {
+        "cfg": {
+          "id": "70k_n50_atlas_def",
+          "engine": "atlas",
+          "nEpochs": 0,
+          "dataset": "70k",
+          "n": 50,
+          "seed": 42,
+          "minDist": 0.1,
+          "warmRun": false,
+          "repeat": false,
+          "save": "70k_n50_atlas_def"
+        },
+        "startupMs": 26.9000000001397,
+        "workerEvalMs": 21,
+        "run1": {
+          "initMs": 9992,
+          "optimizeMs": 63635.5,
+          "totalMs": 73654.40000000014,
+          "wallFromSpawnMs": 73659.5,
+          "epochs": 200,
+          "epochsDone": 200,
+          "cancelled": false,
+          "mem": null,
+          "hash": "d76e5fff597e2ce85325b475dc54a1be076bb574c35d2f90f51132d02198355b"
+        },
+        "idle": {
+          "count": 36,
+          "median": 16.700000000000045,
+          "p95": 16.700000000000045,
+          "max": 16.800000000000068,
+          "mean": 16.666666666666668
+        },
+        "raf": {
+          "count": 4420,
+          "median": 16.69999999999709,
+          "p95": 16.799999999995634,
+          "max": 16.80000000000291,
+          "mean": 16.66601809954751
+        }
+      },
+      "memA": {
+        "baseAnonMB": 69.46484375,
+        "peakAnonMB": 482.65625,
+        "deltaAnonMB": 413.19140625,
+        "baseRendererRssMB": 92.71484375,
+        "peakRendererRssMB": 517.73046875
+      }
+    },
+    "70k_n50_atlas_e200": {
+      "id": "70k_n50_atlas_e200",
+      "cfg": {
+        "id": "70k_n50_atlas_e200",
+        "engine": "atlas",
+        "nEpochs": 200,
+        "dataset": "70k",
+        "n": 50,
+        "seed": 42,
+        "minDist": 0.1,
+        "warmRun": false,
+        "repeat": false,
+        "save": "70k_n50_atlas_e200"
+      },
+      "trialA": {
+        "cfg": {
+          "id": "70k_n50_atlas_e200",
+          "engine": "atlas",
+          "nEpochs": 200,
+          "dataset": "70k",
+          "n": 50,
+          "seed": 42,
+          "minDist": 0.1,
+          "warmRun": false,
+          "repeat": false,
+          "save": "70k_n50_atlas_e200"
+        },
+        "startupMs": 25.700000000186265,
+        "workerEvalMs": 21,
+        "run1": {
+          "initMs": 10418.5,
+          "optimizeMs": 61789.89999999991,
+          "totalMs": 72234.1000000001,
+          "wallFromSpawnMs": 72236.30000000005,
+          "epochs": 200,
+          "epochsDone": 200,
+          "cancelled": false,
+          "mem": null,
+          "hash": "d76e5fff597e2ce85325b475dc54a1be076bb574c35d2f90f51132d02198355b"
+        },
+        "idle": {
+          "count": 36,
+          "median": 16.700000000000045,
+          "p95": 16.700000000000045,
+          "max": 16.800000000000182,
+          "mean": 16.666666666666668
+        },
+        "raf": {
+          "count": 4334,
+          "median": 16.69999999999709,
+          "p95": 16.70000000001164,
+          "max": 16.80000000000291,
+          "mean": 16.666012921089063
+        }
+      },
+      "memA": {
+        "baseAnonMB": 69.5546875,
+        "peakAnonMB": 484.0625,
+        "deltaAnonMB": 414.5078125,
+        "baseRendererRssMB": 92.6171875,
+        "peakRendererRssMB": 519.12890625
+      }
+    },
+    "70k_n50_umapjs_def": {
+      "id": "70k_n50_umapjs_def",
+      "cfg": {
+        "id": "70k_n50_umapjs_def",
+        "engine": "umapjs",
+        "nEpochs": 0,
+        "dataset": "70k",
+        "n": 50,
+        "seed": 42,
+        "minDist": 0.1,
+        "warmRun": false,
+        "repeat": false,
+        "save": "70k_n50_umapjs_def"
+      },
+      "trialA": {
+        "cfg": {
+          "id": "70k_n50_umapjs_def",
+          "engine": "umapjs",
+          "nEpochs": 0,
+          "dataset": "70k",
+          "n": 50,
+          "seed": 42,
+          "minDist": 0.1,
+          "warmRun": false,
+          "repeat": false,
+          "save": "70k_n50_umapjs_def"
+        },
+        "startupMs": 10.600000000093132,
+        "workerEvalMs": 6.399999999906868,
+        "run1": {
+          "convertMs": 193.60000000009313,
+          "initMs": 119907,
+          "optimizeMs": 91815.29999999981,
+          "firstStepMs": 7.599999999860302,
+          "totalMs": 211926.5,
+          "wallFromSpawnMs": 211928.90000000014,
+          "epochs": 200,
+          "epochsDone": 200,
+          "cancelled": false,
+          "mem": null,
+          "hash": "47a917caa4a418546038a67310ca7a2cf60d8973b70a69a39e0d630c76b957a0"
+        },
+        "idle": {
+          "count": 36,
+          "median": 16.700000000000045,
+          "p95": 16.800000000000068,
+          "max": 16.800000000000182,
+          "mean": 16.666666666666668
+        },
+        "raf": {
+          "count": 12716,
+          "median": 16.69999999999709,
+          "p95": 16.70000000001164,
+          "max": 16.800000000017462,
+          "mean": 16.6659955960994
+        }
+      },
+      "memA": {
+        "baseAnonMB": 69.59765625,
+        "peakAnonMB": 3551.23046875,
+        "deltaAnonMB": 3481.6328125,
+        "baseRendererRssMB": 93.21484375,
+        "peakRendererRssMB": 3588.53125
+      }
+    },
+    "10k_n15_atlas_def_random": {
+      "id": "10k_n15_atlas_def_random",
+      "cfg": {
+        "id": "10k_n15_atlas_def_random",
+        "engine": "atlas",
+        "nEpochs": 0,
+        "dataset": "10k",
+        "n": 15,
+        "seed": 42,
+        "minDist": 0.1,
+        "initializeMethod": "random",
+        "save": "10k_n15_atlas_def_random"
+      },
+      "trialA": {
+        "cfg": {
+          "id": "10k_n15_atlas_def_random",
+          "engine": "atlas",
+          "nEpochs": 0,
+          "dataset": "10k",
+          "n": 15,
+          "seed": 42,
+          "minDist": 0.1,
+          "initializeMethod": "random",
+          "save": "10k_n15_atlas_def_random"
+        },
+        "startupMs": 28.800000000046566,
+        "workerEvalMs": 18.800000000046566,
+        "run1": {
+          "initMs": 171.4000000001397,
+          "optimizeMs": 18398.199999999953,
+          "totalMs": 18598.40000000014,
+          "wallFromSpawnMs": 18601.600000000093,
+          "epochs": 500,
+          "epochsDone": 500,
+          "cancelled": false,
+          "mem": null,
+          "hash": "2b0998a54896b5734bb237b74bf59b6d19066b299350cf0eb2d61339eabe1b69"
+        },
+        "idle": {
+          "count": 36,
+          "median": 16.699999999999932,
+          "p95": 16.800000000000068,
+          "max": 16.800000000000182,
+          "mean": 16.666666666666668
+        },
+        "raf": {
+          "count": 1115,
+          "median": 16.699999999999818,
+          "p95": 16.700000000000728,
+          "max": 16.80000000000291,
+          "mean": 16.666008968609866
+        }
+      },
+      "memA": {
+        "baseAnonMB": 69.71484375,
+        "peakAnonMB": 121.43359375,
+        "deltaAnonMB": 51.71875,
+        "baseRendererRssMB": 92.18359375,
+        "peakRendererRssMB": 149.953125
+      }
+    },
+    "10k_n15_atlas_step200": {
+      "id": "10k_n15_atlas_step200",
+      "cfg": {
+        "id": "10k_n15_atlas_step200",
+        "engine": "atlas",
+        "nEpochs": 200,
+        "mode": "step",
+        "chunk": 10,
+        "snapshots": true,
+        "dataset": "10k",
+        "n": 15,
+        "seed": 42,
+        "minDist": 0.1,
+        "save": "10k_n15_atlas_step200"
+      },
+      "trialA": {
+        "cfg": {
+          "id": "10k_n15_atlas_step200",
+          "engine": "atlas",
+          "nEpochs": 200,
+          "mode": "step",
+          "chunk": 10,
+          "snapshots": true,
+          "dataset": "10k",
+          "n": 15,
+          "seed": 42,
+          "minDist": 0.1,
+          "save": "10k_n15_atlas_step200"
+        },
+        "startupMs": 18,
+        "workerEvalMs": 14.100000000093132,
+        "run1": {
+          "initMs": 643.8999999999069,
+          "optimizeMs": 7369.5,
+          "totalMs": 8031.399999999907,
+          "wallFromSpawnMs": 8032.699999999953,
+          "epochs": 200,
+          "epochsDone": 200,
+          "cancelled": false,
+          "mem": null,
+          "hash": "eafae1349ac09613e4c31925eb285fa0f66c1034d79fa36f91f34780371b9301"
+        },
+        "idle": {
+          "count": 36,
+          "median": 16.699999999999932,
+          "p95": 16.700000000000045,
+          "max": 16.800000000000068,
+          "mean": 16.663888888888884
+        },
+        "raf": {
+          "count": 481,
+          "median": 16.699999999999818,
+          "p95": 16.799999999999272,
+          "max": 16.80000000000109,
+          "mean": 16.665904365904368
+        },
+        "snapshots": {
+          "count": 20,
+          "firstAtMs": 916.1999999999534,
+          "lastAtMs": 8014.199999999953
+        }
+      },
+      "memA": {
+        "baseAnonMB": 69.96875,
+        "peakAnonMB": 125.9453125,
+        "deltaAnonMB": 55.9765625,
+        "baseRendererRssMB": 91.82421875,
+        "peakRendererRssMB": 153.54296875
+      }
+    },
+    "10k_n15_atlas_stepdecay200": {
+      "id": "10k_n15_atlas_stepdecay200",
+      "cfg": {
+        "id": "10k_n15_atlas_stepdecay200",
+        "engine": "atlas",
+        "nEpochs": 200,
+        "mode": "stepdecay",
+        "chunk": 10,
+        "snapshots": true,
+        "dataset": "10k",
+        "n": 15,
+        "seed": 42,
+        "minDist": 0.1,
+        "save": "10k_n15_atlas_stepdecay200"
+      },
+      "trialA": {
+        "cfg": {
+          "id": "10k_n15_atlas_stepdecay200",
+          "engine": "atlas",
+          "nEpochs": 200,
+          "mode": "stepdecay",
+          "chunk": 10,
+          "snapshots": true,
+          "dataset": "10k",
+          "n": 15,
+          "seed": 42,
+          "minDist": 0.1,
+          "save": "10k_n15_atlas_stepdecay200"
+        },
+        "startupMs": 19.300000000046566,
+        "workerEvalMs": 15,
+        "run1": {
+          "initMs": 655.7000000001863,
+          "optimizeMs": 7888.699999999953,
+          "totalMs": 8563.700000000186,
+          "wallFromSpawnMs": 8564.899999999907,
+          "epochs": 200,
+          "epochsDone": 200,
+          "cancelled": false,
+          "mem": null,
+          "hash": "c4911cbf714dbd7e3e50e40f07796ab51c59ed51aff16916ca06f5be7759ebdf"
+        },
+        "idle": {
+          "count": 36,
+          "median": 16.699999999999932,
+          "p95": 16.700000000000045,
+          "max": 16.799999999999955,
+          "mean": 16.66666666666667
+        },
+        "raf": {
+          "count": 513,
+          "median": 16.699999999999818,
+          "p95": 16.700000000000728,
+          "max": 16.800000000000182,
+          "mean": 16.666276803118908
+        },
+        "snapshots": {
+          "count": 20,
+          "firstAtMs": 933,
+          "lastAtMs": 8545
+        }
+      },
+      "memA": {
+        "baseAnonMB": 69.5078125,
+        "peakAnonMB": 125.5,
+        "deltaAnonMB": 55.9921875,
+        "baseRendererRssMB": 92.734375,
+        "peakRendererRssMB": 154.05078125
+      }
+    },
+    "10k_n15_atlas_stepdecay200_c1": {
+      "id": "10k_n15_atlas_stepdecay200_c1",
+      "cfg": {
+        "id": "10k_n15_atlas_stepdecay200_c1",
+        "engine": "atlas",
+        "nEpochs": 200,
+        "mode": "stepdecay",
+        "chunk": 1,
+        "dataset": "10k",
+        "n": 15,
+        "seed": 42,
+        "minDist": 0.1,
+        "save": "10k_n15_atlas_stepdecay200_c1"
+      },
+      "trialA": {
+        "cfg": {
+          "id": "10k_n15_atlas_stepdecay200_c1",
+          "engine": "atlas",
+          "nEpochs": 200,
+          "mode": "stepdecay",
+          "chunk": 1,
+          "dataset": "10k",
+          "n": 15,
+          "seed": 42,
+          "minDist": 0.1,
+          "save": "10k_n15_atlas_stepdecay200_c1"
+        },
+        "startupMs": 21.9000000001397,
+        "workerEvalMs": 17.5,
+        "run1": {
+          "initMs": 702.6999999999534,
+          "optimizeMs": 8068.100000000093,
+          "totalMs": 8792.700000000186,
+          "wallFromSpawnMs": 8794,
+          "epochs": 200,
+          "epochsDone": 200,
+          "cancelled": false,
+          "mem": null,
+          "hash": "58bcb08a6016b094adf0294b11a924c3268a922ee8524dc93b69e8d9344fe077"
+        },
+        "idle": {
+          "count": 36,
+          "median": 16.699999999999932,
+          "p95": 16.700000000000045,
+          "max": 16.800000000000068,
+          "mean": 16.66388888888889
+        },
+        "raf": {
+          "count": 527,
+          "median": 16.699999999999818,
+          "p95": 16.700000000000728,
+          "max": 16.80000000000109,
+          "mean": 16.666034155597725
+        }
+      },
+      "memA": {
+        "baseAnonMB": 69.8359375,
+        "peakAnonMB": 119.75,
+        "deltaAnonMB": 49.9140625,
+        "baseRendererRssMB": 92.8203125,
+        "peakRendererRssMB": 148.42578125
+      }
+    },
+    "10k_n15_atlas_cancel_run": {
+      "id": "10k_n15_atlas_cancel_run",
+      "cfg": {
+        "id": "10k_n15_atlas_cancel_run",
+        "engine": "atlas",
+        "nEpochs": 0,
+        "mode": "run",
+        "cancelAfterMs": 2000,
+        "dataset": "10k",
+        "n": 15,
+        "seed": 42,
+        "minDist": 0.1
+      },
+      "trialA": {
+        "cfg": {
+          "id": "10k_n15_atlas_cancel_run",
+          "engine": "atlas",
+          "nEpochs": 0,
+          "mode": "run",
+          "cancelAfterMs": 2000,
+          "dataset": "10k",
+          "n": 15,
+          "seed": 42,
+          "minDist": 0.1
+        },
+        "startupMs": 27.5,
+        "workerEvalMs": 22.09999999962747,
+        "run1": {
+          "initMs": 721.1000000000931,
+          "optimizeMs": 19286,
+          "totalMs": 20034.600000000093,
+          "wallFromSpawnMs": 20036,
+          "epochs": 500,
+          "epochsDone": 500,
+          "cancelled": false,
+          "mem": null,
+          "hash": "46991b5f49b893ec69c8c50a55a529ee902db0c66a25d38e3fab40812aa98308"
+        },
+        "idle": {
+          "count": 36,
+          "median": 16.700000000000045,
+          "p95": 16.799999999999955,
+          "max": 16.800000000000068,
+          "mean": 16.669444444444444
+        },
+        "raf": {
+          "count": 1201,
+          "median": 16.699999999999818,
+          "p95": 16.700000000000728,
+          "max": 16.80000000000291,
+          "mean": 16.666028309741883
+        },
+        "cancel": {
+          "requestedAfterMs": 2000,
+          "cancelAtMs": 2000.3000000002794,
+          "resultAtMs": 20008.30000000028,
+          "epochsDone": 500,
+          "cancelled": false
+        }
+      },
+      "memA": {
+        "baseAnonMB": 69.83984375,
+        "peakAnonMB": 119.09375,
+        "deltaAnonMB": 49.25390625,
+        "baseRendererRssMB": 93.1953125,
+        "peakRendererRssMB": 147.87890625
+      }
+    },
+    "10k_n15_atlas_cancel_stepdecay_noyield": {
+      "id": "10k_n15_atlas_cancel_stepdecay_noyield",
+      "cfg": {
+        "id": "10k_n15_atlas_cancel_stepdecay_noyield",
+        "engine": "atlas",
+        "nEpochs": 200,
+        "mode": "stepdecay",
+        "chunk": 10,
+        "yieldEvery": 0,
+        "cancelAfterMs": 2000,
+        "dataset": "10k",
+        "n": 15,
+        "seed": 42,
+        "minDist": 0.1
+      },
+      "trialA": {
+        "cfg": {
+          "id": "10k_n15_atlas_cancel_stepdecay_noyield",
+          "engine": "atlas",
+          "nEpochs": 200,
+          "mode": "stepdecay",
+          "chunk": 10,
+          "yieldEvery": 0,
+          "cancelAfterMs": 2000,
+          "dataset": "10k",
+          "n": 15,
+          "seed": 42,
+          "minDist": 0.1
+        },
+        "startupMs": 23.799999999813735,
+        "workerEvalMs": 16.600000000093132,
+        "run1": {
+          "initMs": 634.2999999998137,
+          "optimizeMs": 7391.5,
+          "totalMs": 8049.5999999996275,
+          "wallFromSpawnMs": 8050.899999999907,
+          "epochs": 200,
+          "epochsDone": 200,
+          "cancelled": false,
+          "mem": null,
+          "hash": "c4911cbf714dbd7e3e50e40f07796ab51c59ed51aff16916ca06f5be7759ebdf"
+        },
+        "idle": {
+          "count": 36,
+          "median": 16.699999999999932,
+          "p95": 16.700000000000045,
+          "max": 16.800000000000068,
+          "mean": 16.666666666666668
+        },
+        "raf": {
+          "count": 481,
+          "median": 16.699999999999818,
+          "p95": 16.700000000000728,
+          "max": 33.399999999999636,
+          "mean": 16.700415800415797
+        },
+        "cancel": {
+          "requestedAfterMs": 2000,
+          "cancelAtMs": 2000.2999999998137,
+          "resultAtMs": 8026.899999999907,
+          "epochsDone": 200,
+          "cancelled": false
+        }
+      },
+      "memA": {
+        "baseAnonMB": 69.8359375,
+        "peakAnonMB": 118.90234375,
+        "deltaAnonMB": 49.06640625,
+        "baseRendererRssMB": 92.6796875,
+        "peakRendererRssMB": 147.48046875
+      }
+    },
+    "10k_n15_atlas_cancel_stepdecay_yield": {
+      "id": "10k_n15_atlas_cancel_stepdecay_yield",
+      "cfg": {
+        "id": "10k_n15_atlas_cancel_stepdecay_yield",
+        "engine": "atlas",
+        "nEpochs": 200,
+        "mode": "stepdecay",
+        "chunk": 10,
+        "yieldEvery": 1,
+        "cancelAfterMs": 2000,
+        "dataset": "10k",
+        "n": 15,
+        "seed": 42,
+        "minDist": 0.1
+      },
+      "trialA": {
+        "cfg": {
+          "id": "10k_n15_atlas_cancel_stepdecay_yield",
+          "engine": "atlas",
+          "nEpochs": 200,
+          "mode": "stepdecay",
+          "chunk": 10,
+          "yieldEvery": 1,
+          "cancelAfterMs": 2000,
+          "dataset": "10k",
+          "n": 15,
+          "seed": 42,
+          "minDist": 0.1
+        },
+        "startupMs": 23,
+        "workerEvalMs": 18.199999999720603,
+        "run1": {
+          "initMs": 640,
+          "optimizeMs": 1426.2999999998137,
+          "totalMs": 2089.2999999998137,
+          "wallFromSpawnMs": 2090.399999999907,
+          "epochs": 200,
+          "epochsDone": 40,
+          "cancelled": true,
+          "mem": null,
+          "hash": "d6e8bb59e1d8ed8ab951a9346e271a0ae6ef5956d4c67baea9d398541c9f410f"
+        },
+        "idle": {
+          "count": 36,
+          "median": 16.699999999999932,
+          "p95": 16.700000000000045,
+          "max": 16.700000000000045,
+          "mean": 16.663888888888888
+        },
+        "raf": {
+          "count": 125,
+          "median": 16.699999999999818,
+          "p95": 16.700000000000273,
+          "max": 16.800000000000182,
+          "mean": 16.666400000000003
+        },
+        "cancel": {
+          "requestedAfterMs": 2000,
+          "cancelAtMs": 2000.3999999999069,
+          "resultAtMs": 2067.2999999998137,
+          "epochsDone": 40,
+          "cancelled": true
+        }
+      },
+      "memA": {
+        "baseAnonMB": 69.77734375,
+        "peakAnonMB": 118.90625,
+        "deltaAnonMB": 49.12890625,
+        "baseRendererRssMB": 93.1796875,
+        "peakRendererRssMB": 147.84375
+      }
+    },
+    "10k_n15_umapjs_cancel_noyield": {
+      "id": "10k_n15_umapjs_cancel_noyield",
+      "cfg": {
+        "id": "10k_n15_umapjs_cancel_noyield",
+        "engine": "umapjs",
+        "nEpochs": 0,
+        "yieldEvery": 0,
+        "cancelAfterMs": 3000,
+        "dataset": "10k",
+        "n": 15,
+        "seed": 42,
+        "minDist": 0.1
+      },
+      "trialA": {
+        "cfg": {
+          "id": "10k_n15_umapjs_cancel_noyield",
+          "engine": "umapjs",
+          "nEpochs": 0,
+          "yieldEvery": 0,
+          "cancelAfterMs": 3000,
+          "dataset": "10k",
+          "n": 15,
+          "seed": 42,
+          "minDist": 0.1
+        },
+        "startupMs": 12.5,
+        "workerEvalMs": 8.399999999906868,
+        "run1": {
+          "convertMs": 16.40000000037253,
+          "initMs": 2736.5,
+          "optimizeMs": 4312.699999999721,
+          "firstStepMs": 1.1999999997206032,
+          "totalMs": 7078.100000000093,
+          "wallFromSpawnMs": 7081.200000000186,
+          "epochs": 200,
+          "epochsDone": 200,
+          "cancelled": false,
+          "mem": null,
+          "hash": "f825fc86218ba525408142a9ea356aee50dd76cb8811db41cad657cbeae74a62"
+        },
+        "idle": {
+          "count": 36,
+          "median": 16.699999999999932,
+          "p95": 16.799999999999955,
+          "max": 16.800000000000068,
+          "mean": 16.669444444444444
+        },
+        "raf": {
+          "count": 423,
+          "median": 16.699999999999818,
+          "p95": 16.700000000000728,
+          "max": 16.800000000000182,
+          "mean": 16.66595744680851
+        },
+        "cancel": {
+          "requestedAfterMs": 3000,
+          "cancelAtMs": 3000.2999999998137,
+          "resultAtMs": 7068.600000000093,
+          "epochsDone": 200,
+          "cancelled": false
+        }
+      },
+      "memA": {
+        "baseAnonMB": 69.796875,
+        "peakAnonMB": 392.74609375,
+        "deltaAnonMB": 322.94921875,
+        "baseRendererRssMB": 93.37890625,
+        "peakRendererRssMB": 423.68359375
+      }
+    },
+    "10k_n15_umapjs_cancel_yield5": {
+      "id": "10k_n15_umapjs_cancel_yield5",
+      "cfg": {
+        "id": "10k_n15_umapjs_cancel_yield5",
+        "engine": "umapjs",
+        "nEpochs": 0,
+        "yieldEvery": 5,
+        "cancelAfterMs": 3000,
+        "dataset": "10k",
+        "n": 15,
+        "seed": 42,
+        "minDist": 0.1
+      },
+      "trialA": {
+        "cfg": {
+          "id": "10k_n15_umapjs_cancel_yield5",
+          "engine": "umapjs",
+          "nEpochs": 0,
+          "yieldEvery": 5,
+          "cancelAfterMs": 3000,
+          "dataset": "10k",
+          "n": 15,
+          "seed": 42,
+          "minDist": 0.1
+        },
+        "startupMs": 14.5,
+        "workerEvalMs": 9.599999999627471,
+        "run1": {
+          "convertMs": 15.300000000279397,
+          "initMs": 2716.2999999998137,
+          "optimizeMs": 311.3000000002794,
+          "firstStepMs": 1.3000000002793968,
+          "totalMs": 3057.4000000003725,
+          "wallFromSpawnMs": 3059,
+          "epochs": 200,
+          "epochsDone": 15,
+          "cancelled": true,
+          "mem": null,
+          "hash": "7e4dffbb21fc833ae7a4c1e67d273b4013c589efb6e9af6e7c218d195f1b5cde"
+        },
+        "idle": {
+          "count": 35,
+          "median": 16.699999999999932,
+          "p95": 16.799999999999955,
+          "max": 16.799999999999955,
+          "mean": 16.662857142857145
+        },
+        "raf": {
+          "count": 183,
+          "median": 16.699999999999818,
+          "p95": 16.700000000000273,
+          "max": 16.800000000000182,
+          "mean": 16.666120218579234
+        },
+        "cancel": {
+          "requestedAfterMs": 3000,
+          "cancelAtMs": 3000.3000000002794,
+          "resultAtMs": 3044.3000000002794,
+          "epochsDone": 15,
+          "cancelled": true
+        }
+      },
+      "memA": {
+        "baseAnonMB": 69.5859375,
+        "peakAnonMB": 393.8515625,
+        "deltaAnonMB": 324.265625,
+        "baseRendererRssMB": 92.43359375,
+        "peakRendererRssMB": 424.01953125
+      }
+    },
+    "10k_n15_atlas_stepdecay200_yield": {
+      "id": "10k_n15_atlas_stepdecay200_yield",
+      "cfg": {
+        "id": "10k_n15_atlas_stepdecay200_yield",
+        "engine": "atlas",
+        "nEpochs": 200,
+        "mode": "stepdecay",
+        "chunk": 10,
+        "yieldEvery": 1,
+        "snapshots": true,
+        "save": "10k_n15_atlas_stepdecay200_yield",
+        "dataset": "10k",
+        "n": 15,
+        "seed": 42,
+        "minDist": 0.1
+      },
+      "trialA": {
+        "cfg": {
+          "id": "10k_n15_atlas_stepdecay200_yield",
+          "engine": "atlas",
+          "nEpochs": 200,
+          "mode": "stepdecay",
+          "chunk": 10,
+          "yieldEvery": 1,
+          "snapshots": true,
+          "save": "10k_n15_atlas_stepdecay200_yield",
+          "dataset": "10k",
+          "n": 15,
+          "seed": 42,
+          "minDist": 0.1
+        },
+        "startupMs": 25,
+        "workerEvalMs": 19.700000000186265,
+        "run1": {
+          "initMs": 666.3999999999069,
+          "optimizeMs": 7599.399999999907,
+          "totalMs": 8290.799999999814,
+          "wallFromSpawnMs": 8292.100000000093,
+          "epochs": 200,
+          "epochsDone": 200,
+          "cancelled": false,
+          "mem": null,
+          "hash": "c4911cbf714dbd7e3e50e40f07796ab51c59ed51aff16916ca06f5be7759ebdf"
+        },
+        "idle": {
+          "count": 36,
+          "median": 16.699999999999932,
+          "p95": 16.800000000000068,
+          "max": 16.800000000000068,
+          "mean": 16.666666666666668
+        },
+        "raf": {
+          "count": 497,
+          "median": 16.699999999999818,
+          "p95": 16.700000000000728,
+          "max": 16.80000000000109,
+          "mean": 16.665995975855132
+        },
+        "snapshots": {
+          "count": 20,
+          "firstAtMs": 941.3999999999069,
+          "lastAtMs": 8266.399999999907
+        }
+      },
+      "memA": {
+        "baseAnonMB": 69.48828125,
+        "peakAnonMB": 126.0625,
+        "deltaAnonMB": 56.57421875,
+        "baseRendererRssMB": 92.2578125,
+        "peakRendererRssMB": 154.484375
+      }
+    },
+    "10k_n15_umapjs_def_yield5": {
+      "id": "10k_n15_umapjs_def_yield5",
+      "cfg": {
+        "id": "10k_n15_umapjs_def_yield5",
+        "engine": "umapjs",
+        "nEpochs": 0,
+        "yieldEvery": 5,
+        "save": "10k_n15_umapjs_def_yield5",
+        "dataset": "10k",
+        "n": 15,
+        "seed": 42,
+        "minDist": 0.1
+      },
+      "trialA": {
+        "cfg": {
+          "id": "10k_n15_umapjs_def_yield5",
+          "engine": "umapjs",
+          "nEpochs": 0,
+          "yieldEvery": 5,
+          "save": "10k_n15_umapjs_def_yield5",
+          "dataset": "10k",
+          "n": 15,
+          "seed": 42,
+          "minDist": 0.1
+        },
+        "startupMs": 13.300000000279397,
+        "workerEvalMs": 8.799999999813735,
+        "run1": {
+          "convertMs": 20.800000000279397,
+          "initMs": 2505.1999999997206,
+          "optimizeMs": 4291.899999999907,
+          "firstStepMs": 1.2000000001862645,
+          "totalMs": 6831.200000000186,
+          "wallFromSpawnMs": 6832.800000000279,
+          "epochs": 200,
+          "epochsDone": 200,
+          "cancelled": false,
+          "mem": null,
+          "hash": "f825fc86218ba525408142a9ea356aee50dd76cb8811db41cad657cbeae74a62"
+        },
+        "idle": {
+          "count": 36,
+          "median": 16.700000000000045,
+          "p95": 16.700000000000045,
+          "max": 16.799999999999955,
+          "mean": 16.666666666666668
+        },
+        "raf": {
+          "count": 409,
+          "median": 16.699999999999818,
+          "p95": 16.799999999999272,
+          "max": 16.800000000000182,
+          "mean": 16.66577017114914
+        }
+      },
+      "memA": {
+        "baseAnonMB": 69.41796875,
+        "peakAnonMB": 393.4296875,
+        "deltaAnonMB": 324.01171875,
+        "baseRendererRssMB": 93.2109375,
+        "peakRendererRssMB": 424.3203125
+      }
+    },
+    "10k_n15_atlas_gpu_swiftshader_e50": {
+      "id": "10k_n15_atlas_gpu_swiftshader_e50",
+      "cfg": {
+        "id": "10k_n15_atlas_gpu_swiftshader_e50",
+        "engine": "atlas",
+        "nEpochs": 50,
+        "gpu": true,
+        "launchArgs": [
+          "--enable-unsafe-webgpu",
+          "--enable-features=Vulkan",
+          "--use-vulkan=swiftshader",
+          "--use-angle=swiftshader",
+          "--disable-vulkan-surface"
+        ],
+        "save": "10k_n15_atlas_gpu_swiftshader_e50",
+        "dataset": "10k",
+        "n": 15,
+        "seed": 42,
+        "minDist": 0.1
+      },
+      "trialA": {
+        "cfg": {
+          "id": "10k_n15_atlas_gpu_swiftshader_e50",
+          "engine": "atlas",
+          "nEpochs": 50,
+          "gpu": true,
+          "launchArgs": [
+            "--enable-unsafe-webgpu",
+            "--enable-features=Vulkan",
+            "--use-vulkan=swiftshader",
+            "--use-angle=swiftshader",
+            "--disable-vulkan-surface"
+          ],
+          "save": "10k_n15_atlas_gpu_swiftshader_e50",
+          "dataset": "10k",
+          "n": 15,
+          "seed": 42,
+          "minDist": 0.1
+        },
+        "startupMs": 26.799999999813735,
+        "workerEvalMs": 20.90000000037253,
+        "run1": {
+          "initMs": 995.5999999996275,
+          "optimizeMs": 2324.3000000002794,
+          "totalMs": 3346.6999999997206,
+          "wallFromSpawnMs": 3350.1999999997206,
+          "epochs": 50,
+          "epochsDone": 50,
+          "cancelled": false,
+          "mem": null,
+          "hash": "9d7820c68a00388731ef6f6f5fbb8c9bf918638cc78816e1b053fbb7919600d2"
+        },
+        "idle": {
+          "count": 36,
+          "median": 16.699999999999932,
+          "p95": 16.700000000000045,
+          "max": 16.700000000000045,
+          "mean": 16.66388888888889
+        },
+        "raf": {
+          "count": 200,
+          "median": 16.699999999999818,
+          "p95": 16.700000000000728,
+          "max": 16.800000000000182,
+          "mean": 16.666
+        }
+      },
+      "memA": {
+        "baseAnonMB": 70.18359375,
+        "peakAnonMB": 145.51171875,
+        "deltaAnonMB": 75.328125,
+        "baseRendererRssMB": 93.46875,
+        "peakRendererRssMB": 165.06640625
+      }
+    },
+    "10k_n15_atlas_cpu_e50": {
+      "id": "10k_n15_atlas_cpu_e50",
+      "cfg": {
+        "id": "10k_n15_atlas_cpu_e50",
+        "engine": "atlas",
+        "nEpochs": 50,
+        "save": "10k_n15_atlas_cpu_e50",
+        "dataset": "10k",
+        "n": 15,
+        "seed": 42,
+        "minDist": 0.1
+      },
+      "trialA": {
+        "cfg": {
+          "id": "10k_n15_atlas_cpu_e50",
+          "engine": "atlas",
+          "nEpochs": 50,
+          "save": "10k_n15_atlas_cpu_e50",
+          "dataset": "10k",
+          "n": 15,
+          "seed": 42,
+          "minDist": 0.1
+        },
+        "startupMs": 23.399999999906868,
+        "workerEvalMs": 18.200000000186265,
+        "run1": {
+          "initMs": 854,
+          "optimizeMs": 2042.0999999996275,
+          "totalMs": 2919.4999999995343,
+          "wallFromSpawnMs": 2920.7999999998137,
+          "epochs": 50,
+          "epochsDone": 50,
+          "cancelled": false,
+          "mem": null,
+          "hash": "9379a6d28f86b4241bee07774a809e2d1820a64444a6171b8753b49d5dee3304"
+        },
+        "idle": {
+          "count": 36,
+          "median": 16.699999999999932,
+          "p95": 16.700000000000045,
+          "max": 16.800000000000182,
+          "mean": 16.669444444444444
+        },
+        "raf": {
+          "count": 174,
+          "median": 16.699999999999818,
+          "p95": 16.700000000000273,
+          "max": 16.800000000000182,
+          "mean": 16.666091954022985
+        }
+      },
+      "memA": {
+        "baseAnonMB": 70.2265625,
+        "peakAnonMB": 119.5546875,
+        "deltaAnonMB": 49.328125,
+        "baseRendererRssMB": 93.62109375,
+        "peakRendererRssMB": 148.35546875
+      }
+    }
+  },
+  "env": {
+    "ua": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/157.0.8103.78 Safari/537.36",
+    "hardwareConcurrency": 4,
+    "crossOriginIsolated": false,
+    "memory": true
+  },
+  "baseline": {
+    "idle": {
+      "count": 120,
+      "median": 16.700000000000017,
+      "p95": 16.700000000000045,
+      "max": 16.799999999999955,
+      "mean": 16.666666666666668
+    },
+    "blocked200ms": {
+      "count": 37,
+      "median": 16.699999999999818,
+      "p95": 16.799999999999727,
+      "max": 183.4000000000001,
+      "mean": 21.170270270270276
+    }
+  }
+}

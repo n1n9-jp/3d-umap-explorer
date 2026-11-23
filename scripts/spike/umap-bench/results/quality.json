@@ -1,0 +1,505 @@
+{
+  "reference_umaplearn_public": {
+    "sameLabel10": 0.9215,
+    "sameLabel15": 0.91888,
+    "knnRecall15": 0.37078666666666665,
+    "finite": true,
+    "bboxExtent": [
+      2.0,
+      1.4090405702590942,
+      1.243115782737732
+    ]
+  },
+  "10k_n15_atlas_cpu_e50_run1": {
+    "sameLabel10": 0.9214,
+    "sameLabel15": 0.9186333333333333,
+    "knnRecall15": 0.33709333333333336,
+    "centroidDistCorrVsReference": 0.8463723964658485,
+    "finite": true,
+    "bboxExtent": [
+      6.29818058013916,
+      13.101305961608887,
+      11.854100227355957
+    ]
+  },
+  "10k_n15_atlas_def_B_run1": {
+    "sameLabel10": 0.9211,
+    "sameLabel15": 0.9188266666666667,
+    "knnRecall15": 0.37289333333333335,
+    "centroidDistCorrVsReference": 0.9401185600475602,
+    "finite": true,
+    "bboxExtent": [
+      7.440177917480469,
+      15.553383827209473,
+      12.346036911010742
+    ]
+  },
+  "10k_n15_atlas_def_random_run1": {
+    "sameLabel10": 0.92246,
+    "sameLabel15": 0.91954,
+    "knnRecall15": 0.37349333333333334,
+    "centroidDistCorrVsReference": 0.8833901062042362,
+    "finite": true,
+    "bboxExtent": [
+      14.350708961486816,
+      7.780147552490234,
+      8.204351425170898
+    ]
+  },
+  "10k_n15_atlas_def_run1": {
+    "sameLabel10": 0.9211,
+    "sameLabel15": 0.9188266666666667,
+    "knnRecall15": 0.37289333333333335,
+    "centroidDistCorrVsReference": 0.9401185600475602,
+    "finite": true,
+    "bboxExtent": [
+      7.440177917480469,
+      15.553383827209473,
+      12.346036911010742
+    ]
+  },
+  "10k_n15_atlas_e200_B_run1": {
+    "sameLabel10": 0.92188,
+    "sameLabel15": 0.91966,
+    "knnRecall15": 0.3631466666666667,
+    "centroidDistCorrVsReference": 0.92906660018531,
+    "finite": true,
+    "bboxExtent": [
+      7.8714919090271,
+      14.672407150268555,
+      12.703851699829102
+    ]
+  },
+  "10k_n15_atlas_e200_run1": {
+    "sameLabel10": 0.92188,
+    "sameLabel15": 0.91966,
+    "knnRecall15": 0.3631466666666667,
+    "centroidDistCorrVsReference": 0.92906660018531,
+    "finite": true,
+    "bboxExtent": [
+      7.8714919090271,
+      14.672407150268555,
+      12.703851699829102
+    ]
+  },
+  "10k_n15_atlas_gpu_swiftshader_e50_run1": {
+    "sameLabel10": 0.92088,
+    "sameLabel15": 0.9182,
+    "knnRecall15": 0.31546,
+    "centroidDistCorrVsReference": 0.8395067681669595,
+    "finite": true,
+    "bboxExtent": [
+      5.012035369873047,
+      13.20918083190918,
+      12.097074508666992
+    ]
+  },
+  "10k_n15_atlas_step200_run1": {
+    "sameLabel10": 0.83181,
+    "sameLabel15": 0.8312066666666666,
+    "knnRecall15": 0.047766666666666666,
+    "centroidDistCorrVsReference": 0.9167762794717577,
+    "finite": true,
+    "bboxExtent": [
+      13.384736061096191,
+      22.891830444335938,
+      18.934171676635742
+    ]
+  },
+  "10k_n15_atlas_stepdecay200_c1_run1": {
+    "sameLabel10": 0.92102,
+    "sameLabel15": 0.91858,
+    "knnRecall15": 0.3628133333333333,
+    "centroidDistCorrVsReference": 0.9251504775180759,
+    "finite": true,
+    "bboxExtent": [
+      7.956573486328125,
+      14.028430938720703,
+      12.80650520324707
+    ]
+  },
+  "10k_n15_atlas_stepdecay200_run1": {
+    "sameLabel10": 0.91902,
+    "sameLabel15": 0.9167666666666666,
+    "knnRecall15": 0.3159133333333333,
+    "centroidDistCorrVsReference": 0.9104393968688262,
+    "finite": true,
+    "bboxExtent": [
+      7.622976303100586,
+      16.052597045898438,
+      12.540104866027832
+    ]
+  },
+  "10k_n15_atlas_stepdecay200_yield_run1": {
+    "sameLabel10": 0.91902,
+    "sameLabel15": 0.9167666666666666,
+    "knnRecall15": 0.3159133333333333,
+    "centroidDistCorrVsReference": 0.9104393968688262,
+    "finite": true,
+    "bboxExtent": [
+      7.622976303100586,
+      16.052597045898438,
+      12.540104866027832
+    ]
+  },
+  "10k_n15_umapjs_def_B_run1": {
+    "sameLabel10": 0.92092,
+    "sameLabel15": 0.9181133333333333,
+    "knnRecall15": 0.36024666666666666,
+    "centroidDistCorrVsReference": 0.9436099815023785,
+    "finite": true,
+    "bboxExtent": [
+      11.713979721069336,
+      13.24099349975586,
+      8.115970611572266
+    ]
+  },
+  "10k_n15_umapjs_def_run1": {
+    "sameLabel10": 0.92092,
+    "sameLabel15": 0.9181133333333333,
+    "knnRecall15": 0.36024666666666666,
+    "centroidDistCorrVsReference": 0.9436099815023785,
+    "finite": true,
+    "bboxExtent": [
+      11.713979721069336,
+      13.24099349975586,
+      8.115970611572266
+    ]
+  },
+  "10k_n15_umapjs_def_yield5_run1": {
+    "sameLabel10": 0.92092,
+    "sameLabel15": 0.9181133333333333,
+    "knnRecall15": 0.36024666666666666,
+    "centroidDistCorrVsReference": 0.9436099815023785,
+    "finite": true,
+    "bboxExtent": [
+      11.713979721069336,
+      13.24099349975586,
+      8.115970611572266
+    ]
+  },
+  "10k_n15_umapjs_e500_run1": {
+    "sameLabel10": 0.9208,
+    "sameLabel15": 0.9180066666666666,
+    "knnRecall15": 0.36936,
+    "centroidDistCorrVsReference": 0.9461791672998816,
+    "finite": true,
+    "bboxExtent": [
+      10.025060653686523,
+      15.444233894348145,
+      7.312238693237305
+    ]
+  },
+  "10k_n50_atlas_def_B_run1": {
+    "sameLabel10": 0.91568,
+    "sameLabel15": 0.91302,
+    "knnRecall15": 0.33754,
+    "centroidDistCorrVsReference": 0.9576508356615545,
+    "finite": true,
+    "bboxExtent": [
+      6.015961647033691,
+      12.189380645751953,
+      8.201359748840332
+    ]
+  },
+  "10k_n50_atlas_def_run1": {
+    "sameLabel10": 0.91568,
+    "sameLabel15": 0.91302,
+    "knnRecall15": 0.33754,
+    "centroidDistCorrVsReference": 0.9576508356615545,
+    "finite": true,
+    "bboxExtent": [
+      6.015961647033691,
+      12.189380645751953,
+      8.201359748840332
+    ]
+  },
+  "10k_n50_atlas_e200_B_run1": {
+    "sameLabel10": 0.91526,
+    "sameLabel15": 0.9132866666666667,
+    "knnRecall15": 0.3324066666666667,
+    "centroidDistCorrVsReference": 0.9390326716140893,
+    "finite": true,
+    "bboxExtent": [
+      4.82958984375,
+      12.229811668395996,
+      8.751697540283203
+    ]
+  },
+  "10k_n50_atlas_e200_run1": {
+    "sameLabel10": 0.91526,
+    "sameLabel15": 0.9132866666666667,
+    "knnRecall15": 0.3324066666666667,
+    "centroidDistCorrVsReference": 0.9390326716140893,
+    "finite": true,
+    "bboxExtent": [
+      4.82958984375,
+      12.229811668395996,
+      8.751697540283203
+    ]
+  },
+  "10k_n50_umapjs_def_B_run1": {
+    "sameLabel10": 0.91345,
+    "sameLabel15": 0.9108733333333333,
+    "knnRecall15": 0.3218066666666667,
+    "centroidDistCorrVsReference": 0.9348443497692874,
+    "finite": true,
+    "bboxExtent": [
+      7.68662166595459,
+      12.799394607543945,
+      6.526857376098633
+    ]
+  },
+  "10k_n50_umapjs_def_run1": {
+    "sameLabel10": 0.91345,
+    "sameLabel15": 0.9108733333333333,
+    "knnRecall15": 0.3218066666666667,
+    "centroidDistCorrVsReference": 0.9348443497692874,
+    "finite": true,
+    "bboxExtent": [
+      7.68662166595459,
+      12.799394607543945,
+      6.526857376098633
+    ]
+  },
+  "10k_n50_umapjs_e500_run1": {
+    "sameLabel10": 0.91611,
+    "sameLabel15": 0.9139133333333334,
+    "knnRecall15": 0.33678,
+    "centroidDistCorrVsReference": 0.9654153437511329,
+    "finite": true,
+    "bboxExtent": [
+      8.254683494567871,
+      10.803423881530762,
+      7.850673675537109
+    ]
+  },
+  "70k_n15_atlas_def_run1": {
+    "sameLabel10": 0.7223071428571428,
+    "sameLabel15": 0.5760647619047619,
+    "knnRecall15": 0.46624666666666664,
+    "finite": true,
+    "bboxExtent": [
+      23.26596450805664,
+      26.68415069580078,
+      28.22314453125
+    ]
+  },
+  "70k_n15_atlas_e200_run1": {
+    "sameLabel10": 0.7223071428571428,
+    "sameLabel15": 0.5760647619047619,
+    "knnRecall15": 0.46624666666666664,
+    "finite": true,
+    "bboxExtent": [
+      23.26596450805664,
+      26.68415069580078,
+      28.22314453125
+    ]
+  },
+  "70k_n15_umapjs_def_run1": {
+    "sameLabel10": 0.6971957142857143,
+    "sameLabel15": 0.5411333333333334,
+    "knnRecall15": 0.4447295238095238,
+    "finite": true,
+    "bboxExtent": [
+      25.976520538330078,
+      26.20608139038086,
+      25.7390079498291
+    ]
+  },
+  "70k_n50_atlas_def_run1": {
+    "sameLabel10": 0.9769,
+    "sameLabel15": 0.9632590476190476,
+    "knnRecall15": 0.6055,
+    "finite": true,
+    "bboxExtent": [
+      17.395427703857422,
+      23.568239212036133,
+      25.467735290527344
+    ]
+  },
+  "70k_n50_atlas_e200_run1": {
+    "sameLabel10": 0.9769,
+    "sameLabel15": 0.9632590476190476,
+    "knnRecall15": 0.6055,
+    "finite": true,
+    "bboxExtent": [
+      17.395427703857422,
+      23.568239212036133,
+      25.467735290527344
+    ]
+  },
+  "70k_n50_umapjs_def_run1": {
+    "sameLabel10": 0.9588342857142858,
+    "sameLabel15": 0.9320819047619048,
+    "knnRecall15": 0.6012809523809524,
+    "finite": true,
+    "bboxExtent": [
+      22.67813491821289,
+      22.4678955078125,
+      21.56247329711914
+    ]
+  },
+  "node_10k_n15_atlas_def": {
+    "sameLabel10": 0.9211,
+    "sameLabel15": 0.9188266666666667,
+    "knnRecall15": 0.37289333333333335,
+    "centroidDistCorrVsReference": 0.9401185600475602,
+    "finite": true,
+    "bboxExtent": [
+      7.440177917480469,
+      15.553383827209473,
+      12.346036911010742
+    ]
+  },
+  "node_10k_n15_atlas_e200": {
+    "sameLabel10": 0.92188,
+    "sameLabel15": 0.91966,
+    "knnRecall15": 0.3631466666666667,
+    "centroidDistCorrVsReference": 0.92906660018531,
+    "finite": true,
+    "bboxExtent": [
+      7.8714919090271,
+      14.672407150268555,
+      12.703851699829102
+    ]
+  },
+  "node_10k_n15_umapjs_def": {
+    "sameLabel10": 0.92148,
+    "sameLabel15": 0.9188,
+    "knnRecall15": 0.35916,
+    "centroidDistCorrVsReference": 0.9528403230027612,
+    "finite": true,
+    "bboxExtent": [
+      11.47364616394043,
+      12.943345069885254,
+      7.535247802734375
+    ]
+  },
+  "node_10k_n15_umapjs_e500": {
+    "sameLabel10": 0.92053,
+    "sameLabel15": 0.9174,
+    "knnRecall15": 0.3715466666666667,
+    "centroidDistCorrVsReference": 0.9586155795623322,
+    "finite": true,
+    "bboxExtent": [
+      10.482865333557129,
+      13.11680793762207,
+      8.14426326751709
+    ]
+  },
+  "node_10k_n50_atlas_def": {
+    "sameLabel10": 0.91568,
+    "sameLabel15": 0.91302,
+    "knnRecall15": 0.33754,
+    "centroidDistCorrVsReference": 0.9576508356615545,
+    "finite": true,
+    "bboxExtent": [
+      6.015961647033691,
+      12.189380645751953,
+      8.201359748840332
+    ]
+  },
+  "node_10k_n50_atlas_e200": {
+    "sameLabel10": 0.91526,
+    "sameLabel15": 0.9132866666666667,
+    "knnRecall15": 0.3324066666666667,
+    "centroidDistCorrVsReference": 0.9390326716140893,
+    "finite": true,
+    "bboxExtent": [
+      4.82958984375,
+      12.229811668395996,
+      8.751697540283203
+    ]
+  },
+  "node_10k_n50_umapjs_def": {
+    "sameLabel10": 0.91491,
+    "sameLabel15": 0.91258,
+    "knnRecall15": 0.3216466666666667,
+    "centroidDistCorrVsReference": 0.955699687386124,
+    "finite": true,
+    "bboxExtent": [
+      8.340896606445312,
+      11.073989868164062,
+      6.563896179199219
+    ]
+  },
+  "node_10k_n50_umapjs_e500": {
+    "sameLabel10": 0.91573,
+    "sameLabel15": 0.9132466666666667,
+    "knnRecall15": 0.3384066666666667,
+    "centroidDistCorrVsReference": 0.9374560949400803,
+    "finite": true,
+    "bboxExtent": [
+      8.359599113464355,
+      11.938480377197266,
+      7.393211364746094
+    ]
+  },
+  "node_70k_n15_atlas_def": {
+    "sameLabel10": 0.7223071428571428,
+    "sameLabel15": 0.5760647619047619,
+    "knnRecall15": 0.46624666666666664,
+    "finite": true,
+    "bboxExtent": [
+      23.26596450805664,
+      26.68415069580078,
+      28.22314453125
+    ]
+  },
+  "node_70k_n15_atlas_e200": {
+    "sameLabel10": 0.7223071428571428,
+    "sameLabel15": 0.5760647619047619,
+    "knnRecall15": 0.46624666666666664,
+    "finite": true,
+    "bboxExtent": [
+      23.26596450805664,
+      26.68415069580078,
+      28.22314453125
+    ]
+  },
+  "node_70k_n15_umapjs_def": {
+    "sameLabel10": 0.70257,
+    "sameLabel15": 0.5476971428571429,
+    "knnRecall15": 0.44486095238095236,
+    "finite": true,
+    "bboxExtent": [
+      25.888946533203125,
+      25.983600616455078,
+      25.832590103149414
+    ]
+  },
+  "node_70k_n50_atlas_def": {
+    "sameLabel10": 0.9769,
+    "sameLabel15": 0.9632590476190476,
+    "knnRecall15": 0.6055,
+    "finite": true,
+    "bboxExtent": [
+      17.395427703857422,
+      23.568239212036133,
+      25.467735290527344
+    ]
+  },
+  "node_70k_n50_atlas_e200": {
+    "sameLabel10": 0.9769,
+    "sameLabel15": 0.9632590476190476,
+    "knnRecall15": 0.6055,
+    "finite": true,
+    "bboxExtent": [
+      17.395427703857422,
+      23.568239212036133,
+      25.467735290527344
+    ]
+  },
+  "node_70k_n50_umapjs_def": {
+    "sameLabel10": 0.9570614285714286,
+    "sameLabel15": 0.9297419047619048,
+    "knnRecall15": 0.6033771428571428,
+    "finite": true,
+    "bboxExtent": [
+      23.245250701904297,
+      21.818527221679688,
+      22.182575225830078
+    ]
+  }
+}

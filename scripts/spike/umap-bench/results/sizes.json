@@ -1,0 +1,25 @@
+{
+  "index-DO2AzFhN.js": {
+    "raw": 5161,
+    "gzip": 2259,
+    "brotli": 2052
+  },
+  "worker-atlas-D5HSKBDB.js": {
+    "raw": 1320757,
+    "gzip": 355868,
+    "brotli": 264719,
+    "wasm": {
+      "dataUriBase64Chars": 1287900,
+      "raw": 965925,
+      "gzip": 233254,
+      "brotli": 176004
+    }
+  },
+  "worker-umapjs-CC8SKkF_.js": {
+    "raw": 90809,
+    "gzip": 24172,
+    "brotli": 20940
+  },
+  "_embeddingAtlasPackageJsTotalRaw": 6494204,
+  "_umapJsPackageJsTotalRaw": 74214
+}

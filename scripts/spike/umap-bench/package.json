@@ -1,0 +1,18 @@
+{
+  "name": "umap-bench",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "ブラウザ内 UMAP の方式選定用ベンチマーク（アプリ本体には組み込まない）",
+  "dependencies": {
+    "embedding-atlas": "0.26.0",
+    "umap-js": "1.4.0"
+  },
+  "devDependencies": {
+    "vite": "8.3.8"
+  },
+  "scripts": {
+    "build": "vite build",
+    "report": "node report.cjs"
+  }
+}

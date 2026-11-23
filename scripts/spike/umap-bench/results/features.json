@@ -1,0 +1,67 @@
+{
+  "atlas": {
+    "epoch0EmbeddingReadable": true,
+    "epoch0Range": [
+      -10.000088691711426,
+      8.087583541870117
+    ],
+    "run_timerTicksDuringRun": 0,
+    "run_progressCalls": 48,
+    "run_progressSeries": [
+      "0.00 Finding nearest neighbors",
+      "0.30 Finding nearest neighbors",
+      "0.30 Constructing fuzzy graph",
+      "0.35 Constructing fuzzy graph",
+      "0.35 Initializing embedding",
+      "0.45 Initializing embedding",
+      "0.45 Optimizing layout",
+      "0.46 Optimizing layout",
+      "0.48 Optimizing layout",
+      "0.49 Optimizing layout",
+      "0.50 Optimizing layout",
+      "0.52 Optimizing layout"
+    ],
+    "run_embeddingChangedDuringRun": 0,
+    "run_wallMs": 1558.90426,
+    "run_note": "run() は wasm 内で一括実行され、実行中はイベントループが止まる（Worker では cancel メッセージも届かない）",
+    "step_snapshotsDiffer": true,
+    "step_timerTicksDuringEightAwaitedSteps": 0,
+    "step_epochAfter": 40,
+    "abortByThrowingInProgress": {
+      "settled": "resolved",
+      "ms": 8269.728692,
+      "epoch": 200
+    },
+    "destroyDuringRun_settledAfterMs": 3800.160784999998,
+    "destroyDuringRun_note": "destroy() は実行中の run()/step() の完了後に適用される（途中で止まらない）",
+    "initialCoordinatesOption": "なし（UMAPOptions に該当項目なし。initializeMethod は \"spectral\" | \"random\" のみ）",
+    "reset": "reset(\"spectral\" | \"random\") で epoch 0 に戻せる",
+    "embeddingIsReadOnlyCopy": "embedding は Wasm 側の座標のコピー（書き込んでも Wasm 側へ反映されない）",
+    "writeToEmbeddingAffectsWasm": false,
+    "minDistChangeViaSetParametersAndReset": {
+      "bitIdenticalToFreshInstance": true,
+      "maxAbsDiff": 0,
+      "epochAfter": 30
+    }
+  },
+  "umapjs": {
+    "initialEmbeddingRange": [
+      -9.999821544624865,
+      9.999935114756227
+    ],
+    "initialEmbeddingKind": "ランダム一様 [-10, 10]（スペクトル初期化はない）",
+    "stepEmbeddingReadable": true,
+    "firstStepMovesNothing": true,
+    "getEmbeddingIsLiveReference": true,
+    "cancel": "step() を 1 エポックずつ呼ぶ側のループで止める（1 エポック = 数十 ms）。fit() の同期実行は途中で止められない",
+    "overwriteInitialAfterInitializeFit": {
+      "effective": true,
+      "fractionNear100": 1,
+      "sampleAfter": [
+        105.63748168945312,
+        105.63748168945312,
+        105.63748168945312
+      ]
+    }
+  }
+}
