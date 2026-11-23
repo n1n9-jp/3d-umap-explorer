@@ -17,11 +17,10 @@ export interface MoveInput {
   right: boolean;
   up: boolean;
   down: boolean;
-  boost: boolean;
 }
 
 export function createMoveInput(): MoveInput {
-  return { forward: false, backward: false, left: false, right: false, up: false, down: false, boost: false };
+  return { forward: false, backward: false, left: false, right: false, up: false, down: false };
 }
 
 export interface FlyMotionOptions {
@@ -34,8 +33,6 @@ export interface FlyMotionOptions {
   speedScale?: number;
   minSpeed?: number;
   maxSpeed?: number;
-  /** Shift を押している間の速度倍率。 */
-  boostFactor?: number;
   /** 目標速度へ近づく指数応答の時定数（秒）。0 以下で慣性なし。 */
   timeConstant?: number;
   /** ホイール 1 ノッチあたりの速度倍率。 */
@@ -104,7 +101,6 @@ export class FlyMotion {
 
   minSpeed: number;
   maxSpeed: number;
-  boostFactor: number;
   timeConstant: number;
   wheelFactor: number;
   maxDeltaTime: number;
@@ -122,11 +118,10 @@ export class FlyMotion {
   constructor(options: FlyMotionOptions = {}) {
     this.minSpeed = options.minSpeed ?? 0.005;
     this.maxSpeed = options.maxSpeed ?? 2;
-    this.boostFactor = options.boostFactor ?? 3;
     this.timeConstant = options.timeConstant ?? 0.12;
     this.wheelFactor = options.wheelFactor ?? 1.1;
     this.maxDeltaTime = options.maxDeltaTime ?? 0.1;
-    this._speed = clamp(options.speed ?? 0.15, this.minSpeed, this.maxSpeed);
+    this._speed = clamp(options.speed ?? 0.45, this.minSpeed, this.maxSpeed);
     this.speedScale = options.speedScale ?? 1;
   }
 
@@ -309,7 +304,7 @@ export class FlyMotion {
     out.y += u;
     const len = out.length();
     if (len === 0) return out; // 打ち消し合った
-    const speed = this._speed * this._speedScale * (input.boost ? this.boostFactor : 1);
+    const speed = this._speed * this._speedScale;
     return out.multiplyScalar(speed / Math.max(len, 1));
   }
 

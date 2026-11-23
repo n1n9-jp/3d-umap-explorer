@@ -84,12 +84,12 @@ describe('FlyMotion: 移動', () => {
     expect(m.position.length()).toBe(0);
   });
 
-  it('Shift で 3 倍速（定常速度）', () => {
-    const a = new FlyMotion({ timeConstant: 0 });
-    const b = new FlyMotion({ timeConstant: 0 });
-    run(a, 1, 1 / 60, input({ forward: true }));
-    run(b, 1, 1 / 60, input({ forward: true, boost: true }));
-    expect(b.position.length() / a.position.length()).toBeCloseTo(3, 9);
+  it('定常速度は speed（既定 0.45）で、加速の入力や倍率オプションは持たない', () => {
+    const m = new FlyMotion({ timeConstant: 0 });
+    run(m, 1, 1 / 60, input({ forward: true }));
+    expect(m.position.length()).toBeCloseTo(0.45, 9);
+    expect(Object.keys(createMoveInput()).sort()).toEqual(['backward', 'down', 'forward', 'left', 'right', 'up']);
+    expect('boostFactor' in m).toBe(false);
   });
 
   it('速度は時定数 τ で目標へ指数的に近づく', () => {
@@ -127,10 +127,10 @@ describe('FlyMotion: フレームレート非依存', () => {
       },
     ],
     [
-      '視点を回してから斜め移動 + Shift',
+      '視点を回してから斜め移動',
       (m, dt) => {
         m.rotateBy(deg(37), deg(20));
-        run(m, 1, dt, input({ forward: true, right: true, up: true, boost: true }));
+        run(m, 1, dt, input({ forward: true, right: true, up: true }));
         run(m, 0.5, dt, createMoveInput());
       },
     ],
@@ -231,9 +231,9 @@ describe('FlyMotion: ホイールによる速度変更', () => {
     expect(m.speed).toBeCloseTo(0.15 * 1.1 ** 10, 9);
   });
 
-  it('既定値は speed 0.15、minSpeed 0.005、maxSpeed 2', () => {
+  it('既定値は speed 0.45、minSpeed 0.005、maxSpeed 2', () => {
     const m = new FlyMotion();
-    expect(m.speed).toBe(0.15);
+    expect(m.speed).toBe(0.45);
     expect(m.minSpeed).toBe(0.005);
     expect(m.maxSpeed).toBe(2);
   });
@@ -431,24 +431,18 @@ describe('FlyMotion: speedScale', () => {
     const base = noInertia();
     const m = noInertia();
     m.speedScale = 0.25;
-    expect(m.speed).toBe(0.15);
+    expect(m.speed).toBe(0.45);
     run(base, 1, 1 / 60, input({ forward: true }));
     run(m, 1, 1 / 60, input({ forward: true }));
     expect(m.position.length() / base.position.length()).toBeCloseTo(0.25, 9);
-    expect(m.speed).toBe(0.15);
+    expect(m.speed).toBe(0.45);
   });
 
   it('コンストラクタのオプションで指定できる', () => {
     const m = noInertia({ speedScale: 4 });
     expect(m.speedScale).toBe(4);
     run(m, 1, 1 / 60, input({ forward: true }));
-    expect(m.position.length()).toBeCloseTo(0.15 * 4, 9);
-  });
-
-  it('Shift の倍率とも掛け合わさる', () => {
-    const m = noInertia({ speedScale: 2 });
-    run(m, 1, 1 / 60, input({ forward: true, boost: true }));
-    expect(m.position.length()).toBeCloseTo(0.15 * 3 * 2, 9);
+    expect(m.position.length()).toBeCloseTo(0.45 * 4, 9);
   });
 
   it('minSpeed・maxSpeed の制限は speed にだけ働き、係数は制限を越えて効く', () => {
@@ -465,18 +459,18 @@ describe('FlyMotion: speedScale', () => {
     const m = noInertia({ speedScale: 0.5 });
     m.applyWheel(-1);
     expect(m.speedScale).toBe(0.5);
-    expect(m.speed).toBeCloseTo(0.165, 12);
+    expect(m.speed).toBeCloseTo(0.495, 12);
     run(m, 1, 1 / 60, input({ forward: true }));
-    expect(m.position.length()).toBeCloseTo(0.165 * 0.5, 9);
+    expect(m.position.length()).toBeCloseTo(0.495 * 0.5, 9);
   });
 
   it('慣性ありのとき、係数の変更は速度へ指数的に反映される', () => {
     const m = new FlyMotion({ timeConstant: 0.12 });
     run(m, 2, 1 / 60, input({ forward: true }));
-    expect(m.velocity.length()).toBeCloseTo(0.15, 6);
+    expect(m.velocity.length()).toBeCloseTo(0.45, 6);
     m.speedScale = 2;
     run(m, 2, 1 / 60, input({ forward: true }));
-    expect(m.velocity.length()).toBeCloseTo(0.3, 6);
+    expect(m.velocity.length()).toBeCloseTo(0.9, 6);
   });
 
   it('正の有限値以外は無視し、直前の値を保つ', () => {

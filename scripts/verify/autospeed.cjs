@@ -26,14 +26,16 @@ const dataPath = 'data/mnist/';
 const width = 1280, height = 800;
 
 // アプリの設定（src/app/autoSpeed.ts の AUTO_SPEED_DEFAULTS と、main.ts の dt の上限）
+const DEFAULT_SPEED = 0.45; // ホイールで変えていないときの飛行速度（src/controls/FlyMotion.ts の既定。Shift の加速はない）
 const MAX_SCALE = 4;
 const REFERENCE_MULTIPLIER = 6; // 係数 1 の距離 = 6 × knnDistP50
 const LOOKAHEAD_SECONDS = 0.3;
 const DECEL_MAX_RATE = 6; // 係数の自然対数が 1 秒あたりに下がる速さの上限
 const ACCEL_MAX_RATE = 1.2; // 同じく上がる速さの上限
 const MAX_DT = 0.1;
-// 目安: 密なクラスタの内部で、実速度が 1 秒あたり点の間隔の 2〜4 倍
-const SPACING_RATIO = [2, 4];
+// 目安: 密なクラスタの内部で、実速度が 1 秒あたり点の間隔の 6〜12 倍
+// （係数の式は変えず、既定の速度を 0.15 から 0.45 の 3 倍にしたので、以前の 2〜4 倍の 3 倍。実測は約 7.2〜7.5 倍）
+const SPACING_RATIO = [6, 12];
 
 const results = [];
 function check(name, ok, detail = '') {
@@ -101,10 +103,12 @@ function planFlight(ds) {
   const target = scored[0].c;
   const C = target.center;
   const out = norm(sub(C, manifest.bounds.center));
-  // 外向きに下がり、点群の外接球の外で、最も近い点までの距離が飽和距離の 3 倍を超える位置から出発する
-  // （進行方向の先を見ても、しばらくは係数が上限のままになる）
+  // 外向きに下がり、点群の外接球の外で、最も近い点までの距離が、飽和距離に「上限の実速度（既定の速度 × 上限の係数）で
+  // 進行方向の先を見る距離」の 3 倍を足した値を超える位置から出発する（進行方向の先を見ても、しばらくは係数が上限のままになる）
+  const lookahead = DEFAULT_SPEED * MAX_SCALE * LOOKAHEAD_SECONDS;
+  const farEnough = saturation + 3 * lookahead;
   let r = target.radius;
-  while (len(sub(add(C, mul(out, r)), manifest.bounds.center)) < manifest.bounds.radius || neighbors(ds, add(C, mul(out, r)), 1)[0][0] < saturation * 3) r += 0.02;
+  while (len(sub(add(C, mul(out, r)), manifest.bounds.center)) < manifest.bounds.radius || neighbors(ds, add(C, mul(out, r)), 1)[0][0] < farEnough) r += 0.02;
   return { target, centerDensity: scored[0].d, start: add(C, mul(out, r)), startDistance: r, saturation };
 }
 
@@ -256,6 +260,9 @@ async function main() {
 
     // ---- T キーで切り替え ----
     console.log('\n[T キーで無効・有効]');
+    // 速度が 3 倍で、中心へ着いたあとは慣性で行き過ぎて位置が定まらないので、クラスタの中心の手前 0.1 から中心を向いて始める
+    await setView(page, add(C, mul(norm(sub(start, C)), 0.1)), C);
+    await frames(page, 10);
     const before = await state(page);
     await page.keyboard.press('KeyT');
     await frames(page, 3);
@@ -264,8 +271,9 @@ async function main() {
       `有効 ${before.autoSpeed.enabled} → ${off.autoSpeed.enabled}、speedScale ${f(before.speedScale, 3)} → ${off.speedScale}`);
     check('無効のとき HUD に「自動調整 切」と実速度＝飛行速度が出る', (await hudLine(page)).includes(`自動調整 切  実速度 ${off.speed.toPrecision(3)}`), JSON.stringify(await hudLine(page)));
     const p0 = off.position;
+    // 速度が 3 倍（係数 1 で 0.45 単位/秒）なので、以前の 6 フレームでは中心を通り越して外へ出る。1 フレームだけ進める
     await page.keyboard.down('KeyW');
-    await frames(page, 6);
+    await frames(page, 1);
     const moving = await state(page);
     await page.keyboard.up('KeyW');
     check('無効のあいだは、クラスタの内部でも動いている間 speedScale が 1 のまま', moving.speedScale === 1 && len(sub(moving.position, p0)) > 0.02,
