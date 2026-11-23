@@ -414,3 +414,127 @@ describe('FlyMotion: step の戻り値', () => {
     expect(m.step(1 / 60, createMoveInput())).toBe(false);
   });
 });
+
+describe('FlyMotion: speedScale', () => {
+  const noInertia = (o: object = {}) => new FlyMotion({ timeConstant: 0, ...o });
+
+  it('既定は 1（係数なしと同じ動き）', () => {
+    expect(new FlyMotion().speedScale).toBe(1);
+    const a = noInertia();
+    const b = noInertia({ speedScale: 1 });
+    run(a, 1, 1 / 60, input({ forward: true }));
+    run(b, 1, 1 / 60, input({ forward: true }));
+    expect(b.position.distanceTo(a.position)).toBe(0);
+  });
+
+  it('実際の移動速度にだけ掛かり、speed は変わらない', () => {
+    const base = noInertia();
+    const m = noInertia();
+    m.speedScale = 0.25;
+    expect(m.speed).toBe(0.15);
+    run(base, 1, 1 / 60, input({ forward: true }));
+    run(m, 1, 1 / 60, input({ forward: true }));
+    expect(m.position.length() / base.position.length()).toBeCloseTo(0.25, 9);
+    expect(m.speed).toBe(0.15);
+  });
+
+  it('コンストラクタのオプションで指定できる', () => {
+    const m = noInertia({ speedScale: 4 });
+    expect(m.speedScale).toBe(4);
+    run(m, 1, 1 / 60, input({ forward: true }));
+    expect(m.position.length()).toBeCloseTo(0.15 * 4, 9);
+  });
+
+  it('Shift の倍率とも掛け合わさる', () => {
+    const m = noInertia({ speedScale: 2 });
+    run(m, 1, 1 / 60, input({ forward: true, boost: true }));
+    expect(m.position.length()).toBeCloseTo(0.15 * 3 * 2, 9);
+  });
+
+  it('minSpeed・maxSpeed の制限は speed にだけ働き、係数は制限を越えて効く', () => {
+    const m = noInertia({ speed: 2, maxSpeed: 2, speedScale: 3 });
+    expect(m.speed).toBe(2);
+    run(m, 1, 1 / 60, input({ forward: true }));
+    expect(m.position.length()).toBeCloseTo(6, 9); // maxSpeed 2 × 3
+    const slow = noInertia({ speed: 0.005, speedScale: 0.1 });
+    run(slow, 1, 1 / 60, input({ forward: true }));
+    expect(slow.position.length()).toBeCloseTo(0.0005, 12); // minSpeed 0.005 × 0.1
+  });
+
+  it('ホイールによる速度変更は係数を変えず、係数は speed の変化に掛かり続ける', () => {
+    const m = noInertia({ speedScale: 0.5 });
+    m.applyWheel(-1);
+    expect(m.speedScale).toBe(0.5);
+    expect(m.speed).toBeCloseTo(0.165, 12);
+    run(m, 1, 1 / 60, input({ forward: true }));
+    expect(m.position.length()).toBeCloseTo(0.165 * 0.5, 9);
+  });
+
+  it('慣性ありのとき、係数の変更は速度へ指数的に反映される', () => {
+    const m = new FlyMotion({ timeConstant: 0.12 });
+    run(m, 2, 1 / 60, input({ forward: true }));
+    expect(m.velocity.length()).toBeCloseTo(0.15, 6);
+    m.speedScale = 2;
+    run(m, 2, 1 / 60, input({ forward: true }));
+    expect(m.velocity.length()).toBeCloseTo(0.3, 6);
+  });
+
+  it('正の有限値以外は無視し、直前の値を保つ', () => {
+    const m = new FlyMotion();
+    m.speedScale = 2;
+    for (const bad of [0, -1, NaN, Infinity, -Infinity]) {
+      m.speedScale = bad;
+      expect(m.speedScale, String(bad)).toBe(2);
+    }
+    expect(new FlyMotion({ speedScale: NaN }).speedScale).toBe(1);
+    expect(new FlyMotion({ speedScale: 0 }).speedScale).toBe(1);
+  });
+});
+
+describe('FlyMotion: 不正な dt', () => {
+  it('NaN・負・無限大の dt は状態を変えずに false を返す', () => {
+    for (const bad of [NaN, -1, -1e-9, Infinity, -Infinity]) {
+      const m = new FlyMotion();
+      run(m, 0.3, 1 / 60, input({ forward: true }));
+      const pos = m.position.clone();
+      const vel = m.velocity.clone();
+      const yaw = m.yaw;
+      expect(m.step(bad, input({ forward: true })), String(bad)).toBe(false);
+      expect(m.position.distanceTo(pos), String(bad)).toBe(0);
+      expect(m.velocity.distanceTo(vel), String(bad)).toBe(0);
+      expect(m.yaw).toBe(yaw);
+      expect(Number.isFinite(m.position.x + m.position.y + m.position.z)).toBe(true);
+    }
+  });
+
+  it('不正な dt のあとも通常どおり動く（同じ入力なら呼ばなかった場合と同じ位置に着く）', () => {
+    const a = new FlyMotion();
+    const b = new FlyMotion();
+    run(a, 0.5, 1 / 60, input({ forward: true }));
+    run(b, 0.25, 1 / 60, input({ forward: true }));
+    b.step(NaN, input({ forward: true }));
+    b.step(-1, input({ forward: true }));
+    run(b, 0.25, 1 / 60, input({ forward: true }));
+    expect(b.position.distanceTo(a.position)).toBeLessThan(1e-12);
+  });
+
+  it('飛行は進まず、未報告の姿勢変化も失われない', () => {
+    const m = new FlyMotion();
+    m.flyTo(new Vector3(0, 0, -1), { distance: 0.1 });
+    expect(m.step(NaN, createMoveInput())).toBe(false);
+    expect(m.isFlying).toBe(true);
+    expect(m.position.length()).toBe(0);
+    m.cancelFlyTo();
+
+    const r = new FlyMotion();
+    r.rotateBy(0.2, 0);
+    expect(r.step(-1, createMoveInput())).toBe(false);
+    expect(r.step(1 / 60, createMoveInput())).toBe(true); // 回転は次の有効な step で報告される
+  });
+
+  it('dt が 0 は不正ではない', () => {
+    const m = new FlyMotion();
+    m.rotateBy(0.2, 0);
+    expect(m.step(0, createMoveInput())).toBe(true);
+  });
+});

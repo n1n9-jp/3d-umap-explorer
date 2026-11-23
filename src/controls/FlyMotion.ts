@@ -1,4 +1,5 @@
 import { Vector3 } from 'three';
+import { MAX_WHEEL_EVENT_NOTCHES } from './WheelGesture';
 
 /**
  * 飛行カメラの運動の積分。DOM にも three.js のカメラにも依存せず、
@@ -24,8 +25,13 @@ export function createMoveInput(): MoveInput {
 }
 
 export interface FlyMotionOptions {
-  /** 基準速度（単位/秒）。 */
+  /** 基準速度（単位/秒）。ユーザーが決める値で、`minSpeed`〜`maxSpeed` に丸められる。 */
   speed?: number;
+  /**
+   * 実際の移動速度にだけ掛ける係数（既定 1、正の有限値）。密度に応じた自動調整など、
+   * 外部が `speed` を書き換えずに速度を変えるために使う。`minSpeed`・`maxSpeed` の制限は受けない。
+   */
+  speedScale?: number;
   minSpeed?: number;
   maxSpeed?: number;
   /** Shift を押している間の速度倍率。 */
@@ -59,7 +65,7 @@ export const MAX_PITCH = (89 * Math.PI) / 180;
 /** 速度がこれ未満で入力が無ければ停止とみなす（単位/秒）。 */
 const STOP_SPEED = 1e-5;
 /** 1 回のホイールイベントで反映するノッチ数の上限。 */
-const MAX_WHEEL_NOTCHES = 3;
+const MAX_WHEEL_NOTCHES = MAX_WHEEL_EVENT_NOTCHES;
 
 export function easeOutQuart(t: number): number {
   const u = 1 - Math.min(1, Math.max(0, t));
@@ -104,6 +110,7 @@ export class FlyMotion {
   maxDeltaTime: number;
 
   private _speed: number;
+  private _speedScale = 1;
   private flight: FlightState | null = null;
   /** rotateBy / setPose による未報告の姿勢変化。次の step で moved として返す。 */
   private dirty = false;
@@ -120,6 +127,7 @@ export class FlyMotion {
     this.wheelFactor = options.wheelFactor ?? 1.1;
     this.maxDeltaTime = options.maxDeltaTime ?? 0.1;
     this._speed = clamp(options.speed ?? 0.15, this.minSpeed, this.maxSpeed);
+    this.speedScale = options.speedScale ?? 1;
   }
 
   get speed(): number {
@@ -128,6 +136,15 @@ export class FlyMotion {
 
   set speed(value: number) {
     this._speed = clamp(value, this.minSpeed, this.maxSpeed);
+  }
+
+  /** 実際の移動速度に掛ける係数。正の有限値以外を代入しても無視する（直前の値を保つ）。 */
+  get speedScale(): number {
+    return this._speedScale;
+  }
+
+  set speedScale(value: number) {
+    if (Number.isFinite(value) && value > 0) this._speedScale = value;
   }
 
   get isFlying(): boolean {
@@ -231,8 +248,10 @@ export class FlyMotion {
    * 速度は目標速度へ指数的に近づき、位置はその解析解で積分するので、
    * 同じ入力なら刻み幅によらず同じ位置に着く。
    * 位置または向きが変わったら true。
+   * `dtSeconds` が NaN・負・無限大のときは、状態を変えずに false を返す。
    */
   step(dtSeconds: number, input: MoveInput): boolean {
+    if (!Number.isFinite(dtSeconds) || dtSeconds < 0) return false;
     const dt = clamp(dtSeconds, 0, this.maxDeltaTime);
     let moved = this.dirty;
     this.dirty = false;
@@ -290,7 +309,7 @@ export class FlyMotion {
     out.y += u;
     const len = out.length();
     if (len === 0) return out; // 打ち消し合った
-    const speed = this._speed * (input.boost ? this.boostFactor : 1);
+    const speed = this._speed * this._speedScale * (input.boost ? this.boostFactor : 1);
     return out.multiplyScalar(speed / Math.max(len, 1));
   }
 
