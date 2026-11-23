@@ -114,7 +114,8 @@ function flickPoints(x0, y0, dx, dy, durationMs = 160, n = 10) {
 const yawOf = (d) => Math.atan2(-d[0], -d[2]);
 const pitchOf = (d) => Math.asin(Math.max(-1, Math.min(1, d[1])));
 const wrapPi = (a) => Math.atan2(Math.sin(a), Math.cos(a));
-const angleBetween = (a, b) => Math.acos(Math.max(-1, Math.min(1, cos(a, b))));
+// 同じ向きどうしでも誤差が出ないように、acos ではなく atan2(|外積|, 内積) で求める
+const angleBetween = (a, b) => Math.atan2(len(cross(a, b)), dot(a, b));
 
 /**
  * 1 フレームずつ進めて状態を記録する。`until(s, samples)` が true になるか `max` フレームで終わる。
