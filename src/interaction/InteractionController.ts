@@ -4,6 +4,8 @@ import type { FlyToOptions } from '../controls/FlyCameraControls';
 import type { NeighborIndex } from '../app/autoSpeed';
 import { PointerGesture } from './gesture';
 import { HoverTracker, LatestOnly, type PickFn } from './latest';
+import { clickEffect } from './clickEffect';
+import { isFromEditable } from '../app/keyEvents';
 import { computeStopDistance, type StopDistance } from './stopDistance';
 import type { InfoPanel } from './infoPanel';
 
@@ -62,9 +64,10 @@ export class InteractionController {
     c.addEventListener('pointermove', this.onPointerMove);
     c.addEventListener('pointerup', this.onPointerUp);
     c.addEventListener('pointercancel', this.onPointerCancel);
+    c.addEventListener('lostpointercapture', this.onPointerCancel);
     c.addEventListener('pointerleave', this.onPointerLeave);
     window.addEventListener('keydown', this.onKeyDown);
-    window.addEventListener('blur', this.onPointerCancel);
+    window.addEventListener('blur', this.onBlur);
     deps.camera.updateMatrixWorld();
     this.lastCamera.copy(deps.camera.matrixWorld);
     this.lastProjection.copy(deps.camera.projectionMatrix);
@@ -116,9 +119,10 @@ export class InteractionController {
     c.removeEventListener('pointermove', this.onPointerMove);
     c.removeEventListener('pointerup', this.onPointerUp);
     c.removeEventListener('pointercancel', this.onPointerCancel);
+    c.removeEventListener('lostpointercapture', this.onPointerCancel);
     c.removeEventListener('pointerleave', this.onPointerLeave);
     window.removeEventListener('keydown', this.onKeyDown);
-    window.removeEventListener('blur', this.onPointerCancel);
+    window.removeEventListener('blur', this.onBlur);
   }
 
   private point(index: number): THREE.Vector3 {
@@ -147,28 +151,38 @@ export class InteractionController {
   }
 
   private readonly onPointerDown = (e: PointerEvent): void => {
-    this.gesture.down(e.pointerId, e.button, e.clientX, e.clientY);
+    this.gesture.down(e.pointerId, e.button, e.clientX, e.clientY, e.buttons);
   };
 
   private readonly onPointerMove = (e: PointerEvent): void => {
-    if (this.gesture.move(e.pointerId, e.clientX, e.clientY)) this.hover.suspend();
+    if (this.gesture.move(e.pointerId, e.clientX, e.clientY, e.buttons)) this.hover.suspend();
     this.hover.move(e.clientX, e.clientY);
     // 表示中のラベルはカーソルに付いていく（特定し直すのは次のフレーム）
     if (this.hover.hovered !== null) this.deps.panel.showHover(this.hover.hovered, e.clientX, e.clientY);
   };
 
   private readonly onPointerUp = (e: PointerEvent): void => {
-    const r = this.gesture.up(e.pointerId, e.clientX, e.clientY, e.timeStamp);
+    const r = this.gesture.up(e.pointerId, e.clientX, e.clientY, e.timeStamp, e.button);
     if (!r || r.kind !== 'click') return;
     const { x, y, double } = r;
     // 押した瞬間のホバーではなく、離した位置で改めて特定する（ホバーの要求がまだ返っていなくても正しい）
+    // 選択と移動の規則は clickEffect.ts（ダブルクリックの 1 回目のクリックでも選択は変わる）
     this.clicks.issue(this.deps.pick(x, y), (index) => {
-      this.select(index);
-      if (double && index !== null) this.flyToPoint(index);
+      const effect = clickEffect(index, double);
+      this.select(effect.select);
+      if (effect.flyTo !== null) this.flyToPoint(effect.flyTo);
     });
   };
 
-  private readonly onPointerCancel = (): void => {
+  /**
+   * pointercancel と lostpointercapture（O キーでのモード切り替えなどで capture が外れると、要素の外で離した
+   * pointerup が届かない）。押下の状態を破棄して、次のクリックを取りこぼさない。
+   */
+  private readonly onPointerCancel = (e: PointerEvent): void => {
+    this.gesture.cancel(e.pointerId);
+  };
+
+  private readonly onBlur = (): void => {
     this.gesture.cancel();
   };
 
@@ -179,8 +193,7 @@ export class InteractionController {
 
   private readonly onKeyDown = (e: KeyboardEvent): void => {
     if (e.key !== 'Escape' || e.repeat) return;
-    const t = e.target as HTMLElement | null;
-    if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+    if (isFromEditable(e)) return; // 入力欄での Esc は、入力欄の操作（キー判定は src/app/keyEvents.ts に共通）
     this.clicks.invalidate(); // 返ってくる途中のクリックの結果で選び直さない
     this.select(null);
   };

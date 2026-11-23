@@ -10,6 +10,14 @@
  *   - 選択: クリックで選択され、情報パネルにラベル・番号・クラスタ名が出る。パネルの画像がアトラスのセルと一致する
  *   - 解除: 点のない場所のクリックと Esc で、選択が外れる
  *   - ドラッグ: 視点を回すドラッグの終わりを、クリックと誤認しない
+ *   - ボタンの重なり: 左を押したまま右を押し、左を先に離す操作（最後に右を離したときにだけ pointerup が出る）で、選択が変わらない。
+ *     そのあとの左クリックは 1 回で効く
+ *   - capture が外れたとき: 押している最中に O キーでモードを切り替え、要素の外（情報パネルの上）で離したあと、
+ *     次のクリックが 1 回で効く
+ *   - 情報パネルのアクセシビリティ: リージョンと見出し、読み上げ用の領域（role=status・aria-live）に内容、
+ *     画像の代替テキスト、閉じるボタンをキーボードで操作できる
+ *   - ダブルクリックと選択（仕様）: 点 B を選択中に点 A をダブルクリックすると選択が A に移って A へ飛ぶ。
+ *     点のない場所のダブルクリックは選択を解除して、飛ばない
  *   - 強調表示: 有無でピッキングの結果（番号の画像）が変わらない。通常の描画には輪が出る
  *   - ダブルクリック: その点へ移動し、止まった位置がその点から決めた距離で、点が画面の中央に十分な大きさで見える
  *   - 俯瞰モードでのダブルクリック: 飛行モードへ切り替わって移動する
@@ -204,6 +212,198 @@ async function testHoverAndSelect(page, ds, view, expectCluster) {
   return { p, empty };
 }
 
+/** 情報パネルのアクセシビリティ。選択中（点 p）の状態から始め、選択された状態で終わる。 */
+async function testPanelA11y(page, ds, p, expectCluster) {
+  console.log('\n[情報パネルのアクセシビリティ]');
+  const labelName = ds.manifest.labels.names[ds.labels[p.i]];
+  const a = await page.evaluate(() => {
+    const info = document.getElementById('info');
+    const live = document.getElementById('info-live');
+    const img = document.getElementById('info-image');
+    const heading = document.getElementById(info.getAttribute('aria-labelledby') || '');
+    const close = document.getElementById('info-close');
+    return {
+      role: info.getAttribute('role'),
+      headingTag: heading && heading.tagName,
+      headingText: heading && heading.textContent,
+      liveRole: live.getAttribute('role'),
+      liveAria: live.getAttribute('aria-live'),
+      liveAtomic: live.getAttribute('aria-atomic'),
+      liveText: live.textContent,
+      liveInsideHiddenPanel: info.contains(live),
+      imgRole: img.getAttribute('role'),
+      imgAlt: img.getAttribute('aria-label'),
+      closeTag: close.tagName, closeType: close.type, closeLabel: close.getAttribute('aria-label'), closeTabindex: close.getAttribute('tabindex'),
+    };
+  });
+  check('パネルは見出しつきのリージョン（role=region、aria-labelledby が見出し h2 を指す）',
+    a.role === 'region' && a.headingTag === 'H2' && a.headingText === '選択中の点', JSON.stringify({ role: a.role, heading: a.headingTag, text: a.headingText }));
+  check('読み上げ用の領域が role=status・aria-live=polite・aria-atomic=true で、パネルの外（常に DOM にある）にある',
+    a.liveRole === 'status' && a.liveAria === 'polite' && a.liveAtomic === 'true' && !a.liveInsideHiddenPanel, JSON.stringify({ role: a.liveRole, live: a.liveAria, atomic: a.liveAtomic }));
+  const wantCluster = expectCluster(p.i);
+  check('選択すると、読み上げ用の領域にラベル・番号・クラスタ名が入る',
+    a.liveText.includes(`${labelName}`) && a.liveText.includes(`番号 ${p.i}`) && a.liveText.includes(wantCluster), `"${a.liveText}"`);
+  check('画像のキャンバスに role=img と代替テキスト（手書きの数字 N の画像）がある',
+    a.imgRole === 'img' && a.imgAlt === `手書きの数字 ${labelName} の画像`, `role ${a.imgRole}、"${a.imgAlt}"`);
+  check('閉じるボタンは button 要素（type=button）で、名前があり、tabindex で外されていない',
+    a.closeTag === 'BUTTON' && a.closeType === 'button' && a.closeLabel === '選択を解除' && a.closeTabindex === null, JSON.stringify({ label: a.closeLabel, tabindex: a.closeTabindex }));
+
+  // アクセシビリティツリー上の見え方
+  const snap = await page.locator('#info').ariaSnapshot();
+  check('アクセシビリティツリーに、見出し・画像（代替テキスト）・ボタンが出る',
+    snap.includes('heading "選択中の点"') && snap.includes(`img "手書きの数字 ${labelName} の画像"`) && snap.includes('button "選択を解除"'), snap.replace(/\n/g, ' / '));
+
+  // 別の点を選ぶと代替テキストと読み上げが更新される
+  const q = await findVisiblePoint(page, { exclude: [p.i] });
+  if (q) {
+    await page.mouse.click(q.x, q.y);
+    await waitFrames(page, async (pg) => ({ ok: (await ix(pg)).selected === q.i }));
+    const b = await page.evaluate(() => ({ alt: document.getElementById('info-image').getAttribute('aria-label'), live: document.getElementById('info-live').textContent }));
+    const qName = ds.manifest.labels.names[ds.labels[q.i]];
+    check('別の点を選ぶと、代替テキストと読み上げの内容がその点に更新される',
+      b.alt === `手書きの数字 ${qName} の画像` && b.live.includes(`番号 ${q.i}`) && b.live.includes(expectCluster(q.i)), `"${b.alt}"、"${b.live}"`);
+  }
+
+  // キーボードで閉じる: Tab で閉じるボタンへ移り、Enter で選択を解除する
+  await page.evaluate(() => { if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur(); });
+  let reached = false;
+  for (let k = 0; k < 6 && !reached; k++) {
+    await page.keyboard.press('Tab');
+    reached = await page.evaluate(() => document.activeElement && document.activeElement.id === 'info-close');
+  }
+  check('Tab キーで閉じるボタンにフォーカスが移る', reached);
+  await page.keyboard.press('Enter');
+  const r = await waitFrames(page, async (pg) => { const s = await ix(pg); return { ok: s.selected === null, s }; }, 4);
+  const after = await page.evaluate(() => ({ hidden: document.getElementById('info').hidden, live: document.getElementById('info-live').textContent }));
+  check('閉じるボタンを Enter で押すと、選択が外れ、パネルが消え、読み上げの内容も空になる', r.ok && after.hidden && after.live === '', `選択 ${r.s.selected}、パネルの hidden ${after.hidden}、読み上げ "${after.live}"`);
+  await page.evaluate(() => { if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur(); });
+  // 次の検証のため、点 p を選択し直す
+  await page.mouse.click(p.x, p.y);
+  await waitFrames(page, async (pg) => ({ ok: (await ix(pg)).selected === p.i }));
+}
+
+/** キャンバスのポインタイベントを記録する（診断用）。 */
+async function recordPointerEvents(page) {
+  await page.evaluate(() => {
+    if (window.__pe) { window.__pe.length = 0; return; }
+    window.__pe = [];
+    const c = document.querySelector('#app canvas');
+    for (const t of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel', 'lostpointercapture']) {
+      c.addEventListener(t, (e) => window.__pe.push(`${t}(button ${e.button}, buttons ${e.buttons})`));
+    }
+  });
+}
+
+async function testChordedButtons(page, view) {
+  console.log('\n[左右のボタンを重ねて押す]');
+  await setView(page, view.pos, view.look);
+  await waitStill(page);
+  const a = await findVisiblePoint(page);
+  const b = a && await findVisiblePoint(page, { exclude: [a.i] });
+  if (!a || !b) { check('ボタンの重なりの検証に使う点が見つかる', false); return; }
+  await page.mouse.click(a.x, a.y);
+  await waitFrames(page, async (pg) => ({ ok: (await ix(pg)).selected === a.i }));
+  await recordPointerEvents(page);
+  // b の上で、左を押したまま右を押し、左を先に離してから右を離す
+  await page.mouse.move(b.x, b.y);
+  await waitFrames(page, async (pg) => ({ ok: (await ix(pg)).hovered === b.i }));
+  await page.mouse.down({ button: 'left' });
+  await page.mouse.down({ button: 'right' });
+  await page.mouse.up({ button: 'left' });
+  await page.mouse.up({ button: 'right' });
+  await frames(page, 4);
+  const events = await page.evaluate(() => window.__pe.join(' '));
+  const s = await ix(page);
+  check('左を押したまま右を押し、左を先に離しても、選択が変わらない（右ボタンの pointerup をクリックにしない）', s.selected === a.i,
+    `選択 ${s.selected}（期待 ${a.i}、押した点 ${b.i}）、イベント: ${events}`);
+  // 右を先に離して、左を最後に離す順序
+  await page.mouse.down({ button: 'left' });
+  await page.mouse.down({ button: 'right' });
+  await page.mouse.up({ button: 'right' });
+  await page.mouse.up({ button: 'left' });
+  await frames(page, 4);
+  const s2 = await ix(page);
+  check('左を押したまま右を重ねて、右を先に離しても、選択が変わらない', s2.selected === a.i, `選択 ${s2.selected}（期待 ${a.i}）`);
+  // 続く左ボタンだけのクリックは 1 回で効く
+  await page.mouse.click(b.x, b.y);
+  const r = await waitFrames(page, async (pg) => { const t = await ix(pg); return { ok: t.selected === b.i, t }; });
+  check('そのあとの左クリックは 1 回で効く', r.ok, `選択 ${r.t.selected}（期待 ${b.i}）`);
+  await page.keyboard.press('Escape');
+  await frames(page, 2);
+}
+
+async function testLostPointerCapture(page, view) {
+  console.log('\n[押している最中に capture が外れる（O キー）]');
+  // ブラウザは、capture の取得と解放の間にポインタイベントがないと、lostpointercapture を出さない。
+  // (1) 押したあとに少し動かしてから O キーを押す（lostpointercapture が出る）
+  // (2) 押した直後に O キーを押す（lostpointercapture が出ない。次の移動の buttons が 0 であることで、取りこぼしを拾う）
+  for (const withMove of [true, false]) {
+    const tag = withMove ? '押したあとに動かしてから' : '押した直後に';
+    await setView(page, view.pos, view.look);
+    await waitStill(page);
+    const a = await findVisiblePoint(page);
+    const c = a && await findVisiblePoint(page, { exclude: [a.i] });
+    const d = c && await findVisiblePoint(page, { exclude: [a.i, c.i] });
+    if (!a || !c || !d) { check('capture の検証に使う点が見つかる', false); return; }
+    // 情報パネルを出すため、a を選択する
+    await page.mouse.click(a.x, a.y);
+    await waitFrames(page, async (pg) => ({ ok: (await ix(pg)).selected === a.i }));
+    const box = await page.evaluate(() => { const r = document.getElementById('info').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; });
+    await recordPointerEvents(page);
+    // c の上で押し、押したまま O キーで俯瞰モードへ。要素（キャンバス）の外＝情報パネルの上で離す
+    await page.mouse.move(c.x, c.y);
+    await page.mouse.down();
+    if (withMove) { await page.mouse.move(c.x + 1, c.y); await frames(page, 1); }
+    await page.keyboard.press('KeyO');
+    await page.waitForFunction(() => window.__explorer.getState().mode === 'overview');
+    await page.mouse.move(box.x, box.y, { steps: 4 });
+    await page.mouse.up();
+    await frames(page, 3);
+    const events = await page.evaluate(() => window.__pe.join(' '));
+    const s1 = await ix(page);
+    check(`${tag} O キーを押し、パネルの上で離しても、選択は変わらない`, s1.selected === a.i, `選択 ${s1.selected}（期待 ${a.i}）`);
+    const upOnCanvas = /pointerup/.test(events);
+    check(`${tag} O キーを押すと、離した pointerup はキャンバスに届かない（取りこぼしの状況になっている）`, !upOnCanvas, events);
+    if (withMove) check('capture が外れた通知（lostpointercapture）が届いている（押下を破棄する契機）', /lostpointercapture/.test(events), events);
+    await page.keyboard.press('KeyO');
+    await page.waitForFunction(() => window.__explorer.getState().mode === 'fly');
+    await waitStill(page);
+    // 次のクリックが 1 回で効く
+    await page.mouse.click(d.x, d.y);
+    const r = await waitFrames(page, async (pg) => { const t = await ix(pg); return { ok: t.selected === d.i, t }; });
+    check(`${tag} O キーを押したあとの最初のクリックが 1 回で効く（押したままの状態が残らない）`, r.ok, `選択 ${r.t.selected}（期待 ${d.i}）`);
+    await page.keyboard.press('Escape');
+    await frames(page, 2);
+  }
+}
+
+/** 点 B を選択中に点 A をダブルクリックすると選択が A に移る。点のない場所のダブルクリックは選択を解除して飛ばない。 */
+async function testDoubleClickSelectionSpec(page, view) {
+  console.log('\n[ダブルクリックと選択の変化（仕様）]');
+  await setView(page, view.pos, view.look);
+  await waitStill(page);
+  const a = await findVisiblePoint(page);
+  const b = a && await findVisiblePoint(page, { exclude: [a.i] });
+  const empty = await findEmptySpot(page);
+  if (!a || !b || !empty) { check('ダブルクリックの仕様の検証に使う点が見つかる', false); return; }
+  // 点のない場所のダブルクリック: 1 回目で選択が解除され、飛ばない
+  await page.mouse.click(b.x, b.y);
+  await waitFrames(page, async (pg) => ({ ok: (await ix(pg)).selected === b.i }));
+  const before = await state(page);
+  await page.mouse.dblclick(empty.x, empty.y);
+  const r = await waitFrames(page, async (pg) => { const t = await ix(pg); return { ok: t.selected === null, t }; }, 6);
+  await frames(page, 6);
+  const after = await state(page);
+  const moved = len(sub(after.position, before.position)) + len(sub(after.direction, before.direction));
+  check('点のない場所をダブルクリックすると、選択が解除され、飛ばない', r.ok && moved < 1e-9, `選択 ${r.t.selected}、カメラの変化 ${moved.toExponential(2)}`);
+  // 点 B を選択中に点 A をダブルクリック: 選択は A に移り、A へ飛ぶ（doubleClickAndCheck が止まる位置と選択を確かめる）
+  await page.mouse.click(b.x, b.y);
+  await waitFrames(page, async (pg) => ({ ok: (await ix(pg)).selected === b.i }));
+  await doubleClickAndCheck(page, a, '別の点を選択中のダブルクリック');
+  await page.keyboard.press('Escape');
+  await frames(page, 2);
+}
+
 async function testDeselect(page, p, empty) {
   console.log('\n[選択の解除]');
   if (empty) {
@@ -379,9 +579,13 @@ async function main() {
     await frames(page, 3);
 
     const r = await testHoverAndSelect(page, ds, edge, expectCluster);
+    if (r) await testPanelA11y(page, ds, r.p, expectCluster);
     if (r) await testDeselect(page, r.p, r.empty);
     await testDrag(page, edge);
+    await testChordedButtons(page, edge);
+    await testLostPointerCapture(page, edge);
     await testHighlightDoesNotChangePicking(page, inside);
+    await testDoubleClickSelectionSpec(page, edge);
     await testDoubleClick(page, edge);
     await testOverviewDoubleClick(page, overview);
     await page.close();

@@ -1,6 +1,10 @@
 /**
  * 選択中の点の情報パネル（画面の右上）と、ホバー中の点のラベル（カーソルの近く）。
- * 要素は index.html にある（#info、#hover-label）。
+ * 要素は index.html にある（#info、#hover-label、#info-live）。
+ *
+ * アクセシビリティ: パネルは見出しつきのリージョン（role="region"）で、画像のキャンバスは role="img" と
+ * 代替テキストを持つ。選択したときの読み上げは、常に DOM にある #info-live（role="status"、aria-live="polite"）へ
+ * 文を入れて行う。パネル自体は `hidden` で出し入れするので、中身を読み上げ対象にしても出現時に拾われない読み上げ環境がある。
  */
 
 export interface PointInfoSource {
@@ -28,6 +32,21 @@ export function coarseClusterName(src: Pick<PointInfoSource, 'coarse'>, index: n
   return src.coarse.names[id] ?? null;
 }
 
+/** 情報パネルの画像の代替テキスト（例: 「手書きの数字 6 の画像」）。 */
+export function imageAltText(labelName: string): string {
+  return `手書きの数字 ${labelName} の画像`;
+}
+
+/** クラスタ名の表示。ノイズは「なし（ノイズ）」、クラスタの情報がなければ「（情報なし）」。 */
+export function clusterText(cluster: string | null | undefined): string {
+  return cluster === undefined ? '（情報なし）' : cluster === null ? 'なし（ノイズ）' : cluster;
+}
+
+/** 選択したときに読み上げる文（ラベル・番号・クラスタ名）。 */
+export function selectionAnnouncement(labelName: string, index: number, cluster: string): string {
+  return `選択した点: ${labelName}、番号 ${index}、クラスタ ${cluster}`;
+}
+
 const css = ([r, g, b]: [number, number, number]) => `rgb(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)})`;
 
 export class InfoPanel {
@@ -39,6 +58,7 @@ export class InfoPanel {
   private readonly indexEl: HTMLElement;
   private readonly clusterEl: HTMLElement;
   private readonly hoverEl: HTMLElement;
+  private readonly liveEl: HTMLElement;
   private readonly src: PointInfoSource;
 
   constructor(doc: Document, src: PointInfoSource, onClose: () => void) {
@@ -55,6 +75,7 @@ export class InfoPanel {
     this.indexEl = get('info-index');
     this.clusterEl = get('info-cluster');
     this.hoverEl = get('hover-label');
+    this.liveEl = get('info-live');
     this.image.width = src.cellSize[0] * INFO_IMAGE_SCALE;
     this.image.height = src.cellSize[1] * INFO_IMAGE_SCALE;
     this.image.style.width = `${this.image.width}px`;
@@ -68,6 +89,7 @@ export class InfoPanel {
     if (index === null) {
       this.root.hidden = true;
       this.root.dataset.index = '';
+      this.liveEl.textContent = ''; // 解除は読み上げない（次の選択が同じ文でも読み上げ直せるよう、空に戻す）
       return;
     }
     const { src } = this;
@@ -80,11 +102,15 @@ export class InfoPanel {
     ctx.clearRect(0, 0, this.image.width, this.image.height);
     ctx.drawImage(src.atlas, sx, sy, cw, ch, 0, 0, this.image.width, this.image.height);
 
-    this.labelEl.textContent = src.labelNames[label] ?? String(label);
+    const labelName = src.labelNames[label] ?? String(label);
+    this.labelEl.textContent = labelName;
+    this.image.setAttribute('aria-label', imageAltText(labelName));
     this.swatch.style.background = css(src.labelColors[label] ?? [1, 1, 1]);
     this.indexEl.textContent = `#${index}`;
     const cluster = coarseClusterName(src, index);
-    this.clusterEl.textContent = cluster === undefined ? '（情報なし）' : cluster === null ? 'なし（ノイズ）' : cluster;
+    const clusterLabel = clusterText(cluster);
+    this.clusterEl.textContent = clusterLabel;
+    this.liveEl.textContent = selectionAnnouncement(labelName, index, clusterLabel);
     this.root.dataset.index = String(index);
     this.root.hidden = false;
   }
