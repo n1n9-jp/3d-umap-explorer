@@ -2,9 +2,9 @@ import * as THREE from 'three';
 import { labelColors } from '../render/palette';
 import type { Vec3, ViewSpec } from '../render/view';
 import {
-  clampRange, clampToFrame, computeExtent, computeLayout, depthHistogram, depthToGauge, fromPlane, mapToPlane,
-  minimapBasis, planeToMap, sampleIndices, toPlane, viewFigure,
-  type MinimapBasis, type MinimapExtent, type MinimapLayout, type Rect,
+  clampRange, clampToFrame, computeExtent, computeLayout, depthFacing, depthHistogram, depthToGauge, describeMinimapStatus,
+  fromPlane, mapToPlane, minimapBasis, planeToMap, sampleIndices, toPlane, viewFigure,
+  type DepthFacing, type MinimapBasis, type MinimapExtent, type MinimapLayout, type Rect, type ViewFigure,
 } from './geometry';
 
 /** 点の大きさ（CSS ピクセル）。描画バッファへは pixelRatio を掛けて丸める。 */
@@ -25,6 +25,9 @@ const CAMERA_COLOR = '#ffffff';
 const CAMERA_OUTLINE = '#07080c';
 const SELECTED_COLOR = '#ffc233';
 const HIST_BINS = 40;
+/** 視線の奥行き成分を示す矢印（目盛りの左寄り）の長さ（CSS ピクセル）。成分が 0 のとき最短、1 のとき最長 */
+const FACING_ARROW_MIN = 7;
+const FACING_ARROW_MAX = 22;
 
 export interface MinimapDeps {
   renderer: THREE.WebGLRenderer;
@@ -70,12 +73,17 @@ export interface MinimapState {
     length: number;
     /** atan2(-y, x) を度で（右が 0、上が 90） */
     angleDeg: number;
+    /** 視線の奥行き成分（-1..1。正が手前向き、負が奥向き）と、手前向き・奥向き・面に水平のどれか */
+    depth: number;
+    facing: DepthFacing;
   };
   depth: {
     /** カメラの奥行き w（上が手前＝w が大きい） */
     value: number;
-    /** 目盛りの印の高さ（画面上） */
+    /** 目盛りの印の高さ（画面上。目盛りの範囲に収めた値） */
     y: number;
+    /** 目盛りの範囲に収める前の高さ（画面上） */
+    rawY: number;
     outside: boolean;
     /** 目盛りの上端・下端の w */
     top: number;
@@ -148,8 +156,17 @@ export class Minimap {
     hist: SVGGElement; rangeTop: SVGLineElement; rangeBottom: SVGLineElement; labelNear: SVGTextElement; labelFar: SVGTextElement;
     fan: SVGPolygonElement; heading: SVGLineElement; cam: SVGCircleElement; camArrow: SVGPolygonElement; outsideText: SVGTextElement;
     sel: SVGCircleElement; depthCam: SVGPolygonElement; depthCamLine: SVGLineElement; depthSel: SVGLineElement;
+    facingLine: SVGLineElement; facingHead: SVGPolygonElement;
+    status: HTMLSpanElement;
   };
   private readonly histogram: number[];
+  /** 印と目盛りの SVG を描き直す必要があるか（配置・表示を変えたとき）。カメラの位置と向き・選択が前のフレームと同じなら描き直さない */
+  private overlayDirty = true;
+  private readonly lastCamera = new Float64Array(16);
+  private lastFov = Number.NaN;
+  private lastAspect = Number.NaN;
+  private lastSelected: number | null | undefined = undefined;
+  private statusText = '';
   private down: { id: number; x: number; y: number } | null = null;
   private readonly saved = {
     viewport: new THREE.Vector4(), scissor: new THREE.Vector4(), clear: new THREE.Color(), size: new THREE.Vector2(),
@@ -235,9 +252,21 @@ export class Minimap {
     this.layout = this.currentLayout();
     this.root = document.createElement('div');
     this.root.id = 'minimap';
-    this.root.setAttribute('role', 'img');
-    this.root.setAttribute('aria-label', 'ミニマップ：全体の俯瞰と現在の位置・視線の向き（クリックでその位置へ移動、M で表示の切り替え）');
-    this.svg = svgEl('svg');
+    // フォーカスできるグループ。中の図（SVG）は読み上げず、状態を文章（status）で伝える。
+    // 操作はマウス・タッチのクリックだけで、キーボードでの移動はない（説明もそのとおりに書く）
+    this.root.setAttribute('role', 'group');
+    this.root.tabIndex = 0;
+    this.root.setAttribute('aria-label', 'ミニマップ');
+    const help = document.createElement('span');
+    help.id = 'minimap-help';
+    help.className = 'sr-only';
+    help.textContent = '全体の俯瞰と、現在の位置・視線の向きを示します。地図や奥行きの目盛りをクリックまたはタップすると、その位置へ移動します。キーボードでは移動できません。M キーで表示を切り替えます。';
+    const status = document.createElement('span');
+    status.id = 'minimap-status';
+    status.className = 'sr-only';
+    status.setAttribute('aria-live', 'off');
+    this.root.setAttribute('aria-describedby', 'minimap-help minimap-status');
+    this.svg = svgEl('svg', { 'aria-hidden': 'true', focusable: 'false' });
     const gaugeGroup = svgEl('g');
     const mapGroup = svgEl('g');
     this.el = {
@@ -258,21 +287,27 @@ export class Minimap {
       depthCam: svgEl('polygon', { class: 'mm-depth-camera', fill: CAMERA_COLOR, stroke: CAMERA_OUTLINE, 'stroke-width': 1.5 }),
       depthCamLine: svgEl('line', { class: 'mm-depth-camera-line', stroke: CAMERA_COLOR, 'stroke-width': 2 }),
       depthSel: svgEl('line', { class: 'mm-depth-selected', stroke: SELECTED_COLOR, 'stroke-width': 2 }),
+      facingLine: svgEl('line', { class: 'mm-facing-line', stroke: CAMERA_COLOR, 'stroke-width': 2, 'stroke-linecap': 'round' }),
+      facingHead: svgEl('polygon', { class: 'mm-facing-head', fill: CAMERA_COLOR, stroke: CAMERA_OUTLINE, 'stroke-width': 1 }),
+      status,
     };
     this.el.labelNear.textContent = '前';
     this.el.labelFar.textContent = '奥';
     this.el.outsideText.textContent = '範囲外';
     gaugeGroup.append(this.el.gaugeBg, this.el.hist, this.el.rangeTop, this.el.rangeBottom, this.el.labelNear, this.el.labelFar,
-      this.el.depthSel, this.el.depthCamLine, this.el.depthCam);
+      this.el.depthSel, this.el.depthCamLine, this.el.depthCam, this.el.facingLine, this.el.facingHead);
     mapGroup.append(this.el.border, this.el.fan, this.el.heading, this.el.sel, this.el.cam, this.el.camArrow, this.el.outsideText);
     this.svg.append(gaugeGroup, mapGroup);
     const gaugeTitle = svgEl('title');
-    gaugeTitle.textContent = '奥行き（上が手前）。白はカメラ、黄色は選択中の点。クリックでその奥行きへ移動';
+    gaugeTitle.textContent = '奥行き（上が手前）。白の横線と三角はカメラ、白い矢印は視線が手前向き（上）か奥向き（下）か、黄色は選択中の点。クリックでその奥行きへ移動';
     gaugeGroup.prepend(gaugeTitle);
-    this.root.append(this.svg);
+    this.root.append(this.svg, help, status);
     deps.container.append(this.root);
     this.applyLayout();
 
+    // 読み上げ中だけ、状態の変化を知らせる（常時だと、飛び回るたびに読み上げが続く）
+    this.root.addEventListener('focus', () => this.el.status.setAttribute('aria-live', 'polite'));
+    this.root.addEventListener('blur', () => this.el.status.setAttribute('aria-live', 'off'));
     this.root.addEventListener('pointerdown', this.onPointerDown);
     this.root.addEventListener('pointerup', this.onPointerUp);
     this.root.addEventListener('pointercancel', this.onPointerCancel);
@@ -298,6 +333,7 @@ export class Minimap {
     this.visible = visible;
     this.root.hidden = !visible;
     this.down = null;
+    this.overlayDirty = true;
     this.applyReserve();
   }
 
@@ -313,12 +349,34 @@ export class Minimap {
     this.applyLayout();
   }
 
-  /** 本体の描画のあとに呼ぶ。地図の領域へ点群を描き、印と目盛りを更新する。 */
+  /**
+   * 本体の描画のあとに呼ぶ。地図の領域へ点群を描き（本体が毎フレーム全体を描き直すので、毎フレーム）、
+   * 印と目盛りの SVG は、カメラの位置・向き、選択中の点、配置のどれかが変わったフレームだけ更新する。
+   */
   render(): void {
     if (!this.visible) return;
     this.resize();
     this.drawPoints();
-    this.updateOverlay(this.getState());
+    if (this.overlayChanged()) {
+      const { state, fig } = this.snapshot();
+      this.updateOverlay(state, fig);
+    }
+  }
+
+  /** SVG に映る入力（カメラの行列・視野・縦横比、選択中の点）が前回から変わったか。変わっていなければ何も生成しない。 */
+  private overlayChanged(): boolean {
+    const cam = this.deps.camera;
+    cam.updateMatrixWorld();
+    const e = cam.matrixWorld.elements;
+    let changed = this.overlayDirty;
+    for (let i = 0; i < 16; i++) {
+      if (e[i] !== this.lastCamera[i]) { this.lastCamera[i] = e[i]!; changed = true; }
+    }
+    if (cam.fov !== this.lastFov || cam.aspect !== this.lastAspect) { this.lastFov = cam.fov; this.lastAspect = cam.aspect; changed = true; }
+    const sel = this.deps.selected();
+    if (sel !== this.lastSelected) { this.lastSelected = sel; changed = true; }
+    this.overlayDirty = false;
+    return changed;
   }
 
   dispose(): void {
@@ -380,18 +438,20 @@ export class Minimap {
 
   // ---------- 配置 ----------
 
+  /** 配置を決める入力：画面の大きさ（CSS ピクセル）と、描画バッファの倍率（倍率が変わると描き直す点の大きさも変わる）。 */
   private sizeKey(): string {
     const v = this.deps.renderer.getSize(this.saved.size);
-    return `${v.x}x${v.y}`;
+    return `${v.x}x${v.y}@${this.deps.renderer.getPixelRatio()}`;
   }
 
   private currentLayout(): MinimapLayout {
     const v = this.deps.renderer.getSize(this.saved.size);
-    this.lastSizeKey = `${v.x}x${v.y}`;
+    this.lastSizeKey = this.sizeKey();
     return computeLayout(v.x, v.y);
   }
 
   private applyLayout(): void {
+    this.overlayDirty = true;
     const { outer, map, gauge } = this.layout;
     const st = this.root.style;
     st.left = `${outer.left}px`;
@@ -461,6 +521,11 @@ export class Minimap {
   }
 
   getState(): MinimapState {
+    return this.snapshot().state;
+  }
+
+  /** 状態と、視野の図形（1 回だけ計算して、状態と SVG の描き直しで共有する）。 */
+  private snapshot(): { state: MinimapState; fig: ViewFigure } {
     const { map, gauge } = this.layout;
     const cam = this.deps.camera;
     const q = this.cameraPlane();
@@ -480,7 +545,8 @@ export class Minimap {
       selected = { index: selIndex, x: map.left + sc.x, y: map.top + sc.y, outside: sc.outside, depthY: gauge.top + sd.value, depthOutside: sd.outside };
     }
     const [hx, hy] = fig.heading;
-    return {
+    const facing = depthFacing(this.tmpDir.toArray() as Vec3, this.basis);
+    const state: MinimapState = {
       visible: this.visible,
       map: { ...map },
       gauge: { ...gauge },
@@ -488,14 +554,15 @@ export class Minimap {
       basis: this.basis,
       extent: this.extent,
       camera: { x: map.left + cl.x, y: map.top + cl.y, rawX: map.left + rx, rawY: map.top + ry, outside: cl.outside, plane: q },
-      heading: { x: hx, y: hy, length: fig.headingLength, angleDeg: (Math.atan2(-hy, hx) * 180) / Math.PI },
+      heading: { x: hx, y: hy, length: fig.headingLength, angleDeg: (Math.atan2(-hy, hx) * 180) / Math.PI, depth: facing.component, facing: facing.facing },
       depth: {
-        value: q[2], y: gauge.top + dc.value, outside: dc.outside,
+        value: q[2], y: gauge.top + dc.value, rawY: gauge.top + dRaw, outside: dc.outside,
         top: this.extent.center[2] + this.extent.half, bottom: this.extent.center[2] - this.extent.half,
         pointsMin: this.extent.depthRange[0], pointsMax: this.extent.depthRange[1],
       },
       selected,
     };
+    return { state, fig };
   }
 
   private figure(cam: THREE.PerspectiveCamera) {
@@ -513,12 +580,11 @@ export class Minimap {
     }, this.basis);
   }
 
-  private updateOverlay(s: MinimapState): void {
+  private updateOverlay(s: MinimapState, fig: ViewFigure): void {
     const { map, gauge } = this.layout;
     const el = this.el;
     const cx = s.camera.x - map.left, cy = s.camera.y - map.top;
     const L = FIGURE_LENGTH * map.width;
-    const fig = this.figure(this.deps.camera);
     el.fan.setAttribute('points', fig.hull.map(([x, y]) => `${fmt(cx + x * L)},${fmt(cy + y * L)}`).join(' '));
     el.heading.setAttribute('x1', fmt(cx));
     el.heading.setAttribute('y1', fmt(cy));
@@ -561,7 +627,32 @@ export class Minimap {
     } else {
       el.depthCam.setAttribute('points', `${fmt(gw - 1)},${fmt(dy - 5)} ${fmt(gw - 1)},${fmt(dy + 5)} ${fmt(gw - 8)},${fmt(dy)}`);
     }
+    // 視線が手前向きか奥向きか：投影した図形では区別できないので、目盛りの側に矢印（上＝手前、下＝奥）で示す
+    const ax = 6;
+    if (s.heading.facing === 'level') {
+      el.facingLine.style.display = 'none';
+      el.facingHead.style.display = 'none';
+    } else {
+      const sign = s.heading.facing === 'near' ? -1 : 1; // 上が手前（y が小さい）
+      const len = FACING_ARROW_MIN + (FACING_ARROW_MAX - FACING_ARROW_MIN) * Math.min(1, Math.abs(s.heading.depth));
+      const tipY = clampRange(dy + sign * len, 1, gauge.height - 1).value;
+      const headBase = tipY - sign * 5;
+      el.facingLine.style.display = '';
+      el.facingHead.style.display = '';
+      el.facingLine.setAttribute('x1', String(ax)); el.facingLine.setAttribute('x2', String(ax));
+      el.facingLine.setAttribute('y1', fmt(dy)); el.facingLine.setAttribute('y2', fmt(headBase));
+      el.facingHead.setAttribute('points', `${ax},${fmt(tipY)} ${ax + 4},${fmt(headBase)} ${ax - 4},${fmt(headBase)}`);
+    }
     this.root.classList.toggle('outside', s.camera.outside || s.depth.outside);
+    // 読み上げ用の説明。大まかな位置が変わったときだけ書き換える
+    const text = describeMinimapStatus({
+      mapX: s.camera.rawX - map.left, mapY: s.camera.rawY - map.top, mapSize: map.width,
+      depthY: s.depth.rawY - gauge.top, gaugeHeight: gauge.height, facing: s.heading.facing,
+    });
+    if (text !== this.statusText) {
+      this.statusText = text;
+      el.status.textContent = text;
+    }
   }
 
   // ---------- クリックで移動 ----------

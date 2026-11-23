@@ -70,7 +70,10 @@ async function start(): Promise<void> {
   THREE.ColorManagement.enabled = false; // シェーダは sRGB の値をそのまま出力する
 
   const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  // 描画バッファの倍率。ブラウザのズームや別のモニタへの移動で devicePixelRatio が変わるので、resize() と描画ループで追従する
+  const MAX_PIXEL_RATIO = 2;
+  const currentPixelRatio = () => Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO);
+  renderer.setPixelRatio(currentPixelRatio());
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.setClearColor(new THREE.Color(BACKGROUND_COLOR), 1);
   container.appendChild(renderer.domElement);
@@ -121,7 +124,7 @@ async function start(): Promise<void> {
   let clipOverride: ClipPlanes | null = null;
   const updateCameraDependent = () => {
     const d = camera.position.distanceTo(boundsCenter);
-    const clip = clipOverride ?? clipPlanesForCamera(d, arrays.bounds.radius);
+    const clip = clipOverride ?? clipPlanesForCamera(d, arrays.bounds.radius, { fovDeg: camera.fov, aspect: camera.aspect });
     if (camera.near !== clip.near || camera.far !== clip.far) {
       camera.near = clip.near;
       camera.far = clip.far;
@@ -132,6 +135,7 @@ async function start(): Promise<void> {
   updateCameraDependent();
 
   const resize = () => {
+    renderer.setPixelRatio(currentPixelRatio());
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
@@ -211,6 +215,9 @@ async function start(): Promise<void> {
     frameArmed = frameTimes !== null; // 計測要求の直後のフレームは区間が不完全なので数えない
     last = now;
 
+    // 画面の倍率（devicePixelRatio）が変わったら、画面の大きさが変わったときと同じ経路で、描画バッファ・点の大きさ・
+    // ミニマップを合わせ直す（ズームやモニタの移動では resize イベントが来ないことがある）
+    if (currentPixelRatio() !== renderer.getPixelRatio()) resize();
     controller.update(dt);
     updateCameraDependent();
     clusterLabels.update(window.innerWidth, window.innerHeight);

@@ -13,6 +13,9 @@
  * ref との違いが前後の誤り、連続する位置の間で fixed だけに出る違いがちらつきの目安になる。
  * 各位置のスクリーンショット（fixed と auto）を --out に保存する。
  *
+ * 横に非常に広い画面（既定 2400x700）でも同じ比較を行う（--wide-width / --wide-height / --wide-steps）。参照の近接面は、画面の隅の方向
+ * （縦の視野角 60° と縦横比から求める）の cos で下限を決めるので、近接面が隅の点を切ると auto と ref の違いに出る。
+ *
  * 失敗の条件：auto と ref の違いが、どの視点・位置でも画面の 0.01% を超える。コンソールエラーがある。
  */
 const { execSync } = require('node:child_process');
@@ -20,6 +23,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require('playwright');
 const { loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, add, mul, norm } = require('./lib.cjs');
+const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 
 const root = path.resolve(__dirname, '../..');
 const args = process.argv.slice(2);
@@ -60,15 +64,20 @@ async function main() {
     ];
 
     const summary = [];
+    const runTargets = async (page, targets, vp, stepsN) => {
     for (const t of targets) {
       const dir = norm(sub(t.look, t.pos));
       const d = Math.hypot(...sub(t.pos, bounds.center));
       const outside = Math.max(0, d - bounds.radius);
+      // 参照の近接面: 視錐台の内側の点の奥行きの下限（距離 × cos(隅の角度)）の 0.95 倍。隅の角度は縦の視野角 60° と縦横比から、
+      // アプリとは独立にここで求める（横に広い画面では 0.95 × outside だと、画面の隅の点が参照のほうで切れてしまう）
+      const tv = Math.tan(Math.PI / 6), th = tv * (vp.width / vp.height);
+      const cornerCos = 1 / Math.sqrt(1 + tv * tv + th * th);
       const ref = outside > 0.01
-        ? { near: 0.95 * outside, far: (d + bounds.radius) * 1.02 }
+        ? { near: 0.95 * outside * cornerCos, far: (d + bounds.radius) * 1.02 }
         : { near: 0.0005, far: (d + bounds.radius) * 1.02 };
       const rows = [];
-      for (let k = 0; k < steps; k++) {
+      for (let k = 0; k < stepsN; k++) {
         const pos = add(t.pos, mul(dir, k * stepLen));
         const look = add(t.look, mul(dir, k * stepLen));
         const r = await page.evaluate(({ pos, look, ref, k }) => {
@@ -116,6 +125,66 @@ async function main() {
       if (maxAuto > rows[0].pixels * 1e-4) failures.push(`${t.label}: auto と ref の差が ${maxAuto} 画素`);
       summary.push({ ...t, distance: d, ref, rows });
     }
+    };
+    if (!args.includes('--only-wide')) await runTargets(page, targets, { width, height }, steps);
+
+    // 横に非常に広い画面（既定 2400x700、縦横比 3.4）で、点群のすぐ外から見る。画面の隅に点群の手前の表面が来る向きを含む。
+    // 近接面が隅の点を切ると、auto と ref の違い（隅の点の欠け）になる
+    const wide = { width: Number(opt('wide-width', '2400')), height: Number(opt('wide-height', '700')) };
+    const widePage = await browser.newPage({ viewport: wide, deviceScaleFactor: 1 });
+    widePage.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(m.text()); });
+    widePage.on('pageerror', (e) => consoleErrors.push(e.message));
+    await widePage.goto(`${base}?${new URLSearchParams({ data: dataPath })}`);
+    await widePage.waitForFunction(() => window.__explorer && (window.__explorer.ready || window.__explorer.error), null, { timeout: 60000 });
+    const tvW = Math.tan(Math.PI / 6), thW = tvW * (wide.width / wide.height);
+    const cornerAngle = Math.acos(1 / Math.sqrt(1 + tvW * tvW + thW * thW)); // 視線と画面の隅の方向のなす角（縦横比 3.4 で約 64°）
+    // 中心から最も遠い点（bounds の球の表面にある点）。その点の向きからすぐ外にカメラを置くと、この点がカメラに最も近い点になる
+    let farIdx = 0, farDist = -1;
+    for (let i = 0; i < ds.count; i++) {
+      const dd = Math.hypot(ds.positions[3 * i] - bounds.center[0], ds.positions[3 * i + 1] - bounds.center[1], ds.positions[3 * i + 2] - bounds.center[2]);
+      if (dd > farDist) { farDist = dd; farIdx = i; }
+    }
+    const P = [ds.positions[3 * farIdx], ds.positions[3 * farIdx + 1], ds.positions[3 * farIdx + 2]];
+    const uP = norm(sub(P, bounds.center));
+    const wideTargets = [];
+    const wideInfo = [];
+    // three.js の lookAt（上は +Y）のカメラの右・上
+    const basis = (f) => {
+      const r = norm([-f[2], 0, f[0]]); // 視線 × (0,1,0)
+      return { r, u: [r[1] * f[2] - r[2] * f[1], r[2] * f[0] - r[0] * f[2], r[0] * f[1] - r[1] * f[0]] };
+    };
+    const forwardOf = (yaw, pitch) => [Math.cos(pitch) * Math.sin(yaw), Math.sin(pitch), Math.cos(pitch) * Math.cos(yaw)];
+    const screenOf = (f, v) => { // 画面上の位置（±1 が画面の端、(±1, ±1) が隅）と奥行き
+      const { r, u } = basis(f);
+      const z = dot3(v, f);
+      return { sx: dot3(v, r) / (z * thW), sy: dot3(v, u) / (z * tvW), z };
+    };
+    for (const [frac, gap] of [[0, 0.12], [0.5, 0.12], [0.98, 0.12], [0.98, 0.3], [0.98, 0.06]]) {
+      const pos = add(P, mul(uP, gap)); // 点 P のすぐ外（点から gap）
+      const v = sub(P, pos);
+      // 点 P が画面の (frac, frac) の位置（frac = 0.98 なら隅のすぐ内側）に見える視線を、格子の探索で求める
+      const t0 = norm(v);
+      const yaw0 = Math.atan2(t0[0], t0[2]), pitch0 = Math.asin(t0[1]);
+      let best = { err: Infinity, yaw: yaw0, pitch: pitch0 };
+      for (let span = 1.6, step = 0.02; step > 1e-5; span = step * 4, step /= 8) {
+        const c = { yaw: best.yaw, pitch: best.pitch, err: best.err };
+        for (let dy = -span; dy <= span + 1e-12; dy += step) for (let dp = -span; dp <= span + 1e-12; dp += step) {
+          const pitch = c.pitch + dp;
+          if (Math.abs(pitch) > 1.5) continue;
+          const sc = screenOf(forwardOf(c.yaw + dy, pitch), v);
+          if (!(sc.z > 0)) continue;
+          const err = (sc.sx - frac) ** 2 + (sc.sy - frac) ** 2;
+          if (err < best.err) best = { err, yaw: c.yaw + dy, pitch };
+        }
+      }
+      const f = forwardOf(best.yaw, best.pitch);
+      const sc = screenOf(f, v);
+      wideInfo.push({ frac, gap, sx: sc.sx, sy: sc.sy, depth: sc.z });
+      wideTargets.push({ name: `wide-${Math.round(frac * 100)}-gap${gap}`, label: `横に広い画面 ${wide.width}x${wide.height}：点 ${farIdx}（球の表面）のすぐ外（${gap}）、点は画面上 x ${sc.sx.toFixed(2)}, y ${sc.sy.toFixed(2)}（隅が ±1）、奥行き ${sc.z.toFixed(4)}`, pos: pos.map((x) => Number(x.toFixed(6))), look: add(pos, mul(f, 0.25)).map((x) => Number(x.toFixed(6))) });
+      if (!(Math.abs(sc.sx - frac) < 0.02 && Math.abs(sc.sy - frac) < 0.02)) failures.push(`検証の配置が合わない: 点 ${farIdx} が画面上 x ${sc.sx.toFixed(3)}, y ${sc.sy.toFixed(3)}（期待 ${frac}）`);
+    }
+    await runTargets(widePage, wideTargets, wide, Number(opt('wide-steps', '2')));
+
     fs.writeFileSync(path.join(outDir, 'report.json'), JSON.stringify({ summary, consoleErrors }, null, 2));
     if (consoleErrors.length) failures.push(`コンソールエラー ${consoleErrors.length} 件:\n${consoleErrors.join('\n')}`);
     console.log(failures.length ? `\n失敗:\n${failures.join('\n')}` : '\n失敗: なし');

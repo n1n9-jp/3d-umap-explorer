@@ -3,8 +3,8 @@ import { PerspectiveCamera, Vector3 } from 'three';
 import { computeHomeView } from '../app/homeView';
 import type { Vec3 } from '../render/view';
 import {
-  clampRange, clampToFrame, computeExtent, computeLayout, convexHull, depthHistogram, depthToGauge, fromPlane, mapToPlane,
-  minimapBasis, planeToMap, sampleIndices, toPlane, viewFigure, withMinimapHelp,
+  clampRange, clampToFrame, computeExtent, computeLayout, convexHull, depthFacing, depthHistogram, depthToGauge, describeMinimapStatus,
+  FACING_THRESHOLD, fromPlane, mapToPlane, minimapBasis, planeToMap, sampleIndices, toPlane, viewFigure, withMinimapHelp,
   GAUGE_GAP, GAUGE_WIDTH, LAYOUT_MARGIN, MAP_SIZE_MAX, MAP_SIZE_MIN,
 } from './geometry';
 
@@ -181,6 +181,63 @@ describe('viewFigure', () => {
     expect(f.heading).toEqual([0, 0]);
     expect(f.headingLength).toBeCloseTo(0);
     expect(f.hull.length).toBe(4); // 原点は内側
+  });
+});
+
+describe('depthFacing（手前向きか奥向きか）', () => {
+  const b = minimapBasis(MNIST_AXES);
+  const neg = (v: Vec3): Vec3 => [-v[0], -v[1], -v[2]];
+
+  it('視線が面に垂直だと、投影した図形は手前向きでも奥向きでも同じ形になる（だから目盛りの側で区別する）', () => {
+    const toward = viewFigure({ forward: b.back, right: neg(b.right), up: b.up, fovDeg: 60, aspect: 1.6 }, b);
+    const away = viewFigure({ forward: neg(b.back), right: b.right, up: b.up, fovDeg: 60, aspect: 1.6 }, b);
+    expect(toward.heading).toEqual([0, 0]);
+    expect(away.heading).toEqual([0, 0]);
+    // 隅の並びは左右が入れ替わるだけで、凸包の頂点の集合は同じ
+    const key = (h: [number, number][]) => h.map(([x, y]) => `${x.toFixed(6)},${y.toFixed(6)}`).sort().join('|');
+    expect(key(toward.hull)).toBe(key(away.hull));
+    expect(depthFacing(b.back, b).facing).toBe('near');
+    expect(depthFacing(neg(b.back), b).facing).toBe('far');
+  });
+
+  it('手前向きは成分が正、奥向きは負。面に平行なら横向き', () => {
+    expect(depthFacing(b.back, b).component).toBeCloseTo(1, 9);
+    expect(depthFacing(neg(b.back), b).component).toBeCloseTo(-1, 9);
+    expect(depthFacing(b.right, b)).toMatchObject({ facing: 'level' });
+    expect(depthFacing(b.up, b).component).toBeCloseTo(0, 9);
+  });
+
+  it('しきい値の前後で切り替わり、ベクトルの長さによらない', () => {
+    const tilt = (k: number): Vec3 => [b.right[0] * Math.sqrt(1 - k * k) + b.back[0] * k, b.right[1] * Math.sqrt(1 - k * k) + b.back[1] * k, b.right[2] * Math.sqrt(1 - k * k) + b.back[2] * k];
+    expect(depthFacing(tilt(FACING_THRESHOLD + 0.01), b).facing).toBe('near');
+    expect(depthFacing(tilt(FACING_THRESHOLD - 0.01), b).facing).toBe('level');
+    expect(depthFacing(tilt(-(FACING_THRESHOLD + 0.01)), b).facing).toBe('far');
+    expect(depthFacing(tilt(-(FACING_THRESHOLD - 0.01)), b).facing).toBe('level');
+    const long = tilt(0.5).map((x) => x * 7) as Vec3;
+    expect(depthFacing(long, b).component).toBeCloseTo(0.5, 9);
+    expect(depthFacing([0, 0, 0], b).facing).toBe('level'); // 長さ 0 でも壊れない
+  });
+
+  it('ホームの視点（奥を見下ろす）は奥向き', () => {
+    const home = computeHomeView({ center: [0, 0, 0], radius: 1.14 }, 60, 1.6, MNIST_AXES);
+    const f: Vec3 = [home.look[0] - home.pos[0], home.look[1] - home.pos[1], home.look[2] - home.pos[2]];
+    expect(depthFacing(f, b).facing).toBe('far');
+  });
+});
+
+describe('describeMinimapStatus（読み上げ用の説明）', () => {
+  const base = { mapSize: 200, gaugeHeight: 200, facing: 'far' as const };
+  it('地図の 3×3 と奥行きの 3 段で言う', () => {
+    expect(describeMinimapStatus({ ...base, mapX: 100, mapY: 100, depthY: 100 })).toBe('現在位置: 地図の中央あたり、奥行きは中ほど。視線は奥向き。');
+    expect(describeMinimapStatus({ ...base, mapX: 190, mapY: 10, depthY: 10 })).toBe('現在位置: 地図の右上あたり、奥行きは手前寄り。視線は奥向き。');
+    expect(describeMinimapStatus({ ...base, mapX: 10, mapY: 100, depthY: 190, facing: 'near' })).toBe('現在位置: 地図の左あたり、奥行きは奥寄り。視線は手前向き。');
+  });
+  it('範囲の外にいることを言う', () => {
+    const t = describeMinimapStatus({ ...base, mapX: 320, mapY: -40, depthY: -30, facing: 'level' });
+    expect(t).toContain('地図の範囲の外');
+    expect(t).toContain('目盛りの範囲の外（手前側）');
+    expect(t).toContain('奥行きには水平な向き');
+    expect(describeMinimapStatus({ ...base, mapX: 100, mapY: 100, depthY: 230 })).toContain('目盛りの範囲の外（奥側）');
   });
 });
 
