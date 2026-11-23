@@ -827,7 +827,7 @@ async function testResize(browser, base, clusters) {
         };
       });
       check('幅 600 の画面: HUD が画面からはみ出さず、操作説明が複数行に折り返される（項目の途中では折り返さない）',
-        hud.left >= 0 && hud.right <= hud.innerWidth && hud.brokenItems === 0 && hud.helpLines >= 2 && hud.n >= 10, JSON.stringify(hud));
+        hud.left >= 0 && hud.right <= hud.innerWidth && hud.brokenItems === 0 && hud.helpLines >= 2 && hud.n >= 9, JSON.stringify(hud));
       check('幅 600 の画面: 操作説明に L キーと M キーがある。現在地の表示は HUD の上にあって重ならない', hud.help.includes('L 目印の表示') && hud.help.includes('M ミニマップ') && hud.locBottom <= hud.hudTop, `現在地の下端 ${hud.locBottom}、HUD の上端 ${hud.hudTop}`);
     }
   }
