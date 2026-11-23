@@ -24,8 +24,10 @@ export interface DatasetArrays {
   manifest: DatasetManifest;
   /** 長さ 3 * count */
   positions: Float32Array;
-  /** 長さ count、値は manifest.labels.names の添字 */
-  labels: Uint8Array;
+  /** manifest.labels があるときのみ。長さ count、値は manifest.labels.names の添字 */
+  labels?: Uint8Array;
+  /** manifest.text があるときのみ。長さ count。点 i の表示用の文字列 */
+  text?: string[];
   /** 座標の境界（全点を含む軸平行の箱と外接球） */
   bounds: DatasetBounds;
   /** manifest.clusters があるときのみ。`manifest.clusters.levels` と同じ順 */
@@ -46,6 +48,16 @@ async function fetchOk(fetchImpl: FetchLike, url: string) {
   return res;
 }
 
+/** JSON を取得する。JSON として読めなければ（存在しない場所で HTML が返る場合など）、ファイル名つきのエラーにする。 */
+async function fetchJson(fetchImpl: FetchLike, url: string): Promise<unknown> {
+  const res = await fetchOk(fetchImpl, url);
+  try {
+    return await res.json();
+  } catch {
+    throw new Error(`${url} を JSON として読めません（データセットの場所が正しいか確かめてください）`);
+  }
+}
+
 /** 座標から境界を計算する。球は原点中心で、原点から最も遠い点までを半径とする。 */
 export function computeBounds(positions: Float32Array): DatasetBounds {
   const min: [number, number, number] = [Infinity, Infinity, Infinity];
@@ -62,24 +74,41 @@ export function computeBounds(positions: Float32Array): DatasetBounds {
   return { min, max, center: [0, 0, 0], radius: Math.sqrt(r2) };
 }
 
+/** text.json の中身（長さ count の文字列の配列）を検査する。 */
+export function parseTextArray(json: unknown, count: number, file: string): string[] {
+  if (!Array.isArray(json)) throw new Error(`${file}: 文字列の配列ではありません`);
+  if (json.length !== count) throw new Error(`${file}: 長さ ${json.length} が点の数 ${count} と一致しません`);
+  for (let i = 0; i < json.length; i++) {
+    if (typeof json[i] !== 'string') throw new Error(`${file}: 点 ${i} の値が文字列ではありません`);
+  }
+  return json as string[];
+}
+
 /** manifest と数値バイナリを読み込む（画像は含まない。DOM に依存しないのでテストできる）。 */
 export async function loadDatasetArrays(baseUrl: string, fetchImpl: FetchLike = fetch): Promise<DatasetArrays> {
-  const manifest = parseManifest(await (await fetchOk(fetchImpl, resolveDataUrl(baseUrl, 'manifest.json'))).json());
+  const manifest = parseManifest(await fetchJson(fetchImpl, resolveDataUrl(baseUrl, 'manifest.json')));
   const fetchBuffer = (file: string) => fetchOk(fetchImpl, resolveDataUrl(baseUrl, file)).then((r) => r.arrayBuffer());
   const levels = manifest.clusters?.levels ?? [];
-  const [posBuf, labBuf, ...clusterBufs] = await Promise.all([
+  const labelsFile = manifest.labels?.file;
+  const textFile = manifest.text?.file;
+  const [posBuf, labBuf, textJson, ...clusterBufs] = await Promise.all([
     fetchBuffer(manifest.positions.file),
-    fetchBuffer(manifest.labels.file),
+    labelsFile ? fetchBuffer(labelsFile) : Promise.resolve(null),
+    textFile ? fetchJson(fetchImpl, resolveDataUrl(baseUrl, textFile)) : Promise.resolve(null),
     ...levels.map((level) => fetchBuffer(level.pointFile)),
   ]);
-  const positions = decodeFloat32LE(posBuf, manifest.count * 3, manifest.positions.file);
-  const labels = decodeUint8(labBuf, manifest.count, manifest.labels.file);
-  const nLabels = manifest.labels.names.length;
-  for (let i = 0; i < labels.length; i++) {
-    if ((labels[i] as number) >= nLabels) {
-      throw new Error(`${manifest.labels.file}: 点 ${i} のラベル ${labels[i]} が labels.names の範囲外です`);
+  const positions = decodeFloat32LE(posBuf as ArrayBuffer, manifest.count * 3, manifest.positions.file);
+  let labels: Uint8Array | undefined;
+  if (manifest.labels && labBuf) {
+    labels = decodeUint8(labBuf as ArrayBuffer, manifest.count, manifest.labels.file);
+    const nLabels = manifest.labels.names.length;
+    for (let i = 0; i < labels.length; i++) {
+      if ((labels[i] as number) >= nLabels) {
+        throw new Error(`${manifest.labels.file}: 点 ${i} のラベル ${labels[i]} が labels.names の範囲外です`);
+      }
     }
   }
+  const text = textFile ? parseTextArray(textJson, manifest.count, textFile) : undefined;
   for (let i = 0; i < positions.length; i++) {
     if (!Number.isFinite(positions[i])) throw new Error(`${manifest.positions.file}: 有限でない値があります（添字 ${i}）`);
   }
@@ -87,7 +116,9 @@ export async function loadDatasetArrays(baseUrl: string, fetchImpl: FetchLike = 
   const bounds: DatasetBounds = manifest.bounds
     ? { min: computed.min, max: computed.max, center: [...manifest.bounds.center], radius: manifest.bounds.radius }
     : computed;
-  const result: DatasetArrays = { manifest, positions, labels, bounds };
+  const result: DatasetArrays = { manifest, positions, bounds };
+  if (labels) result.labels = labels;
+  if (text) result.text = text;
   if (manifest.clusters) {
     const { noise } = manifest.clusters;
     result.clusterAssignments = levels.map((level, li) => {
@@ -108,8 +139,8 @@ export async function loadDatasetArrays(baseUrl: string, fetchImpl: FetchLike = 
 }
 
 /** アトラス画像をブラウザで読み込む。 */
-export async function loadAtlasImage(baseUrl: string, manifest: DatasetManifest): Promise<ImageBitmap> {
-  const url = resolveDataUrl(baseUrl, manifest.sprite.file);
+export async function loadAtlasImage(baseUrl: string, sprite: NonNullable<DatasetManifest['sprite']>): Promise<ImageBitmap> {
+  const url = resolveDataUrl(baseUrl, sprite.file);
   const res = await fetch(url);
   if (!res.ok) throw new Error(`${url} の取得に失敗しました（HTTP ${res.status}）`);
   // flipY なし・色空間変換なし（輝度をそのまま形として使う）

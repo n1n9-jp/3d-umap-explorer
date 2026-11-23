@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { computeBounds, loadDatasetArrays, resolveDataUrl, type FetchLike } from './loader';
+import { computeBounds, loadDatasetArrays, parseTextArray, resolveDataUrl, type FetchLike } from './loader';
 
 function fakeFetch(files: Record<string, unknown>): FetchLike {
   return async (url: string) => {
@@ -39,7 +39,8 @@ describe('loadDatasetArrays', () => {
       'data/t/labels.u8': new Uint8Array([0, 1]).buffer,
     }));
     expect(d.positions).toHaveLength(6);
-    expect(Array.from(d.labels)).toEqual([0, 1]);
+    expect(Array.from(d.labels!)).toEqual([0, 1]);
+    expect(d.text).toBeUndefined();
     expect(d.bounds.min).toEqual([-1, 0, -0.5]);
     expect(d.bounds.max).toEqual([1, 0.5, 0]);
     expect(d.bounds.radius).toBeCloseTo(Math.hypot(1, 0, 0.5));
@@ -148,5 +149,52 @@ describe('loadDatasetArrays: 空間の構造', () => {
 describe('computeBounds', () => {
   it('外接球の半径は原点からの最大距離', () => {
     expect(computeBounds(new Float32Array([0, 0, 0, 3, 4, 0])).radius).toBe(5);
+  });
+});
+
+describe('loadDatasetArrays: labels・sprite・text の有無', () => {
+  const positions = new Float32Array([1, 0, -0.5, -1, 0.5, 0]).buffer;
+  const base = { name: 'w', count: 2, positions: { file: 'positions.f32', dtype: 'float32', components: 3 } };
+  const labels = { file: 'labels.u8', dtype: 'uint8', names: ['a', 'b'] };
+  const sprite = { file: 'sprite.png', cellSize: [28, 28], columns: 2, rows: 1 };
+  const text = { file: 'text.json' };
+
+  it('各組み合わせで、あるものだけを読む（sprite の画像は読まない）', async () => {
+    for (const hasLabels of [false, true]) for (const hasSprite of [false, true]) for (const hasText of [false, true]) {
+      const m: Record<string, unknown> = { ...base };
+      const files: Record<string, unknown> = { 'd/manifest.json': m, 'd/positions.f32': positions };
+      const requested: string[] = [];
+      if (hasLabels) { m.labels = labels; files['d/labels.u8'] = new Uint8Array([1, 0]).buffer; }
+      if (hasSprite) m.sprite = sprite;
+      if (hasText) { m.text = text; files['d/text.json'] = ['king', 'queen']; }
+      const f = fakeFetch(files);
+      const d = await loadDatasetArrays('d/', (url) => { requested.push(url); return f(url); });
+      expect(d.labels ? Array.from(d.labels) : undefined).toEqual(hasLabels ? [1, 0] : undefined);
+      expect(d.text).toEqual(hasText ? ['king', 'queen'] : undefined);
+      expect(d.manifest.kind).toBe(hasSprite ? 'image' : 'text');
+      expect(requested.includes('d/labels.u8')).toBe(hasLabels);
+      expect(requested.includes('d/text.json')).toBe(hasText);
+      expect(requested.includes('d/sprite.png')).toBe(false);
+    }
+  });
+
+  it('text.json の長さが合わない・文字列でない値があればエラー', async () => {
+    const m = { ...base, text };
+    await expect(loadDatasetArrays('d/', fakeFetch({ 'd/manifest.json': m, 'd/positions.f32': positions, 'd/text.json': ['a'] })))
+      .rejects.toThrow(/長さ 1/);
+    await expect(loadDatasetArrays('d/', fakeFetch({ 'd/manifest.json': m, 'd/positions.f32': positions, 'd/text.json': ['a', 3] })))
+      .rejects.toThrow(/文字列ではありません/);
+    await expect(loadDatasetArrays('d/', fakeFetch({ 'd/manifest.json': m, 'd/positions.f32': positions })))
+      .rejects.toThrow(/404/);
+  });
+
+  it('manifest.json が JSON として読めなければ、ファイル名つきのエラー', async () => {
+    const f: FetchLike = async () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError('Unexpected token <'); }, arrayBuffer: async () => new ArrayBuffer(0) });
+    await expect(loadDatasetArrays('nope/', f)).rejects.toThrow(/nope\/manifest.json を JSON として読めません/);
+  });
+
+  it('parseTextArray: 配列でなければエラー', () => {
+    expect(() => parseTextArray({}, 1, 't.json')).toThrow(/配列/);
+    expect(parseTextArray(['x'], 1, 't.json')).toEqual(['x']);
   });
 });

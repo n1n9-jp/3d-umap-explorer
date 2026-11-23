@@ -1,11 +1,21 @@
 /** 目印と現在地の文面・色。DOM に依存しない。 */
-import { LABEL_COLORS } from '../render/palette';
+import { clusterColorIndex, colorIndexHex, type ColorSource } from '../render/colorScheme';
 import type { Direction, Location } from './location';
 
-/** クラスタの色。多数派ラベルの色、ラベルがなければ id で 10 色を繰り返す。 */
-export function clusterColor(cluster: { id: number; majorityLabel: number | null }): string {
-  const i = cluster.majorityLabel ?? cluster.id;
-  return LABEL_COLORS[((i % LABEL_COLORS.length) + LABEL_COLORS.length) % LABEL_COLORS.length]!;
+/**
+ * クラスタの色。点をラベルで色分けするデータセットでは多数派ラベルの色（なければ id）、
+ * クラスタで色分けするデータセットでは id の色（点の色と一致する）。どちらも 10 色を繰り返す。
+ */
+export function clusterColor(cluster: { id: number; majorityLabel: number | null }, source: ColorSource = 'label'): string {
+  return colorIndexHex(clusterColorIndex(cluster, source));
+}
+
+/**
+ * 目印に出す名前。代表の単語（`terms`）があれば ` · ` で区切って並べ（`nodes · node · operators`）、なければ `name`。
+ * 長い名前は目印の最大幅で省略する（CSS）。省略しない名前は aria-label と title に入れる。
+ */
+export function chipText(cluster: { name: string; terms?: readonly string[] }): string {
+  return cluster.terms && cluster.terms.length > 0 ? cluster.terms.join(' · ') : cluster.name;
 }
 
 export function clusterTitle(name: string): string {

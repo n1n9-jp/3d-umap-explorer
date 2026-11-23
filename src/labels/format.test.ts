@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { LABEL_COLORS } from '../render/palette';
-import { clusterColor, formatLocation } from './format';
+import { chipText, clusterColor, formatLocation } from './format';
 
 describe('clusterColor', () => {
   it('多数派ラベルのパレット色。ラベルがなければ id で引く', () => {
@@ -8,6 +8,18 @@ describe('clusterColor', () => {
     expect(clusterColor({ id: 4, majorityLabel: null })).toBe(LABEL_COLORS[4]);
     expect(clusterColor({ id: 4, majorityLabel: 13 })).toBe(LABEL_COLORS[3]);
     expect(clusterColor({ id: 12, majorityLabel: null })).toBe(LABEL_COLORS[2]);
+  });
+  it('クラスタで色分けするデータセットでは id の色（点の色と一致）', () => {
+    expect(clusterColor({ id: 13, majorityLabel: null }, 'cluster')).toBe(LABEL_COLORS[3]);
+    expect(clusterColor({ id: 4, majorityLabel: 3 }, 'cluster')).toBe(LABEL_COLORS[4]);
+  });
+});
+
+describe('chipText', () => {
+  it('代表の単語があれば · で区切り、なければ name', () => {
+    expect(chipText({ name: 'nodes、node、operators', terms: ['nodes', 'node', 'operators'] })).toBe('nodes · node · operators');
+    expect(chipText({ name: '3' })).toBe('3');
+    expect(chipText({ name: 'C1', terms: [] })).toBe('C1');
   });
 });
 

@@ -31,13 +31,8 @@ const port = Number(opt('port', '4318'));
 
 // ---------- データから視点を決める ----------
 
-function loadDataset(dir) {
-  const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8'));
-  const pb = fs.readFileSync(path.join(dir, manifest.positions.file));
-  const positions = new Float32Array(pb.buffer.slice(pb.byteOffset, pb.byteOffset + pb.byteLength));
-  const labels = new Uint8Array(fs.readFileSync(path.join(dir, manifest.labels.file)));
-  return { manifest, positions, labels, count: manifest.count };
-}
+// ラベルのないデータセット（word2vec）では、lib.cjs の loadDataset が粗い階層のクラスタ id を labels に入れる
+const { loadDataset } = require('./lib.cjs');
 
 const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 const add = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
@@ -413,4 +408,7 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error(e); process.exit(1); });
+if (require.main === module) main().catch((e) => { console.error(e); process.exit(1); });
+
+// datasets.cjs が、ページ内の検証（小領域と全画面・見えている形の一致）を再利用する
+module.exports = { pageChecks, computeViews };

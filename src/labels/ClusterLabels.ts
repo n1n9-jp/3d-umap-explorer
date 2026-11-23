@@ -5,7 +5,8 @@ import type { ClusterInfo } from '../data/manifest';
 import { appearanceParamsForBounds, labelAppearance, type AppearanceParams } from './appearance';
 import { clusterViewDistance } from './flyDistance';
 import { focusFallback } from './focus';
-import { clusterColor, clusterTitle, formatLocation } from './format';
+import { chipText, clusterColor, clusterTitle, formatLocation } from './format';
+import type { ColorSource } from '../render/colorScheme';
 import { describeDirection, locateCamera, type ClusterSphere, type Location } from './location';
 import { resolveOverlaps, type OverlapItem } from './overlap';
 import { projectPoint, screenVisibility, type Vec3 } from './projection';
@@ -82,6 +83,8 @@ export interface ClusterLabelsDeps {
   clusters: readonly ClusterInfo[];
   /** 点群を含む球の半径（距離に応じた見せ方の基準） */
   boundsRadius: number;
+  /** 点の色分けの方法（目印の色を点の色にそろえる）。省略時は 'label' */
+  colorSource?: ColorSource;
   /** クラスタへ飛ぶ（俯瞰モードなら飛行モードへ切り替えてから） */
   flyTo(target: Vector3, options: FlyToOptions): void;
 }
@@ -122,9 +125,11 @@ export class ClusterLabels {
   private locationClusterId: number | null = null;
   private locationHidden = true;
   private resizeObserver: ResizeObserver | null = null;
+  private readonly colorSource: ColorSource;
 
   constructor(deps: ClusterLabelsDeps) {
     this.deps = deps;
+    this.colorSource = deps.colorSource ?? 'label';
     this.available = deps.clusters.length > 0;
     this.spheres = deps.clusters.map((c) => ({ id: c.id, center: c.center, radius: c.radius }));
     this.appearance = appearanceParamsForBounds(deps.boundsRadius);
@@ -136,13 +141,18 @@ export class ClusterLabels {
       el.className = 'cluster-label is-hidden';
       el.dataset.clusterId = String(cluster.id);
       el.setAttribute('aria-label', `${clusterTitle(cluster.name)}へ移動`);
-      el.style.setProperty('--c', clusterColor(cluster));
+      el.style.setProperty('--c', clusterColor(cluster, this.colorSource));
+      const text = chipText(cluster);
+      if (cluster.terms && cluster.terms.length > 0) {
+        el.classList.add('is-terms'); // 代表の単語を並べた長い名前。小さめの字で、最大幅を超える分は省略する
+        el.title = cluster.name;
+      }
       const swatch = doc.createElement('span');
       swatch.className = 'cluster-label-swatch';
       swatch.setAttribute('aria-hidden', 'true');
       const name = doc.createElement('span');
       name.className = 'cluster-label-name';
-      name.textContent = cluster.name;
+      name.textContent = text;
       el.append(swatch, name);
       this.bindPointer(el, cluster);
       deps.container.appendChild(el);
@@ -254,9 +264,18 @@ export class ClusterLabels {
     this.updateLocation(location, camPos);
   }
 
+  /** 目印の要素（とそのリスナー）と現在地の表示を取り除く（データセットの切り替え時）。 */
   dispose(): void {
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
+    for (const chip of this.chips) chip.el.remove();
+    this.chips.length = 0;
+    this.deps.container.hidden = true;
+    const loc = this.deps.locationEl;
+    loc.hidden = true;
+    loc.textContent = '';
+    delete loc.dataset.kind;
+    this.location = null;
   }
 
   private applyChip(chip: Chip, s: LabelState): void {
@@ -374,7 +393,7 @@ export class ClusterLabels {
       this.locationText = view.text;
     }
     if (cluster.id !== this.locationClusterId) {
-      this.location.swatch.style.background = clusterColor(cluster);
+      this.location.swatch.style.background = clusterColor(cluster, this.colorSource);
       this.locationClusterId = cluster.id;
     }
     if (location.kind !== this.locationKind) {

@@ -114,6 +114,7 @@ export class InteractionController {
     if (this.disposed) return;
     this.disposed = true;
     cancelAnimationFrame(this.rafId);
+    this.clicks.invalidate();
     const c = this.deps.canvas;
     c.removeEventListener('pointerdown', this.onPointerDown);
     c.removeEventListener('pointermove', this.onPointerMove);
@@ -144,6 +145,7 @@ export class InteractionController {
   };
 
   private onHoverChange(index: number | null): void {
+    if (this.disposed) return; // 破棄の前に出した要求の結果（データセットの切り替え後）は使わない
     this.deps.cloud.setHighlight('hover', index);
     const pos = this.hover.position;
     this.deps.panel.showHover(index, pos?.x, pos?.y);
@@ -168,6 +170,7 @@ export class InteractionController {
     // 押した瞬間のホバーではなく、離した位置で改めて特定する（ホバーの要求がまだ返っていなくても正しい）
     // 選択と移動の規則は clickEffect.ts（ダブルクリックの 1 回目のクリックでも選択は変わる）
     this.clicks.issue(this.deps.pick(x, y), (index) => {
+      if (this.disposed) return;
       const effect = clickEffect(index, double);
       this.select(effect.select);
       if (effect.flyTo !== null) this.flyToPoint(effect.flyTo);

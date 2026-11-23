@@ -12,6 +12,13 @@ describe('情報パネルの文言', () => {
     expect(clusterText(undefined)).toBe('（情報なし）');
   });
 
+  it('単語のデータセットでは、クラスタなしは「なし」、読み上げは「選択した単語」', () => {
+    expect(clusterText(null, 'text')).toBe('なし');
+    expect(clusterText('nodes、node、operators', 'text')).toBe('nodes、node、operators');
+    expect(selectionAnnouncement('king', 42, 'なし', 'text')).toBe('選択した単語: king、番号 42、クラスタ なし');
+    expect(selectionAnnouncement('6', 1, 'a')).toBe('選択した点: 6、番号 1、クラスタ a');
+  });
+
   it('読み上げる文にラベル・番号・クラスタ名が入る', () => {
     const text = selectionAnnouncement('6', 123, 'なし（ノイズ）');
     expect(text).toContain('6');

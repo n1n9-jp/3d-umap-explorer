@@ -31,6 +31,9 @@
         text-shadow: 0 0 3px #000; user-select: none; -webkit-user-select: none; touch-action: manipulation;
         box-shadow: 0 0 0 1px rgba(7, 8, 12, 0.6);
       }
+      /* 代表の単語を並べた長い名前。小さめの字にし、最大幅を超える分は省略する（全体は title と aria-label） */
+      .cluster-label.is-terms { font-size: 13px; font-weight: 600; padding: 3px 10px 3px 7px; }
+      .cluster-label.is-terms .cluster-label-name { max-width: 15em; overflow: hidden; text-overflow: ellipsis; }
       .cluster-label.is-hidden { visibility: hidden; pointer-events: none; }
       .cluster-label:hover { opacity: 1; background: rgba(7, 8, 12, 0.96); z-index: 1; }
       .cluster-label:focus-visible { opacity: 1; outline: 2px solid #ffc233; outline-offset: 2px; z-index: 1; }
@@ -54,8 +57,11 @@
         font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       }
       #info[hidden], #hover-label[hidden] { display: none; }
+      #info-image[hidden] { display: none; }
       #info-image { image-rendering: pixelated; image-rendering: crisp-edges; display: block; border-radius: 3px; }
       #info .info-label { font-size: 28px; line-height: 1.1; font-weight: 600; color: #fff; display: flex; align-items: center; gap: 8px; }
+      /* 単語のデータセットでは、画像の代わりに単語を大きく出す */
+      #info[data-kind="text"] .info-label { font-size: 30px; max-width: 18em; overflow-wrap: anywhere; }
       #info-swatch { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
       #info dl { margin: 8px 0 0; display: grid; grid-template-columns: auto auto; gap: 2px 10px; }
       #info dt { color: #8a93a6; }
@@ -85,6 +91,23 @@
       #minimap .mm-gauge-label { fill: #8a93a6; font: 9px/1 sans-serif; text-anchor: middle; pointer-events: none; }
       #minimap.outside .mm-fan { stroke-dasharray: 3 2; }
       #minimap .mm-outside-text { fill: #fff; font: 600 10px/1 sans-serif; paint-order: stroke; stroke: #07080c; stroke-width: 3px; pointer-events: none; }
+      /* データセットの選択欄（左上） */
+      #dataset-switcher {
+        position: fixed; left: 12px; top: 10px; z-index: 2;
+        display: flex; align-items: center; gap: 8px; flex-wrap: wrap; max-width: calc(100vw - 24px);
+        padding: 5px 10px; border-radius: 6px; background: rgba(7, 8, 12, 0.82);
+        font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #b4bccb;
+      }
+      #dataset-switcher[hidden] { display: none; }
+      #dataset-select {
+        font: inherit; color: #e8ecf4; background: #141a26; border: 1px solid rgba(180, 188, 203, 0.45);
+        border-radius: 4px; padding: 2px 4px;
+      }
+      #dataset-select:focus-visible { outline: 2px solid #ffc233; outline-offset: 1px; }
+      #dataset-select:disabled { opacity: 0.6; }
+      #dataset-status { color: #b4bccb; }
+      #dataset-status[hidden] { display: none; }
+      #dataset-status.error { color: #ff8080; }
       #hover-label {
         position: fixed; left: 0; top: 0; z-index: 3; pointer-events: none;
         padding: 1px 7px; border-radius: 4px; border: 1px solid #f2f5fa;
@@ -96,6 +119,11 @@
   <body>
     <div id="app"></div>
     <div id="hud">読み込み中…</div>
+    <div id="dataset-switcher" hidden>
+      <label for="dataset-select">データ</label>
+      <select id="dataset-select"></select>
+      <span id="dataset-status" role="status" aria-live="polite" hidden></span>
+    </div>
     <div id="cluster-location" hidden></div>
     <div id="info-live" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
     <section id="info" role="region" aria-labelledby="info-heading" hidden>

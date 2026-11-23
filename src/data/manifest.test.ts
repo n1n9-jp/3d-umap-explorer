@@ -1,4 +1,5 @@
 import realManifestRaw from '../../public/data/mnist/manifest.json?raw';
+import realWord2vecRaw from '../../public/data/word2vec-10k/manifest.json?raw';
 import { describe, expect, it } from 'vitest';
 import { MAX_LABELS, ManifestError, parseManifest } from './manifest';
 
@@ -15,8 +16,9 @@ describe('parseManifest', () => {
   it('README の例をそのまま受け付ける', () => {
     const m = parseManifest(validManifest());
     expect(m.count).toBe(10000);
-    expect(m.sprite.cellSize).toEqual([28, 28]);
-    expect(m.labels.names).toHaveLength(10);
+    expect(m.sprite!.cellSize).toEqual([28, 28]);
+    expect(m.labels!.names).toHaveLength(10);
+    expect(m.kind).toBe('image');
     expect(m.umap).toEqual({ library: 'umap-learn 0.6.0' });
   });
 
@@ -41,7 +43,7 @@ describe('parseManifest', () => {
     const names = (n: number) => Array.from({ length: n }, (_, i) => String(i));
     const ok = validManifest();
     ok.labels.names = names(MAX_LABELS);
-    expect(parseManifest(ok).labels.names).toHaveLength(MAX_LABELS);
+    expect(parseManifest(ok).labels!.names).toHaveLength(MAX_LABELS);
     const ng = validManifest();
     ng.labels.names = names(MAX_LABELS + 1);
     expect(() => parseManifest(ng)).toThrow(ManifestError);
@@ -170,5 +172,63 @@ describe('parseManifest: 空間の構造', () => {
 
   it('不正のない構造は受け付ける（上の変形の元データの健全性）', () => {
     expect(() => parseManifest(structured())).not.toThrow();
+  });
+});
+
+describe('parseManifest: kind と任意の labels・sprite・text', () => {
+  const base = () => ({ name: 'w', count: 3, positions: { file: 'positions.f32', dtype: 'float32', components: 3 } });
+  const labels = { file: 'labels.u8', dtype: 'uint8', names: ['a', 'b'] };
+  const sprite = { file: 'sprite.png', cellSize: [28, 28], columns: 2, rows: 2 };
+  const text = { file: 'text.json' };
+
+  it('labels・sprite・text の有無の各組み合わせを読み込み、kind がなければ sprite・text から決める', () => {
+    for (const hasLabels of [false, true]) for (const hasSprite of [false, true]) for (const hasText of [false, true]) {
+      const j: Record<string, unknown> = base();
+      if (hasLabels) j.labels = labels;
+      if (hasSprite) j.sprite = sprite;
+      if (hasText) j.text = text;
+      const m = parseManifest(j);
+      expect(m.labels !== undefined).toBe(hasLabels);
+      expect(m.sprite !== undefined).toBe(hasSprite);
+      expect(m.text !== undefined).toBe(hasText);
+      expect(m.kind).toBe(hasSprite ? 'image' : 'text');
+    }
+  });
+
+  it('kind が書かれていればその値を使う', () => {
+    expect(parseManifest({ ...base(), kind: 'text', text, sprite }).kind).toBe('text');
+    expect(parseManifest({ ...base(), kind: 'image', text, sprite }).kind).toBe('image');
+  });
+
+  it('kind が不正、または kind に必要な項目がなければ拒否する', () => {
+    expect(() => parseManifest({ ...base(), kind: 'audio' })).toThrow(/kind/);
+    expect(() => parseManifest({ ...base(), kind: 'image', text })).toThrow(/sprite/);
+    expect(() => parseManifest({ ...base(), kind: 'text', sprite })).toThrow(/text/);
+    expect(() => parseManifest({ ...base(), text: { file: '' } })).toThrow(/text.file/);
+  });
+
+  it('実物の word2vec の manifest を読み込める（labels・sprite なし、terms つき）', () => {
+    const m = parseManifest(JSON.parse(realWord2vecRaw));
+    expect(m.kind).toBe('text');
+    expect(m.labels).toBeUndefined();
+    expect(m.sprite).toBeUndefined();
+    expect(m.text).toEqual({ file: 'text.json' });
+    const coarse = m.clusters!.levels[0]!.clusters;
+    expect(coarse).toHaveLength(18);
+    expect(coarse[1]!.terms).toEqual(['nodes', 'node', 'operators']);
+    expect(coarse[1]!.majorityLabel).toBeNull();
+  });
+
+  it('ラベルのないデータセットで majorityLabel が数なら拒否する', () => {
+    const m = JSON.parse(realWord2vecRaw);
+    m.clusters.levels[0].clusters[0].majorityLabel = 0;
+    m.clusters.levels[0].clusters[0].purity = 1;
+    expect(() => parseManifest(m)).toThrow(/majorityLabel/);
+  });
+
+  it('terms が文字列の配列でなければ拒否する', () => {
+    const m = JSON.parse(realWord2vecRaw);
+    m.clusters.levels[0].clusters[0].terms = [1];
+    expect(() => parseManifest(m)).toThrow(/terms/);
   });
 });
