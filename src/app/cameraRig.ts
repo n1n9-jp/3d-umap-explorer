@@ -1,9 +1,11 @@
-import { Vector3 } from 'three';
+import { Euler, Vector3 } from 'three';
 import type { PerspectiveCamera } from 'three';
 import { FlyCameraControls } from '../controls/FlyCameraControls';
-import type { ViewSpec } from '../render/view';
+import { viewAngles, type ViewAngles, type ViewSpec } from '../render/view';
 import { OverviewControls } from './overviewControls';
 import type { AutoSpeed } from './autoSpeed';
+import { HOME_DURATION_SECONDS, HomeFlight, poseLookAt, type FlightPose } from './homeFlight';
+import { isFromEditable } from './keyEvents';
 
 export type CameraMode = 'fly' | 'overview';
 
@@ -26,6 +28,8 @@ export interface CameraState {
   /** 実際の移動速度（`speed × speedScale`、Shift の加速は含まない）。 */
   effectiveSpeed: number;
   autoSpeed: AutoSpeedState;
+  /** ホームの視点へ移動中か（`goHome` の途中）。 */
+  homing: boolean;
 }
 
 /** 密度に応じた速度の自動調整の状態。 */
@@ -44,6 +48,11 @@ export interface CameraRigOptions {
   /** 密度に応じた速度の自動調整。なければ係数は 1 のまま。 */
   autoSpeed?: AutoSpeed | null;
 }
+
+/** 飛行モードで、移動中のホーム復帰を中断させるキー（`FlyCameraControls` の移動キーと同じ）。 */
+const FLY_MOVE_CODES = new Set([
+  'KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyE', 'KeyQ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
+]);
 
 /**
  * 飛行モードと俯瞰モードを持ち、O キーなどで切り替えるカメラ操作。
@@ -65,9 +74,16 @@ export class CameraRig {
   private _autoSpeedEnabled: boolean;
   private readonly prevPosition = new Vector3();
   private readonly velocity = new Vector3();
+  private readonly euler = new Euler(0, 0, 0, 'YXZ');
+  private readonly win: Window;
+  private readonly domElement: HTMLElement;
+  /** ホームの視点へ移動中なら、その移動。 */
+  private flight: HomeFlight | null = null;
 
   constructor(camera: PerspectiveCamera, domElement: HTMLElement, center: Vector3, options: CameraRigOptions = {}) {
     this.camera = camera;
+    this.domElement = domElement;
+    this.win = domElement.ownerDocument?.defaultView ?? window;
     this.center = center.clone();
     this.fly = new FlyCameraControls(camera, domElement);
     this.overview = new OverviewControls(camera, domElement);
@@ -75,6 +91,9 @@ export class CameraRig {
     this.fly.addEventListener('speedchange', this.notify);
     this.autoSpeed = options.autoSpeed ?? null;
     this._autoSpeedEnabled = this.autoSpeed !== null;
+    this.win.addEventListener('keydown', this.onKeyDown);
+    domElement.addEventListener('pointerdown', this.onPointerDown);
+    domElement.addEventListener('wheel', this.onWheel, { passive: true });
   }
 
   get mode(): CameraMode {
@@ -139,7 +158,38 @@ export class CameraRig {
     this.autoSpeedEnabled = !this._autoSpeedEnabled;
   }
 
+  /** ホームの視点への移動の途中か。 */
+  get homing(): boolean {
+    return this.flight !== null;
+  }
+
+  /**
+   * 現在の位置と向きから `view`（ホームの視点）へ、約 1 秒かけて滑らかに移動する。モードは変えない。
+   * 位置と向きの両方を補間し、始まりと終わりを緩やかにする。移動中に操作（飛行モードでは移動キーとドラッグ、
+   * 俯瞰モードではドラッグとホイール）をするか、`setView` を呼ぶと中断してその場に留まる。
+   * 移動の間は、速度の自動調整は働かない（終わったあと、着いた位置から調整し直す）。
+   */
+  goHome(view: ViewSpec, durationSeconds: number = HOME_DURATION_SECONDS): void {
+    const from = this.currentPose();
+    const to: FlightPose = { position: [...view.pos], ...viewAngles(view, from) };
+    this.flight = new HomeFlight(from, to, durationSeconds);
+    this.notify();
+  }
+
+  /** ホームの視点への移動を中断して、その場に留まる。移動中でなければ何もしない。 */
+  cancelHome(): void {
+    if (!this.flight) return;
+    this.flight = null;
+    // 動いた位置から調整し直す（移動の速度を測って係数に反映しない）
+    this.autoSpeed?.reset();
+    this.notify();
+  }
+
   update(dt: number): void {
+    if (this.flight) {
+      this.stepFlight(dt);
+      return;
+    }
     if (this._mode !== 'fly') return;
     this.prevPosition.copy(this.camera.position);
     this.fly.update(dt);
@@ -152,17 +202,17 @@ export class CameraRig {
   }
 
   setView(view: ViewSpec): void {
+    this.cancelHome();
     const pos = new Vector3(...view.pos);
     const look = new Vector3(...view.look);
     if (this._mode === 'fly') {
-      this.fly.setPose(pos, look); // 速度も 0 になる
+      this.fly.setPose(pos, look); // 速度も 0 になる。仰角は ±89° に収まる
       this.autoSpeed?.reset();
       return;
     }
     // 俯瞰モードでは、回転の中心を保ったまま、指定の位置から注視点を向かせる。
-    this.camera.position.copy(pos);
-    this.camera.lookAt(look);
-    this.camera.updateMatrixWorld();
+    // `camera.lookAt` を使うと真上・真下を向けるので、飛行モードと同じ ±89° に収めた向きを直接与える。
+    this.applyPose({ position: view.pos, ...viewAngles(view, this.currentPose()) });
   }
 
   getState(): CameraState {
@@ -185,15 +235,62 @@ export class CameraRig {
         scale: this.autoSpeed ? this.autoSpeed.scale : 1,
         distance: this.autoSpeed ? this.autoSpeed.distance : null,
       },
+      homing: this.flight !== null,
     };
   }
 
   dispose(): void {
+    this.flight = null;
+    this.win.removeEventListener('keydown', this.onKeyDown);
+    this.domElement.removeEventListener('pointerdown', this.onPointerDown);
+    this.domElement.removeEventListener('wheel', this.onWheel);
     this.fly.removeEventListener('speedchange', this.notify);
     this.fly.dispose();
     this.overview.dispose();
     this.listeners.clear();
   }
+
+  /** カメラの現在の位置と向き（yaw / pitch）。 */
+  private currentPose(): FlightPose {
+    this.camera.updateMatrixWorld();
+    const position = this.camera.getWorldPosition(new Vector3());
+    const forward = this.camera.getWorldDirection(this.dir);
+    const angles = viewAngles({ pos: position.toArray(), look: position.clone().add(forward).toArray() });
+    return { position: position.toArray(), ...angles };
+  }
+
+  /** 位置と向きをカメラへ反映する。飛行モードでは飛行操作の状態も同じ姿勢にそろえる。 */
+  private applyPose(pose: FlightPose & ViewAngles): void {
+    this.camera.position.set(...pose.position);
+    this.camera.quaternion.setFromEuler(this.euler.set(pose.pitch, pose.yaw, 0, 'YXZ'));
+    this.camera.updateMatrixWorld();
+    if (this._mode === 'fly') this.fly.setPose(new Vector3(...pose.position), new Vector3(...poseLookAt(pose)));
+  }
+
+  private stepFlight(dt: number): void {
+    const flight = this.flight;
+    if (!flight) return;
+    this.applyPose(flight.advance(dt));
+    if (!flight.done) return;
+    this.flight = null;
+    this.autoSpeed?.reset(); // 止まった状態から始まるので、係数は次のフレームで現在地の目標へそろえてよい
+    this.notify();
+  }
+
+  private readonly onKeyDown = (e: KeyboardEvent): void => {
+    if (!this.flight || this._mode !== 'fly' || !FLY_MOVE_CODES.has(e.code)) return;
+    if (e.ctrlKey || e.metaKey || e.altKey || isFromEditable(e)) return;
+    this.cancelHome();
+  };
+
+  private readonly onPointerDown = (e: PointerEvent): void => {
+    if (this.flight && e.button === 0) this.cancelHome();
+  };
+
+  /** 俯瞰モードのホイールは距離を変える。飛行モードのホイールは速度を変えるだけなので、移動は続ける。 */
+  private readonly onWheel = (e: WheelEvent): void => {
+    if (this.flight && this._mode === 'overview' && !e.ctrlKey && e.deltaY !== 0) this.cancelHome();
+  };
 
   private readonly notify = (): void => {
     for (const l of this.listeners) l();

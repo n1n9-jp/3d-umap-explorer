@@ -12,6 +12,7 @@ describe('formatHud', () => {
     expect(lines[0]).toContain('点の大きさ 0.00400');
     expect(lines[1]).toBe('モード 飛行  飛行速度 0.150');
     expect(lines[2]).toContain('WASD');
+    expect(lines[2]).toContain('H 全体へ戻る');
     expect(lines[2]).toContain('O 俯瞰モードへ');
     expect(lines[3]).toBe('?pos=0,0,2.6&look=0,0,2.35');
   });
@@ -19,6 +20,7 @@ describe('formatHud', () => {
   it('俯瞰モードでは、俯瞰の操作方法と飛行モードへ戻るキーを出す', () => {
     const lines = formatHud({ ...base, mode: 'overview' }).split('\n');
     expect(lines[1]).toContain('モード 俯瞰');
+    expect(lines[2]).toContain('H 全体へ戻る');
     expect(lines[2]).toContain('O 飛行モードへ');
   });
 });
