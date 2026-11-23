@@ -25,6 +25,16 @@ describe('formatHud', () => {
   });
 });
 
+describe('formatHud の通知', () => {
+  it('通知があれば 5 行目に出し、なければ 4 行のまま', () => {
+    expect(formatHud({ ...base, mode: 'fly' }).split('\n')).toHaveLength(4);
+    const lines = formatHud({ ...base, mode: 'fly', notice: '単語の文字を表示できません（x）。丸い点だけで表示しています' }).split('\n');
+    expect(lines).toHaveLength(5);
+    expect(lines[4]).toBe('単語の文字を表示できません（x）。丸い点だけで表示しています');
+    expect(lines.slice(0, 4)).toEqual(formatHud({ ...base, mode: 'fly' }).split('\n'));
+  });
+});
+
 describe('formatHud の自動調整', () => {
   it('飛行モードでは、ホイールで決めた速度に続けて、自動調整の入切と実速度を出す', () => {
     const lines = formatHud({ ...base, mode: 'fly', autoSpeed: { available: true, enabled: true, effectiveSpeed: 0.027 } }).split('\n');

@@ -111,21 +111,73 @@ export function computeOverview(p: ArrayLike<number>): ManifestOverview {
   return { axes: axes.map((v) => v.map(round6) as Vec3) as [Vec3, Vec3, Vec3] };
 }
 
-/** 点の集合の medoid（他の全点への距離の合計が最小の点。同値なら番号の小さいもの）。 */
-export function medoidOf(p: ArrayLike<number>, members: ArrayLike<number>): number {
+/**
+ * medoid を厳密に計算する点数の上限。これ以下のまとまりは総当たり（点数の 2 乗）で、MNIST 1 万点の
+ * ラベルごとのまとまり（最大 1135 点）はすべて厳密のまま。これを超えるまとまりは近似する（`medoidOf`）。
+ */
+export const MEDOID_EXACT_MAX = 2048;
+/** 近似するときの、代表点の候補に使う点の数 */
+export const MEDOID_CANDIDATES = 512;
+/** 近似するときの、候補から各点までの距離の合計を測る相手の点の数 */
+export const MEDOID_REFERENCES = 2048;
+/** 近似で点を選ぶ乱数の種（結果が決まるように固定する） */
+export const MEDOID_SEED = 0x6d65_6431;
+
+/** 32 ビットの乱数（mulberry32）。種が同じなら同じ列。 */
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** `members` から `k` 個を無作為に選び、番号の昇順で返す（部分的な Fisher–Yates。`members` は変えない）。 */
+function sampleSorted(members: ArrayLike<number>, k: number, rand: () => number): Int32Array {
   const m = members.length;
+  const a = Int32Array.from(members as ArrayLike<number>);
+  for (let i = 0; i < k; i++) {
+    const j = i + Math.floor(rand() * (m - i));
+    const t = a[i]!;
+    a[i] = a[j]!;
+    a[j] = t;
+  }
+  return a.slice(0, k).sort();
+}
+
+/** `candidates` のうち、`references` の各点への距離の合計が最小の点（同値なら番号の小さいもの。`candidates` は昇順）。 */
+function bestByDistanceSum(p: ArrayLike<number>, candidates: ArrayLike<number>, references: ArrayLike<number>): number {
   let best = -1, bestSum = Infinity;
-  for (let a = 0; a < m; a++) {
-    const i = members[a] as number;
+  for (let a = 0; a < candidates.length; a++) {
+    const i = candidates[a] as number;
     const x = p[3 * i] as number, y = p[3 * i + 1] as number, z = p[3 * i + 2] as number;
     let sum = 0;
-    for (let b = 0; b < m && sum < bestSum; b++) {
-      const j = members[b] as number;
+    for (let b = 0; b < references.length && sum < bestSum; b++) {
+      const j = references[b] as number;
       sum += Math.hypot((p[3 * j] as number) - x, (p[3 * j + 1] as number) - y, (p[3 * j + 2] as number) - z);
     }
     if (sum < bestSum) { bestSum = sum; best = i; }
   }
   return best;
+}
+
+/**
+ * 点の集合の medoid（他の全点への距離の合計が最小の点。同値なら番号の小さいもの。`members` は番号の昇順）。
+ *
+ * `MEDOID_EXACT_MAX` 点以下では、すべての点を総当たりで比べる（厳密。点数の 2 乗）。それを超えると、計算量に上限を設けるため近似する：
+ * 無作為に選んだ `MEDOID_CANDIDATES` 点を候補とし、各候補から、無作為に選んだ `MEDOID_REFERENCES` 点（`members` が少なければ全点）への
+ * 距離の合計が最小の候補を返す。乱数の種は固定なので、同じ入力なら結果は同じ。計算量は高々 候補数 × 相手の数。
+ */
+export function medoidOf(p: ArrayLike<number>, members: ArrayLike<number>): number {
+  const m = members.length;
+  if (m <= MEDOID_EXACT_MAX) return bestByDistanceSum(p, members, members);
+  const rand = mulberry32(MEDOID_SEED);
+  const candidates = sampleSorted(members, MEDOID_CANDIDATES, rand);
+  const references = m <= MEDOID_REFERENCES ? members : sampleSorted(members, MEDOID_REFERENCES, rand);
+  return bestByDistanceSum(p, candidates, references);
 }
 
 export interface LabelGroups {
@@ -189,5 +241,33 @@ export function labelGroups(p: ArrayLike<number>, labels: ArrayLike<number>, nam
       }],
     },
     ids,
+  };
+}
+
+/** 空間の構造と、それを求める途中で作った空間索引。 */
+export interface StructureResult {
+  bounds: ManifestBounds;
+  density: ManifestDensity;
+  overview: ManifestOverview;
+  /** ラベルごとのまとまり（ラベルとその名前を渡したときだけ） */
+  groups: LabelGroups | null;
+  /** `positions` の空間索引（密度の計算に使ったもの。表示側の索引として使い回す） */
+  index: SpatialIndex;
+}
+
+/**
+ * 座標から空間の構造（範囲・密度・主成分軸・ラベルごとのまとまり）を計算する。空間索引は 1 回だけ構築し、結果に含める。
+ * 点数に比例して時間がかかる（7 万点で数百ミリ秒〜1 秒ほど）ので、メインスレッドでなく Worker の中で呼ぶ（`structureWorker.ts`）。
+ */
+export function computeStructure(
+  positions: Float32Array, labels: ArrayLike<number> | null, names: readonly string[] | null,
+): StructureResult {
+  const index = new SpatialIndex(positions);
+  return {
+    bounds: computeBoundsSphere(positions),
+    density: computeDensity(positions, index),
+    overview: computeOverview(positions),
+    groups: labels && names ? labelGroups(positions, labels, names) : null,
+    index,
   };
 }

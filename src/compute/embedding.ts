@@ -10,8 +10,8 @@
 import type { DatasetArrays } from '../data/loader';
 import type { DatasetManifest } from '../data/manifest';
 import { pointColoring, type PointColoring } from '../render/colorScheme';
-import { SpatialIndex } from '../spatial/SpatialIndex';
-import { computeBoundsSphere, computeDensity, computeOverview, labelGroups } from './structure';
+import type { SpatialIndex } from '../spatial/SpatialIndex';
+import { computeStructure, type StructureResult } from './structure';
 import { UMAP_EPOCHS, type UmapParams } from './params';
 
 /** 計算に使ったライブラリ（manifest の umap.library に書く） */
@@ -21,6 +21,8 @@ export interface EmbeddingData {
   arrays: DatasetArrays;
   /** 点の色の上書き（ラベルのないデータセットで、事前計算のクラスタの色を引き継ぐ）。なければ arrays から決める */
   coloring: PointColoring | null;
+  /** `arrays.positions` の空間索引（構造の計算で作ったもの。表示側が作り直さずに使う） */
+  spatialIndex: SpatialIndex;
 }
 
 /** 事前計算の色（ラベル、なければ粗い階層のクラスタ）。 */
@@ -31,17 +33,23 @@ export function precomputedColoring(base: DatasetArrays): PointColoring {
   return pointColoring({ count: manifest.count, labels: base.labels, coarse });
 }
 
+/** 構造の計算に渡す、ラベルと名前（ラベルのあるデータセットだけ）。 */
+export function structureInputs(base: DatasetArrays): { labels: Uint8Array | null; names: string[] | null } {
+  return base.labels && base.manifest.labels ? { labels: base.labels, names: base.manifest.labels.names } : { labels: null, names: null };
+}
+
 /**
  * 計算した座標（正規化・位置合わせの済んだもの）から、表示に使うデータを作る。`base` は読み込んだ事前計算のデータ。
+ * `structure` は `computeStructure` の結果（Worker で計算したもの）。渡さなければ、ここ（呼んだスレッド）で計算する。
  */
-export function buildEmbeddingData(base: DatasetArrays, positions: Float32Array, params: UmapParams): EmbeddingData {
+export function buildEmbeddingData(
+  base: DatasetArrays, positions: Float32Array, params: UmapParams, structure?: StructureResult,
+): EmbeddingData {
   const { manifest } = base;
   const count = manifest.count;
   if (positions.length !== count * 3) throw new RangeError(`座標の長さ ${positions.length} が 3 × ${count} と一致しません`);
-  const sphere = computeBoundsSphere(positions);
-  const density = computeDensity(positions, new SpatialIndex(positions));
-  const overview = computeOverview(positions);
-  const groups = base.labels && manifest.labels ? labelGroups(positions, base.labels, manifest.labels.names) : null;
+  const { labels, names } = structureInputs(base);
+  const { bounds: sphere, density, overview, groups, index } = structure ?? computeStructure(positions, labels, names);
 
   const next: DatasetManifest = { ...manifest, bounds: sphere, density, overview };
   delete next.clusters;
@@ -69,5 +77,5 @@ export function buildEmbeddingData(base: DatasetArrays, positions: Float32Array,
   if (groups) arrays.clusterAssignments = [{ level: 'coarse', ids: groups.ids }];
   // ラベルがあれば色はラベルで決まる（arrays から同じ色になる）。なければ事前計算の色を引き継ぐ
   const coloring = base.labels ? null : precomputedColoring(base);
-  return { arrays, coloring };
+  return { arrays, coloring, spatialIndex: index };
 }

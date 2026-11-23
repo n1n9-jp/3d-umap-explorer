@@ -3,7 +3,7 @@
  * 単語のデータセット（word2vec）の表示と、データセットの切り替えの検証。
  * ビルドしてプレビューサーバーを起動し、ヘッドレス Chromium へ実際のマウス・キーの入力を送る。
  *
- *   node scripts/verify/datasets.cjs [--no-build] [--port 4330] [--out artifacts/datasets] [--rounds 5]
+ *   node scripts/verify/datasets.cjs [--no-build] [--port 4330] [--out artifacts/datasets] [--rounds 5] [--only-failure]
  *
  * 確かめること:
  *   - `?data=word2vec-10k` で開くと、エラーなく表示され、全点が丸い点として描かれ（番号の画像で、各点の画素が半径の円の内側に収まる）、
@@ -16,6 +16,9 @@
  *     往復を繰り返しても、WebGL のテクスチャとジオメトリの数、JS のヒープ、イベントのリスナーの数が増え続けない。
  *     切り替え後に、前のデータの点がホバーや選択に現れない
  *   - 存在しないデータセットを指定すると、エラーが表示され、表示中のデータセットと操作が保たれる（起動時の指定でも、あとから選択欄で開ける）
+ *   - 単語の文字の生成を意図的に失敗させる（`window.__explorer.faults.words`）と、表示全体は失敗にならず、丸い点だけで表示が続き、HUD に知らせる文が出る。
+ *     キーでの移動量は、文字が生成できたときと同じ（2 倍になっていない）。表示の生成そのものを失敗させる（`faults.view`）と、前のデータで作り直し、
+ *     カメラ操作などのリスナーの数が失敗の前と同じで、キーでの移動量も同じ
  *   - コンソールエラーがない
  * スクリーンショット（全体・クラスタの縁・内部・点を選択した状態）を --out に保存する。失敗があれば終了コード 1 で終わる。
  */
@@ -583,6 +586,70 @@ async function testErrors(browser, base, page) {
   await p2.close();
 }
 
+/** ホームの視点から W を押し続けて止まるまでの移動距離（キーのリスナーが二重に登録されていると 2 倍になる）。 */
+async function holdWDistance(page) {
+  await page.evaluate(() => window.__explorer.setView(window.__explorer.homeView()));
+  await waitStill(page);
+  const s0 = await state(page);
+  await page.keyboard.down('KeyW');
+  await frames(page, 6);
+  await page.keyboard.up('KeyW');
+  const s1 = await waitStill(page);
+  return len(sub(s1.position, s0.position));
+}
+
+async function testFailureHandling(browser, base) {
+  console.log('\n[単語の文字・表示の生成の失敗]');
+  // 対照: 文字が生成できる通常の表示（word2vec）での、W の移動量
+  const ctl = await openPage(browser, base, 'data=word2vec-10k');
+  const dNormal = await holdWDistance(ctl);
+  check('（対照）word2vec を通常どおり表示し、W で前へ進める', dNormal > 1e-3 && (await ctl.evaluate(() => window.__explorer.words.getState())) !== null, `移動 ${dNormal.toFixed(4)}`);
+
+  // 単語の文字の生成だけを失敗させる（MNIST から word2vec へ切り替えるときに生成される）
+  const page = await openPage(browser, base, 'data=mnist');
+  await page.evaluate(() => { window.__explorer.faults.words = 1; });
+  const gen = (await ds(page)).generation;
+  const r = await page.evaluate(() => window.__explorer.dataset.switchTo('word2vec-10k'));
+  const d = await waitSwitched(page, gen);
+  const hud = await page.evaluate(() => document.getElementById('hud').innerText);
+  const words = await page.evaluate(() => window.__explorer.words.getState());
+  const notice = await page.evaluate(() => window.__explorer.notice());
+  const dots = await page.evaluate(() => ({ dotsOnly: window.__explorer.pointCloud.dotsOnly, count: window.__explorer.picking.count }));
+  check('単語の文字の生成が失敗しても、表示全体は失敗にならず、word2vec が表示される', r.ok && d.error === null && d.current?.id === 'word2vec-10k' && d.generation === gen + 1, JSON.stringify({ r, current: d.current }));
+  check('文字なし（丸い点だけ）で表示が続く（文字の状態が null、全点が丸い点）', words === null && dots.dotsOnly && dots.count === 10000, JSON.stringify({ words, dots }));
+  check('利用者に分かる形で知らせる（HUD に、文字を表示できない旨と丸い点だけで表示している旨）', /単語の文字を表示できません/.test(hud) && /丸い点だけ/.test(hud) && notice !== null && !/K 単語の文字/.test(hud), hud.split('\n').slice(-1)[0]);
+  await page.keyboard.press('KeyK'); // 文字のないデータセットでも、K キーで何も壊れない
+  await frames(page, 2);
+  const dFail = await holdWDistance(page);
+  check('キーでの移動量が通常と同じ（2 倍になっていない）', dFail > 1e-3 && dFail / dNormal > 0.8 && dFail / dNormal < 1.25, `文字の失敗後 ${dFail.toFixed(4)}、通常 ${dNormal.toFixed(4)}（比 ${(dFail / dNormal).toFixed(2)}）`);
+  const msg = await page.evaluate(() => document.getElementById('dataset-status').textContent);
+  check('切り替えのエラーは出ない（選択欄の横に失敗の文がない）', msg === '', msg);
+
+  // 表示の生成そのものを失敗させる: 前のデータで作り直して表示を保ち、リスナーが二重にならない
+  const cdp = await page.context().newCDPSession(page);
+  await page.evaluate(() => { window.__explorer.faults.words = 0; });
+  const gen2 = (await ds(page)).generation;
+  const lsBefore = await listenerCounts(page, cdp);
+  await page.evaluate(() => { window.__explorer.faults.view = 1; });
+  const r2 = await page.evaluate(() => window.__explorer.dataset.switchTo('mnist'));
+  const d2 = await waitSwitched(page, gen2);
+  const lsAfter = await listenerCounts(page, cdp);
+  check('表示の生成を失敗させると、エラーを報告し、前のデータ（word2vec）の表示を保つ', !r2.ok && /検証用/.test(r2.error ?? '') && d2.current?.id === 'word2vec-10k' && d2.generation === gen2 && d2.error !== null, JSON.stringify({ r2, current: d2.current }));
+  const same = JSON.stringify(lsAfter) === JSON.stringify(lsBefore);
+  check('失敗して作り直したあとも、イベントのリスナー（window・document・canvas）の数が失敗の前と同じ（二重に登録されない）', same, same ? `window ${lsAfter.window.total}、canvas ${lsAfter.canvas.total}` : `前 ${JSON.stringify(lsBefore)} 後 ${JSON.stringify(lsAfter)}`);
+  const dRebuilt = await holdWDistance(page);
+  check('作り直したあとのキーでの移動量が通常と同じ（2 倍になっていない）', dRebuilt > 1e-3 && dRebuilt / dNormal > 0.8 && dRebuilt / dNormal < 1.25, `${dRebuilt.toFixed(4)}（通常 ${dNormal.toFixed(4)}、比 ${(dRebuilt / dNormal).toFixed(2)}）`);
+  const hover = await page.evaluate(() => document.querySelectorAll('#cluster-labels > *').length);
+  check('目印の要素が二重に残らない（作りかけの表示の DOM を破棄している）', hover === w2vCoarse.length, `${hover} 個（クラスタ ${w2vCoarse.length}）`);
+  // そのあと、通常どおり切り替えられる
+  const gen3 = (await ds(page)).generation;
+  const r3 = await page.evaluate(() => window.__explorer.dataset.switchTo('mnist'));
+  const d3 = await waitSwitched(page, gen3);
+  check('そのあとの切り替えは成功する（MNIST が表示され、エラーが消える）', r3.ok && d3.current?.id === 'mnist' && d3.error === null, JSON.stringify(d3.current));
+  await ctl.close();
+  await page.close();
+}
+
 async function main() {
   if (!args.includes('--no-build')) {
     console.log('ビルド中…');
@@ -594,18 +661,23 @@ async function main() {
   try {
     await waitForServer(base);
     browser = await chromium.launch({ args: CHROMIUM_ARGS });
-    const page = await openPage(browser, base, 'data=word2vec-10k');
-    // 近くの単語の文字（src/text/。words.cjs で検証する）は、ここでは無効にして、丸い点の形と点の同一性を確かめる
-    // （K キーと同じ切り替え。データセットを切り替えても保つ）
-    await page.evaluate(() => window.__explorer.words.setEnabled(false));
-    const cdp = await page.context().newCDPSession(page);
-    await testWord2vecDisplay(page);
-    await testPicking(page);
-    await testInteraction(page);
-    await testLabelsMinimapHomeSpeed(page);
-    await testSwitching(page, cdp);
-    await testErrors(browser, base, page);
-    await page.close();
+    if (args.includes('--only-failure')) { // 失敗の検証だけ（開発中の繰り返し用）
+      await testFailureHandling(browser, base);
+    } else {
+      const page = await openPage(browser, base, 'data=word2vec-10k');
+      // 近くの単語の文字（src/text/。words.cjs で検証する）は、ここでは無効にして、丸い点の形と点の同一性を確かめる
+      // （K キーと同じ切り替え。データセットを切り替えても保つ）
+      await page.evaluate(() => window.__explorer.words.setEnabled(false));
+      const cdp = await page.context().newCDPSession(page);
+      await testWord2vecDisplay(page);
+      await testPicking(page);
+      await testInteraction(page);
+      await testLabelsMinimapHomeSpeed(page);
+      await testSwitching(page, cdp);
+      await testErrors(browser, base, page);
+      await page.close();
+      await testFailureHandling(browser, base);
+    }
   } finally {
     if (browser) await browser.close();
     stop();

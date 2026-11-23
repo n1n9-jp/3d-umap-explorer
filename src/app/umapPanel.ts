@@ -6,6 +6,7 @@
  * （どのキーの処理も src/app/keyEvents.ts の `isFromEditable` で入力欄を除いている）。パネルの中で Esc を押すと閉じる。
  */
 import { UMAP_LIMITS, validParams, type UmapParams } from '../compute/params';
+import { ProgressAnnouncer } from './progressAnnounce';
 
 export interface UmapPanelCallbacks {
   compute(params: UmapParams): void;
@@ -77,6 +78,9 @@ export class UmapPanel {
   private state: UmapPanelView | null = null;
   private inputError: string | null = null;
   private readonly cleanup: (() => void)[] = [];
+  /** 読み上げの専用の領域（画面の表示とは別。進捗の表示は細かく更新するので、表示の要素そのものは読み上げない） */
+  private readonly live: HTMLElement;
+  private readonly announcer = new ProgressAnnouncer();
 
   constructor(doc: Document, callbacks: UmapPanelCallbacks) {
     this.cb = callbacks;
@@ -103,6 +107,19 @@ export class UmapPanel {
     this.cacheBox = $('umap-cache');
     this.cacheList = $('umap-cache-list');
     this.openBtn = doc.getElementById('umap-open') as HTMLButtonElement | null;
+
+    // 進捗の文（5 エポックごとに変わる）と、パネルの下の文は、要素そのものを読み上げの対象にせず、読み上げる内容を絞って専用の領域へ出す
+    // （開始、25% ごとの節目、完了・中断・エラーなどの文。`progressAnnounce.ts`）
+    for (const el of [this.progressText, this.messageEl]) {
+      el.removeAttribute('role');
+      el.setAttribute('aria-live', 'off');
+    }
+    this.live = doc.createElement('span');
+    this.live.className = 'sr-only';
+    this.live.setAttribute('role', 'status');
+    this.live.setAttribute('aria-live', 'polite');
+    this.root.append(this.live);
+    this.cleanup.push(() => this.live.remove());
 
     this.nn.min = String(UMAP_LIMITS.nNeighbors.min);
     this.nn.max = String(UMAP_LIMITS.nNeighbors.max);
@@ -186,6 +203,8 @@ export class UmapPanel {
   update(view: UmapPanelView): void {
     this.state = view;
     this.render();
+    const spoken = this.announcer.next({ phase: view.phase, epoch: view.epoch, total: view.total, message: view.message });
+    if (spoken.length > 0) setText(this.live, spoken.join(' '));
   }
 
   /** 入力欄の値で計算を始める（「計算」のボタンと Enter）。 */

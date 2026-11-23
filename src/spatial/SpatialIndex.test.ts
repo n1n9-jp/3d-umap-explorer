@@ -513,3 +513,36 @@ describe('SpatialIndex（小さな塊が並ぶ分布）', () => {
     expect(idx.within(100, 0, 0, 1000).length).toBe(n);
   });
 });
+
+describe('SpatialIndex（構築済みの中身の受け渡し）', () => {
+  const makePoints = (n: number): Float32Array => {
+    const p = new Float32Array(3 * n);
+    let s = 12345;
+    const rand = () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+    for (let i = 0; i < p.length; i++) p[i] = rand() * 2 - 1;
+    return p;
+  };
+
+  it('toData の中身から作った索引は、構築した索引と同じ検索結果を返す（構築しない）', () => {
+    const p = makePoints(2000);
+    const built = new SpatialIndex(p);
+    const data = built.toData();
+    const restored = new SpatialIndex(p, data);
+    expect(restored.count).toBe(2000);
+    for (let t = 0; t < 50; t++) {
+      const q: [number, number, number] = [(t % 7) / 3 - 1, (t % 5) / 2 - 1, (t % 3) - 1];
+      const a = built.kNearest(q[0], q[1], q[2], 9);
+      const b = restored.kNearest(q[0], q[1], q[2], 9);
+      expect(Array.from(b.indices)).toEqual(Array.from(a.indices));
+      expect(Array.from(b.distances)).toEqual(Array.from(a.distances));
+      expect(restored.nearest(q[0], q[1], q[2])).toEqual(built.nearest(q[0], q[1], q[2]));
+    }
+  });
+
+  it('中身の大きさが点の数と合わなければ RangeError', () => {
+    const p = makePoints(100);
+    const data = new SpatialIndex(p).toData();
+    expect(() => new SpatialIndex(makePoints(99), data)).toThrow(RangeError);
+    expect(() => new SpatialIndex(p, { ...data, boxes: new Float32Array(10) })).toThrow(RangeError);
+  });
+});

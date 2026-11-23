@@ -30,6 +30,7 @@ import { InfoPanel, type PointInfoSource } from '../interaction/infoPanel';
 import { ClusterLabels } from '../labels/ClusterLabels';
 import { Minimap } from '../minimap/Minimap';
 import { WordLabels } from '../text/WordLabels';
+import { takeFault } from './faults';
 
 /** 読み込み済みのデータ（GPU の資源はまだ作らない）。 */
 export interface LoadedDataset {
@@ -83,6 +84,11 @@ export interface DatasetViewOptions {
   coloring?: PointColoring | null;
   /** 近くの単語の文字の表示を有効にするか（K キーの状態。省略時は有効） */
   words?: boolean;
+  /**
+   * `arrays.positions` から構築済みの空間索引（Worker で構造と一緒に作ったもの、または前の表示のもの）。
+   * 渡すと、空間索引を作り直さずに使う。省略時は、ここで構築する
+   */
+  spatialIndex?: SpatialIndex;
 }
 
 /**
@@ -120,6 +126,13 @@ export class DatasetView {
   readonly text: string[] | null;
   /** 近くの単語の文字（単語のデータセットで、画像のないときだけ。src/text/） */
   readonly words: WordLabels | null;
+  /** 利用者に知らせる文（単語の文字を作れず、丸い点だけで表示しているときなど）。なければ null。HUD に出す */
+  private _notice: string | null = null;
+  /** 計算の途中の座標や新旧の座標の間の移動を点群に出している間（`setComputingDisplay`）、目印を隠し、ミニマップに「計算中」を出す */
+  private computingDisplay = false;
+  private labelsBeforeComputing = true;
+  private computingBadge: HTMLElement | null = null;
+  private badgeLayoutKey = '';
   /** 描いている座標が arrays.positions と違う間、単語の文字を止めているか（setDisplayPositions） */
   private wordsSuspended = false;
   private wordsEnabledBeforeSuspend = true;
@@ -135,111 +148,128 @@ export class DatasetView {
   constructor(ctx: AppContext, data: LoadedDataset, options: DatasetViewOptions = {}) {
     this.ctx = ctx;
     this.data = data;
-    const arrays = (this.arrays = data.arrays);
-    const { manifest } = arrays;
-    const { renderer, scene, camera, doc } = ctx;
-    this.text = arrays.text ?? null;
+    try {
+      const arrays = (this.arrays = data.arrays);
+      const { manifest } = arrays;
+      const { renderer, scene, camera, doc } = ctx;
+      this.text = arrays.text ?? null;
 
-    const coarseLevel = manifest.clusters?.levels[0];
-    const coarseIds = arrays.clusterAssignments?.[0]?.ids;
-    const coarse = coarseLevel && coarseIds ? { ids: coarseIds, noise: manifest.clusters!.noise } : null;
-    this.coloring = options.coloring ?? pointColoring({ count: manifest.count, labels: arrays.labels, coarse });
-    this.displayPositions = new Float32Array(arrays.positions);
+      const coarseLevel = manifest.clusters?.levels[0];
+      const coarseIds = arrays.clusterAssignments?.[0]?.ids;
+      const coarse = coarseLevel && coarseIds ? { ids: coarseIds, noise: manifest.clusters!.noise } : null;
+      this.coloring = options.coloring ?? pointColoring({ count: manifest.count, labels: arrays.labels, coarse });
+      this.displayPositions = new Float32Array(arrays.positions);
 
-    // ---- 点群（src/render/）。画像があれば画像と丸い点、なければすべて丸い点 ----
-    let atlas = null;
-    if (data.atlas && manifest.sprite && manifest.kind === 'image') {
-      const layout = atlasLayout(manifest.sprite, data.atlas.width, data.atlas.height);
-      atlas = {
-        image: data.atlas,
-        cellOrigins: cellOrigins(manifest.count, layout),
-        cellSize: [layout.cellU, layout.cellV] as [number, number],
-        inkIsDark: inkIsDark(measureBorderLuma(data.atlas)),
-      };
-    }
-    this.cloud = new PointCloud(
-      { positions: this.displayPositions, colorIndices: this.coloring.indices, atlas },
-      { fog: INTERIOR_FOG, pointSize: options.pointSize ?? defaultPointSize(manifest.density) },
-    );
-    this.root.add(this.cloud.mesh);
-    this.root.add(this.cloud.highlight); // 輪の太さの倍率は resize() の setPixelRatio で設定する
-    scene.add(this.root);
+      // ---- 点群（src/render/）。画像があれば画像と丸い点、なければすべて丸い点 ----
+      let atlas = null;
+      if (data.atlas && manifest.sprite && manifest.kind === 'image') {
+        const layout = atlasLayout(manifest.sprite, data.atlas.width, data.atlas.height);
+        atlas = {
+          image: data.atlas,
+          cellOrigins: cellOrigins(manifest.count, layout),
+          cellSize: [layout.cellU, layout.cellV] as [number, number],
+          inkIsDark: inkIsDark(measureBorderLuma(data.atlas)),
+        };
+      }
+      this.cloud = new PointCloud(
+        { positions: this.displayPositions, colorIndices: this.coloring.indices, atlas },
+        { fog: INTERIOR_FOG, pointSize: options.pointSize ?? defaultPointSize(manifest.density) },
+      );
+      this.root.add(this.cloud.mesh);
+      this.root.add(this.cloud.highlight); // 輪の太さの倍率は resize() の setPixelRatio で設定する
+      scene.add(this.root);
 
-    // 点群の中心（バウンディングボックスの中心）。俯瞰モードの回転の中心になる
-    const cloudCenter = new THREE.Vector3(...arrays.bounds.min).add(new THREE.Vector3(...arrays.bounds.max)).multiplyScalar(0.5);
-    // 点群を含む球の中心。霧の距離の基準になる（俯瞰モードの回転の中心とは別）
-    this.boundsCenter = new THREE.Vector3(...arrays.bounds.center);
-    // 空間索引は 1 つを、速度の自動調整とホバー・選択の「止まる距離」で共有する。
-    // 問い合わせは同期的に終わり、結果は都度コピーされる。JS は単一スレッドで、互いの問い合わせの途中に割り込まないので安全
-    this.spatialIndex = new SpatialIndex(arrays.positions);
-    const autoParams = autoSpeedParams(manifest.density); // manifest に density がなければ使わない
-    const autoSpeed = autoParams ? new AutoSpeed(this.spatialIndex, autoParams) : null;
-    this.controller = new CameraRig(camera, renderer.domElement, cloudCenter, { autoSpeed });
+      // 点群の中心（バウンディングボックスの中心）。俯瞰モードの回転の中心になる
+      const cloudCenter = new THREE.Vector3(...arrays.bounds.min).add(new THREE.Vector3(...arrays.bounds.max)).multiplyScalar(0.5);
+      // 点群を含む球の中心。霧の距離の基準になる（俯瞰モードの回転の中心とは別）
+      this.boundsCenter = new THREE.Vector3(...arrays.bounds.center);
+      // 空間索引は 1 つを、速度の自動調整とホバー・選択の「止まる距離」で共有する。
+      // 問い合わせは同期的に終わり、結果は都度コピーされる。JS は単一スレッドで、互いの問い合わせの途中に割り込まないので安全
+      this.spatialIndex = options.spatialIndex ?? new SpatialIndex(arrays.positions);
+      const autoParams = autoSpeedParams(manifest.density); // manifest に density がなければ使わない
+      const autoSpeed = autoParams ? new AutoSpeed(this.spatialIndex, autoParams) : null;
+      this.controller = new CameraRig(camera, renderer.domElement, cloudCenter, { autoSpeed });
 
-    // ---- クラスタの目印と現在地（src/labels/。粗い階層を使う。クラスタのないデータセットでは何もしない）----
-    this.clusterLabels = new ClusterLabels({
-      document: doc,
-      container: doc.getElementById('cluster-labels')!,
-      locationEl: doc.getElementById('cluster-location')!,
-      pointerTarget: renderer.domElement, // 目印の上のホイールとドラッグは、目印のない場所と同じようにカメラへ届ける
-      hud: ctx.hud,
-      camera,
-      clusters: coarseLevel?.clusters ?? [],
-      boundsRadius: arrays.bounds.radius,
-      colorSource: this.coloring.source,
-      flyTo: (target, opts) => this.controller.flyTo(target, opts),
-    });
+      // ---- クラスタの目印と現在地（src/labels/。粗い階層を使う。クラスタのないデータセットでは何もしない）----
+      this.clusterLabels = new ClusterLabels({
+        document: doc,
+        container: doc.getElementById('cluster-labels')!,
+        locationEl: doc.getElementById('cluster-location')!,
+        pointerTarget: renderer.domElement, // 目印の上のホイールとドラッグは、目印のない場所と同じようにカメラへ届ける
+        hud: ctx.hud,
+        camera,
+        clusters: coarseLevel?.clusters ?? [],
+        boundsRadius: arrays.bounds.radius,
+        colorSource: this.coloring.source,
+        flyTo: (target, opts) => this.controller.flyTo(target, opts),
+      });
 
-    // ---- ピッキング（src/picking/）----
-    this.picker = new GpuPicker(renderer, this.cloud);
-    this.picking = createPickingDebug(renderer, scene, camera, this.cloud, this.picker);
+      // ---- ピッキング（src/picking/）----
+      this.picker = new GpuPicker(renderer, this.cloud);
+      this.picking = createPickingDebug(renderer, scene, camera, this.cloud, this.picker);
 
-    // ---- 近くの単語の文字（src/text/）。画像のない単語のデータセットだけ。root に加え、ピッキングの層にする ----
-    this.words = this.text && this.cloud.dotsOnly && manifest.kind === 'text'
-      ? new WordLabels({
-        text: this.text,
+      // ---- 近くの単語の文字（src/text/）。画像のない単語のデータセットだけ。root に加え、ピッキングの層にする ----
+      // 文字の表示だけが作れないとき（グリフアトラスが文字の種類の多さで溢れるなど）は、表示全体を失敗にせず、丸い点だけで続ける
+      let words: WordLabels | null = null;
+      if (this.text && this.cloud.dotsOnly && manifest.kind === 'text') {
+        try {
+          if (takeFault('words')) throw new Error('（検証用）単語の文字の生成を失敗させました');
+          words = new WordLabels({
+            text: this.text,
+            positions: arrays.positions,
+            colorIndices: this.coloring.indices,
+            cloud: this.cloud,
+            picker: this.picker,
+            nearest: (x, y, z, k) => this.spatialIndex.kNearest(x, y, z, k).indices,
+            camera,
+            doc,
+          });
+        } catch (e) {
+          console.warn('単語の文字の表示を作れないので、丸い点だけで表示します:', e);
+          this._notice = `単語の文字を表示できません（${e instanceof Error ? e.message : String(e)}）。丸い点だけで表示しています`;
+        }
+      }
+      this.words = words;
+      if (this.words) {
+        this.root.add(this.words.group);
+        if (options.words === false) this.words.setEnabled(false);
+      }
+
+      // ---- ホバー・選択・ダブルクリックで点へ飛ぶ（src/interaction/）----
+      this.infoPanel = new InfoPanel(doc, this.pointInfoSource(coarseLevel?.clusters.map((c) => c.name) ?? []), () => this.interaction.select(null));
+      this.interaction = new InteractionController({
+        canvas: renderer.domElement,
+        camera,
+        cloud: this.cloud,
+        pick: (x, y) => this.picker.pick(camera, x, y).then((r) => (r ? r.index : null)),
+        index: this.spatialIndex, // 速度の自動調整と共有（上で構築）
+        panel: this.infoPanel,
+        flyTo: (target, opts) => this.controller.flyTo(target, opts),
+        bufferHeight: () => renderer.getDrawingBufferSize(new THREE.Vector2()).y,
+      });
+
+      // ---- ミニマップ（src/minimap/）：右下に全体の俯瞰と現在位置・視線の向き ----
+      this.minimap = new Minimap({
+        renderer,
+        camera,
         positions: arrays.positions,
         colorIndices: this.coloring.indices,
-        cloud: this.cloud,
-        picker: this.picker,
-        nearest: (x, y, z, k) => this.spatialIndex.kNearest(x, y, z, k).indices,
-        camera,
-        doc,
-      })
-      : null;
-    if (this.words) {
-      this.root.add(this.words.group);
-      if (options.words === false) this.words.setEnabled(false);
+        axes: manifest.overview?.axes,
+        selected: () => this.interaction.getState().selected,
+        moveTo: (view, seconds) => this.controller.goHome(view, seconds), // 位置と向きを滑らかに補間する（向きは同じなので位置だけ動く）
+        renderMain: () => renderer.render(scene, camera),
+        container: doc.body,
+      });
+
+      this.updateCameraDependent();
+      this.resize();
+      if (takeFault('view')) throw new Error('（検証用）表示の生成を失敗させました');
+    } catch (e) {
+      // 途中で失敗したら、それまでに作ったもの（カメラ操作のリスナー・目印の DOM・ピッキングの資源など）をすべて破棄してから投げ直す。
+      // 呼び出し側が前のデータで作り直すときに、リスナーが二重に登録されたり、DOM や GPU の資源が残ったりしない
+      this.dispose();
+      throw e;
     }
-
-    // ---- ホバー・選択・ダブルクリックで点へ飛ぶ（src/interaction/）----
-    this.infoPanel = new InfoPanel(doc, this.pointInfoSource(coarseLevel?.clusters.map((c) => c.name) ?? []), () => this.interaction.select(null));
-    this.interaction = new InteractionController({
-      canvas: renderer.domElement,
-      camera,
-      cloud: this.cloud,
-      pick: (x, y) => this.picker.pick(camera, x, y).then((r) => (r ? r.index : null)),
-      index: this.spatialIndex, // 速度の自動調整と共有（上で構築）
-      panel: this.infoPanel,
-      flyTo: (target, opts) => this.controller.flyTo(target, opts),
-      bufferHeight: () => renderer.getDrawingBufferSize(new THREE.Vector2()).y,
-    });
-
-    // ---- ミニマップ（src/minimap/）：右下に全体の俯瞰と現在位置・視線の向き ----
-    this.minimap = new Minimap({
-      renderer,
-      camera,
-      positions: arrays.positions,
-      colorIndices: this.coloring.indices,
-      axes: manifest.overview?.axes,
-      selected: () => this.interaction.getState().selected,
-      moveTo: (view, seconds) => this.controller.goHome(view, seconds), // 位置と向きを滑らかに補間する（向きは同じなので位置だけ動く）
-      renderMain: () => renderer.render(scene, camera),
-      container: doc.body,
-    });
-
-    this.updateCameraDependent();
-    this.resize();
   }
 
   get name(): string {
@@ -279,12 +309,66 @@ export class DatasetView {
     for (const kind of ['hover', 'selected'] as const) this.cloud.setHighlight(kind, this.cloud.getHighlight(kind));
   }
 
+  /** 利用者に知らせる文（単語の文字を作れず丸い点だけで表示しているときなど）。なければ null。 */
+  get notice(): string | null {
+    return this._notice;
+  }
+
+  /**
+   * 点群に、計算の途中の座標や新旧の座標の間の移動を出している間 true にする。目印とミニマップは、表示中の埋め込みの座標
+   * （`arrays.positions`）のままなので、目印は古い位置に浮いて見える。その間、目印を一時的に隠し（利用者の表示の選択は保つ）、
+   * ミニマップのそばに「計算中」を出す。false に戻すと、目印を元の状態へ戻して、「計算中」を消す。
+   */
+  setComputingDisplay(on: boolean): void {
+    if (this.disposed || on === this.computingDisplay) return;
+    this.computingDisplay = on;
+    if (on) {
+      this.labelsBeforeComputing = this.clusterLabels.enabled;
+      this.clusterLabels.setEnabled(false);
+      const badge = this.ctx.doc.createElement('div');
+      badge.id = 'minimap-computing';
+      badge.textContent = '計算中';
+      badge.setAttribute('aria-hidden', 'true'); // 進捗は UMAP のパネルが伝える
+      badge.style.cssText = 'position:fixed;z-index:2;pointer-events:none;font:11px/1.4 sans-serif;padding:1px 6px;border-radius:3px;'
+        + 'background:#ffc233;color:#07080c;';
+      this.ctx.doc.body.append(badge);
+      this.computingBadge = badge;
+      this.badgeLayoutKey = '';
+      this.layoutComputingBadge();
+    } else {
+      this.clusterLabels.setEnabled(this.labelsBeforeComputing);
+      this.computingBadge?.remove();
+      this.computingBadge = null;
+    }
+  }
+
+  /** L キー。計算の途中の表示の間は、隠している目印を戻すときの状態を切り替える（目印はまだ出さない）。 */
+  toggleClusterLabels(): void {
+    if (this.computingDisplay) this.labelsBeforeComputing = !this.labelsBeforeComputing;
+    else this.clusterLabels.toggle();
+  }
+
+  private layoutComputingBadge(): void {
+    const badge = this.computingBadge;
+    if (!badge) return;
+    const visible = this.minimap.isVisible;
+    badge.hidden = !visible;
+    if (!visible) return;
+    const key = `${this.ctx.renderer.domElement.clientWidth}x${this.ctx.renderer.domElement.clientHeight}`;
+    if (key === this.badgeLayoutKey) return;
+    this.badgeLayoutKey = key;
+    const { map } = this.minimap.getState(); // ミニマップの地図の領域（画面上の CSS ピクセル）
+    badge.style.left = `${Math.round(map.left + 4)}px`;
+    badge.style.top = `${Math.round(map.top + 4)}px`;
+  }
+
   /** 表示を作り直すときに引き継ぐ状態。 */
   captureUiState(): ViewUiState {
     const s = this.controller.getState();
     return {
       mode: s.mode, position: s.position, lookAt: s.lookAt, speed: s.speed, autoSpeedEnabled: s.autoSpeed.enabled,
-      pointSize: this.cloud.params.pointSize, labelsEnabled: this.clusterLabels.enabled,
+      pointSize: this.cloud.params.pointSize,
+      labelsEnabled: this.computingDisplay ? this.labelsBeforeComputing : this.clusterLabels.enabled,
       minimapVisible: this.minimap.isVisible, selected: this.interaction.getState().selected,
     };
   }
@@ -337,6 +421,7 @@ export class DatasetView {
     this.updateCameraDependent();
     this.words?.update(dt, width, height);
     this.clusterLabels.update(width, height);
+    this.layoutComputingBadge();
   }
 
   /** 本体の描画のあと（毎フレーム）。右下の領域へミニマップを重ねて描く */
@@ -347,15 +432,19 @@ export class DatasetView {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    this.interaction.dispose();
-    this.infoPanel.dispose();
-    this.clusterLabels.dispose();
-    this.minimap.dispose();
-    this.controller.dispose();
-    this.words?.dispose();
-    this.picker.dispose();
+    // コンストラクタの途中で失敗したときにも呼ぶ。まだ作っていないものは飛ばす
+    const made = this as Partial<Pick<DatasetView, 'interaction' | 'infoPanel' | 'clusterLabels' | 'minimap' | 'controller' | 'words' | 'picker' | 'cloud'>>;
+    made.interaction?.dispose();
+    made.infoPanel?.dispose();
+    made.clusterLabels?.dispose();
+    made.minimap?.dispose();
+    made.controller?.dispose();
+    made.words?.dispose();
+    made.picker?.dispose();
+    this.computingBadge?.remove();
+    this.computingBadge = null;
     this.ctx.scene.remove(this.root);
-    this.cloud.dispose();
+    made.cloud?.dispose();
   }
 
   private pointInfoSource(clusterNames: string[]): PointInfoSource {
