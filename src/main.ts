@@ -20,6 +20,8 @@ import { InfoPanel } from './interaction/infoPanel';
 import type { StopDistance } from './interaction/stopDistance';
 import { labelColors } from './render/palette';
 import { ClusterLabels, type ClusterLabelsState } from './labels/ClusterLabels';
+import { Minimap, type MinimapDebug } from './minimap/Minimap';
+import { withMinimapHelp } from './minimap/geometry';
 
 interface FrameStats { frames: number; meanMs: number; medianMs: number; p95Ms: number; maxMs: number }
 
@@ -53,6 +55,8 @@ declare global {
       labels: {
         getState(): ClusterLabelsState;
       };
+      /** ミニマップ（src/minimap/）。状態、ワールド座標とミニマップ上の位置の変換、表示の切り替え */
+      minimap: MinimapDebug;
     };
   }
 }
@@ -167,7 +171,7 @@ async function start(): Promise<void> {
 
   const updateHud = () => {
     const s = controller.getState();
-    hud.textContent = clusterLabels.decorateHud(formatHud({
+    hud.textContent = withMinimapHelp(clusterLabels.decorateHud(formatHud({
       datasetName: arrays.manifest.name,
       pointCount: arrays.manifest.count,
       pointSize: cloud.params.pointSize,
@@ -175,7 +179,7 @@ async function start(): Promise<void> {
       speed: s.speed,
       autoSpeed: { available: s.autoSpeed.available, enabled: s.autoSpeed.enabled, effectiveSpeed: s.effectiveSpeed },
       viewParams: formatView({ pos: s.position, look: s.lookAt }),
-    }));
+    })));
   };
   controller.onChange(() => updateHud()); // モードと速度の変化はすぐに見せる
 
@@ -211,6 +215,7 @@ async function start(): Promise<void> {
     updateCameraDependent();
     clusterLabels.update(window.innerWidth, window.innerHeight);
     renderer.render(scene, camera);
+    minimap.render(); // 本体の描画のあと、右下の領域へ重ねて描く（src/minimap/）
 
     hudTimer += dt;
     if (hudTimer > 0.25) { hudTimer = 0; updateHud(); }
@@ -251,6 +256,23 @@ async function start(): Promise<void> {
   });
   // ---- ここまで ----
 
+  // ---- ミニマップ（src/minimap/）：右下に全体の俯瞰と現在位置・視線の向き。M キーで表示を切り替える ----
+  const minimap = new Minimap({
+    renderer,
+    camera,
+    positions: arrays.positions,
+    labels: arrays.labels,
+    labelCount: arrays.manifest.labels.names.length,
+    axes: arrays.manifest.overview?.axes,
+    selected: () => interaction.getState().selected,
+    moveTo: (view, seconds) => controller.goHome(view, seconds), // 位置と向きを滑らかに補間する（向きは同じなので位置だけ動く）
+    renderMain: () => renderer.render(scene, camera),
+    container: document.body,
+  });
+  window.addEventListener('resize', () => minimap.resize());
+  bindShortcut(window, 'KeyM', () => minimap.toggle());
+  // ---- ここまで ----
+
   window.__explorer = {
     ready: true,
     pick: (x, y) => picker.pick(camera, x, y),
@@ -271,6 +293,7 @@ async function start(): Promise<void> {
         frameResolve = resolve;
       }),
     pointCloud: cloud,
+    minimap: minimap.debug,
     clip: {
       get: () => ({ near: camera.near, far: camera.far }),
       override: (planes) => {
