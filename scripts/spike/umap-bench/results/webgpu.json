@@ -1,0 +1,13 @@
+{
+  "既定": {
+    "hasNavigatorGpu": true,
+    "adapter": null
+  },
+  "unsafe-webgpu + swiftshader": {
+    "hasNavigatorGpu": true,
+    "adapter": {
+      "vendor": "google",
+      "architecture": "swiftshader"
+    }
+  }
+}
