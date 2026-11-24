@@ -656,15 +656,31 @@ async function testUmap(page, q, knn) {
   // 計算の途中の座標を点群に出している間（目印を隠し、ミニマップに「計算中」を出している間。最初の途中経過が届いてから）は、要約に注記が付く。
   // それより前（計算を始めただけで、点群は表示中の座標のまま）は付かない
   let maxErr = -1, samples = 0, noted = 0, onSamples = 0, offWithNote = 0, noteDetail = '';
+  // UMAP の Worker の途中経過はフレームと関係なく届くので、1 つの標本に使う状態（計算の phase・近傍の表示と要約・読み上げの文・
+  // 「計算中」の表示・線の端点の誤差）は、1 回の page.evaluate の中で、同じ時点のものとして読む（別々の呼び出しに分けると、別の時点の状態を組み合わせて判定してしまう）
+  const sample = () => page.evaluate(() => {
+    const ex = window.__explorer;
+    const u = ex.umap.getState();
+    const ph = u.loaded ? u.phase : 'idle';
+    if (ph !== 'running' && ph !== 'morphing') return { ph };
+    const s = ex.neighbors.getState();
+    if (!s.overlayVisible) return { ph, overlay: false };
+    const live = document.getElementById('info-neighbors-live').textContent;
+    const computingOn = document.getElementById('minimap-computing') !== null;
+    let err = 0;
+    const ps = ex.picking.project(s.selected);
+    for (const l of s.lines) {
+      const pj = ex.picking.project(l.index);
+      err = Math.max(err, Math.hypot(l.from[0] - ps.clientX, l.from[1] - ps.clientY), Math.hypot(l.to[0] - pj.clientX, l.to[1] - pj.clientY));
+    }
+    return { ph, overlay: true, s, live, computingOn, err };
+  });
   for (let k = 0; k < 600 && samples < 3; k++) {
     await frames(page, 1);
-    const ph = await page.evaluate(() => { const s = window.__explorer.umap.getState(); return s.loaded ? s.phase : 'idle'; });
-    if (ph !== 'running' && ph !== 'morphing') continue;
-    const s = await nb(page);
-    if (!s.overlayVisible) continue;
+    const x = await sample();
+    if (!x.overlay) continue;
+    const { ph, s, live, computingOn } = x;
     // 計算の途中の表示の間は、「地図で近い」の判定が計算前の座標のものなので、要約にそう添える
-    const live = await page.evaluate(() => document.getElementById('info-neighbors-live').textContent);
-    const computingOn = await page.evaluate(() => document.getElementById('minimap-computing') !== null);
     if (!computingOn) {
       if (s.beforeCompute || s.list.summary.includes('計算前') || live.includes('計算前')) offWithNote++;
       continue;
@@ -674,18 +690,7 @@ async function testUmap(page, q, knn) {
       && s.list.summary.startsWith(`元のデータで近い${N}点のうち、地図で近い${N}点にも入っているのは${s.matches}点。`);
     if (noteOk) noted++;
     else noteDetail = `${ph}: ${s.list.summary}`;
-    const r = await page.evaluate(async () => {
-      const ex = window.__explorer;
-      const s = ex.neighbors.getState();
-      let e = 0;
-      const ps = ex.picking.project(s.selected);
-      for (const l of s.lines) {
-        const pj = ex.picking.project(l.index);
-        e = Math.max(e, Math.hypot(l.from[0] - ps.clientX, l.from[1] - ps.clientY), Math.hypot(l.to[0] - pj.clientX, l.to[1] - pj.clientY));
-      }
-      return e;
-    });
-    maxErr = Math.max(maxErr, r);
+    maxErr = Math.max(maxErr, x.err);
     samples++;
   }
   const outcome = await done;

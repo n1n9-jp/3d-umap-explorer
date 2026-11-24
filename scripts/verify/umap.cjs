@@ -359,9 +359,16 @@ async function testFirstCompute(page, ctx) {
   await frames(page, 4);
   await page.keyboard.up('KeyW');
   const camAfter = await camState(page);
-  const s2 = await umapState(page);
-  const progressText = await page.evaluate(() => document.getElementById('umap-progress-text').textContent);
-  const cancelShown = await page.isVisible('#umap-cancel');
+  // 計算の状態・進捗の文・「中断」のボタンの表示は、Worker の途中経過がフレームと関係なく届くので、1 回の evaluate で同じ時点のものとして読む
+  const { s2, progressText, cancelShown } = await page.evaluate(() => {
+    const cancel = document.getElementById('umap-cancel');
+    const r = cancel.getBoundingClientRect();
+    return {
+      s2: window.__explorer.umap.getState(),
+      progressText: document.getElementById('umap-progress-text').textContent,
+      cancelShown: !cancel.hidden && getComputedStyle(cancel).visibility !== 'hidden' && r.width > 0 && r.height > 0,
+    };
+  });
   check('計算中は、進捗（エポック数と割合）と「中断」のボタンが出る', /エポック \d+ \/ 200（\d+%）/.test(progressText) && cancelShown, progressText);
   check('計算中に W キーでカメラが前へ進む', len(sub(camAfter.position, camBefore.position)) > 1e-3 && s2.phase === 'running',
     `移動 ${len(sub(camAfter.position, camBefore.position)).toFixed(4)}、エポック ${s2.epoch}`);

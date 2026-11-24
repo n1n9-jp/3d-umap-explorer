@@ -7,9 +7,12 @@
  * - 左上にタイトルとモード名が出て、起動時のモードと一致する
  * - O キー、モード名のクリック、点のダブルクリック（俯瞰から飛行へ自動で切り替わる）のそれぞれで、表示が追従する。読み上げにも知らせる
  * - キーボード（Tab と Enter・Space・矢印）でモードを切り替えられ、aria-checked にいまの選択が出る。
+ *   Tab の順に入るのは選択中のボタンだけ（tabindex 0。もう一方は -1）で、Tab で止まるのは 1 回。矢印キーで選択が移り、tabindex が入れ替わる。
  *   切り替えのボタンにフォーカスがある間に WASD・矢印を押しても、カメラは動かず、二重の動作も起きない
+ * - データセットの切り替えに失敗して前のデータで表示を作り直したあと（俯瞰モードの最中でも）、左上の表示が実際のカメラのモードと一致する
  * - 1280×800、1280×480、360×740 の各ビューポートで、左上の要素・選択欄の行・UMAP のパネル（開いた状態）・情報パネル（点を選択した状態）・
  *   ミニマップ・HUD（と現在地）の矩形が、互いに重ならず、ビューポートの中に収まる
+ * - 幅 900px と 1100px で、パネルを開いた状態の上部の高さ（--top-bar-height）が、60 フレームの間に変化しない
  * - コンソールエラーがない
  * 失敗があれば終了コード 1 で終わる。スクリーンショットを artifacts/layout-*.png に保存する。
  */
@@ -68,7 +71,7 @@ const titleState = (page) => page.evaluate(() => {
     rect: { left: r.left, top: r.top, right: r.right, bottom: r.bottom },
     role: group.getAttribute('role'),
     label: group.getAttribute('aria-label'),
-    radios: [...group.querySelectorAll('[role="radio"]')].map((b) => ({ mode: b.dataset.mode, text: b.innerText.replace(/\s+/g, ' ').trim(), checked: b.getAttribute('aria-checked') })),
+    radios: [...group.querySelectorAll('[role="radio"]')].map((b) => ({ mode: b.dataset.mode, text: b.innerText.replace(/\s+/g, ' ').trim(), checked: b.getAttribute('aria-checked'), tabindex: b.getAttribute('tabindex') })),
     keyHint: document.getElementById('mode-key-hint').innerText,
     style: { overview: style('overview'), fly: style('fly') },
     live: document.getElementById('mode-live').textContent,
@@ -82,7 +85,9 @@ const titleState = (page) => page.evaluate(() => {
 function shows(t, mode) {
   const other = mode === 'fly' ? 'overview' : 'fly';
   const checked = t.radios.filter((r) => r.checked === 'true').map((r) => r.mode);
+  const tabbable = t.radios.filter((r) => r.tabindex === '0').map((r) => r.mode);
   return checked.length === 1 && checked[0] === mode && t.debug.mode === mode && t.debug.checked.join() === mode
+    && tabbable.length === 1 && tabbable[0] === mode && t.radios.find((r) => r.mode === other).tabindex === '-1' && t.debug.tabStops.join() === mode
     && t.style[mode].color === 'rgb(255, 194, 51)' && t.style[other].color !== t.style[mode].color;
 }
 
@@ -190,6 +195,8 @@ async function testKeyboard(browser, base) {
   console.log('\n[キーボードでの切り替え]');
   const page = await openPage(browser, base, { width: 1280, height: 800 });
   check('前提: 起動時は飛行モード', (await camera(page)).mode === 'fly');
+  const t00 = await titleState(page);
+  check('Tab の順に入るのは選択中の「飛行」だけ（tabindex 0）。「俯瞰」は外れている（-1）', shows(t00, 'fly') && t00.radios.map((r) => `${r.mode}:${r.tabindex}`).join() === 'overview:-1,fly:0', JSON.stringify(t00.radios));
   await page.evaluate(() => document.activeElement?.blur());
   await page.keyboard.press('Tab');
   const f1 = await page.evaluate(() => {
@@ -197,13 +204,42 @@ async function testKeyboard(browser, base) {
     const s = getComputedStyle(a);
     return { mode: a.dataset?.mode ?? null, role: a.getAttribute('role'), checked: a.getAttribute('aria-checked'), outline: s.outlineStyle, outlineWidth: s.outlineWidth, focusVisible: a.matches(':focus-visible') };
   });
-  check('Tab で最初に「俯瞰」のボタンへフォーカスが移り、フォーカスの枠が見える', f1.mode === 'overview' && f1.role === 'radio' && f1.focusVisible && f1.outline !== 'none' && f1.outlineWidth !== '0px', JSON.stringify(f1));
+  check('Tab で最初に、選択中の「飛行」のボタンへフォーカスが移り、フォーカスの枠が見える', f1.mode === 'fly' && f1.role === 'radio' && f1.checked === 'true' && f1.focusVisible && f1.outline !== 'none' && f1.outlineWidth !== '0px', JSON.stringify(f1));
+  // Tab で切り替えのボタンに止まるのは 1 回だけ（ラジオグループの作法）。Tab を押し続け、同じ要素へ戻るまでの 1 周で、切り替えのボタンに止まった回数を数える
+  const lap = [];
+  const seen = new Set();
+  for (let k = 0; k < 120; k++) {
+    await page.keyboard.press('Tab');
+    const e = await page.evaluate(() => {
+      const a = document.activeElement;
+      return { key: a ? [...document.querySelectorAll('*')].indexOf(a) : -1, mode: a?.dataset?.mode ?? null };
+    });
+    if (seen.has(e.key)) break;
+    seen.add(e.key);
+    lap.push(e);
+  }
+  const stopped = lap.filter((e) => e.mode).map((e) => e.mode);
+  check('Tab で切り替えのボタンに止まるのは 1 回だけ（選択中のボタン）', lap.length >= 3 && lap.length < 120 && stopped.length === 1 && stopped[0] === 'fly', `1 周 ${lap.length} 要素のうち、止まった回数 ${stopped.length}（${stopped.join(',')}）`);
+  await page.evaluate(() => document.activeElement?.blur());
+  // 矢印キー: 選択が移り、tabindex が入れ替わる（フォーカスも新しい選択へ移る）
+  await page.focus('#mode-switch button[data-mode="fly"]');
+  await page.keyboard.press('ArrowLeft');
+  await waitMode(page, 'overview');
+  const k1 = await titleState(page);
+  check('矢印キー（←）で選択が「俯瞰」へ移り、tabindex が入れ替わる（俯瞰 0・飛行 -1）。フォーカスも移る',
+    (await camera(page)).mode === 'overview' && shows(k1, 'overview') && k1.radios.map((r) => `${r.mode}:${r.tabindex}`).join() === 'overview:0,fly:-1' && k1.active === 'overview', JSON.stringify(k1.radios));
+  await page.keyboard.press('ArrowRight');
+  await waitMode(page, 'fly');
+  const k2 = await titleState(page);
+  check('矢印キー（→）で選択が「飛行」へ戻り、tabindex も戻る（俯瞰 -1・飛行 0）', (await camera(page)).mode === 'fly' && shows(k2, 'fly') && k2.radios.map((r) => `${r.mode}:${r.tabindex}`).join() === 'overview:-1,fly:0' && k2.active === 'fly', JSON.stringify(k2.radios));
+  await page.evaluate(() => document.activeElement?.blur());
+  // Enter・Space（Tab の順から外れているボタンも、フォーカスがあれば押せる）
+  await page.focus('#mode-switch button[data-mode="overview"]');
   await page.keyboard.press('Enter');
   await waitMode(page, 'overview');
   const t1 = await titleState(page);
   check('Enter で俯瞰モードへ。aria-checked にいまの選択が出る。フォーカスはボタンに残る', (await camera(page)).mode === 'overview' && shows(t1, 'overview') && t1.active === 'overview', JSON.stringify(t1.radios));
-  await page.keyboard.press('Tab');
-  check('Tab で「飛行」のボタンへ移る', (await titleState(page)).active === 'fly');
+  await page.focus('#mode-switch button[data-mode="fly"]');
   await page.keyboard.press('Space');
   await waitMode(page, 'fly');
   const t2 = await titleState(page);
@@ -251,6 +287,64 @@ async function testKeyboard(browser, base) {
   const durNormal = await pn.evaluate(() => getComputedStyle(document.querySelector('#mode-switch .mode-option')).transitionDuration);
   await pn.close();
   check('切り替えの色の移り変わりは控えめで、「動きを減らす」では付けない', /^0\.[1-4]\d*s/.test(durNormal) && durReduce.split(',').every((d) => parseFloat(d) === 0), `通常 ${durNormal}、動きを減らす ${durReduce}`);
+}
+
+// ---------- 表示の作り直しに失敗したあとのモードの表示 ----------
+
+async function testFailedSwitch(browser, base) {
+  console.log('\n[データセットの切り替えに失敗したあとの、左上のモードの表示]');
+  const page = await openPage(browser, base, { width: 1280, height: 800 });
+  await page.keyboard.press('KeyO');
+  await waitMode(page, 'overview');
+  check('前提: 俯瞰モードで、表示も俯瞰', (await camera(page)).mode === 'overview' && shows(await titleState(page), 'overview'));
+  const gen = (await page.evaluate(() => window.__explorer.dataset.getState())).generation;
+  await page.evaluate(() => { window.__explorer.faults.view = 1; });
+  // 失敗の直後（次のフレームの前）の、左上の表示と実際のモード。HUD は 0.25 秒ごとにも更新されるので、直後に読まないと、失敗の処理が表示を合わせたのか、定期の更新で合ったのかが区別できない
+  const { r, justAfter } = await page.evaluate(async () => {
+    const ex = window.__explorer;
+    const r = await ex.dataset.switchTo('word2vec-10k');
+    return { r, justAfter: { shown: ex.modeSwitch.getState().mode, actual: ex.getState().mode } };
+  });
+  await frames(page, 3);
+  await page.waitForTimeout(350); // 強調の色の移り変わり（0.25 秒）が終わるまで
+  const d = await page.evaluate(() => window.__explorer.dataset.getState());
+  check('前提: 表示の生成を失敗させると、エラーを報告し、前のデータ（MNIST）の表示を保つ', !r.ok && d.current?.id === 'mnist' && d.generation === gen, JSON.stringify({ r, current: d.current }));
+  check('失敗の直後（次のフレームの前）に、左上の表示が、作り直した表示の実際のモードに追従している', justAfter.shown === justAfter.actual, JSON.stringify(justAfter));
+  const cam = await camera(page);
+  const t = await titleState(page);
+  check(`作り直した表示のモード（${cam.mode}）と、左上の表示（aria-checked・強調・tabindex）が一致する`, shows(t, cam.mode), JSON.stringify({ camera: cam.mode, debug: t.debug, radios: t.radios }));
+  check('HUD の操作説明も、作り直した表示のモードのもの', cam.mode === 'fly' ? /O 俯瞰モードへ/.test(t.hud) : /O 飛行モードへ/.test(t.hud), JSON.stringify(t.hud.split('\n').slice(0, 3)));
+  // そのあとの O キーでも、表示が追従する
+  const next = cam.mode === 'fly' ? 'overview' : 'fly';
+  await page.keyboard.press('KeyO');
+  await waitMode(page, next);
+  check('そのあとの O キーでの切り替えにも、表示が追従する', (await camera(page)).mode === next && shows(await titleState(page), next));
+  await page.close();
+}
+
+// ---------- 上部の高さが落ち着くこと ----------
+
+async function testTopBarStable(browser, base, width, height) {
+  console.log(`\n[${width}×${height}: パネルを開いた状態で、上部の高さ（--top-bar-height）が変化しない]`);
+  const page = await openPage(browser, base, { width, height, query: 'data=word2vec-10k' });
+  await page.evaluate(() => window.__explorer.interaction.select(123));
+  await page.evaluate(() => window.__explorer.umap.open());
+  await page.waitForFunction(() => !document.getElementById('umap-panel').hidden && !document.getElementById('info').hidden, null, { timeout: 60000 });
+  await page.waitForFunction(() => { const s = window.__explorer.neighbors.getState(); return !s || s.list?.kind !== 'loading'; }, null, { timeout: 60000 }).catch(() => {});
+  await frames(page, 8);
+  const rec = await page.evaluate(() => new Promise((resolve) => {
+    const out = [];
+    const bar = document.getElementById('top-bar');
+    const panels = document.getElementById('top-panels');
+    const step = () => {
+      out.push({ h: bar.style.getPropertyValue('--top-bar-height'), scroll: panels.scrollHeight > panels.clientHeight + 0.5 });
+      if (out.length >= 60) resolve(out); else requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  }));
+  const values = [...new Set(rec.map((x) => x.h))];
+  check(`${width}×${height}: 60 フレームの間、--top-bar-height が変化しない`, values.length === 1 && /^\d+px$/.test(values[0]), `値 ${values.join(' → ')}（並びのスクロール ${[...new Set(rec.map((x) => x.scroll))].join('/')}）`);
+  await page.close();
 }
 
 // ---------- 各ビューポートでの配置 ----------
@@ -327,10 +421,12 @@ async function main() {
     browser = await chromium.launch({ args: CHROMIUM_ARGS });
     await testTitleAndMode(browser, base);
     await testKeyboard(browser, base);
+    await testFailedSwitch(browser, base);
     await testViewport(browser, base, { width: 1280, height: 800, query: 'data=word2vec-10k', name: '1280x800-word2vec' });
     await testViewport(browser, base, { width: 1280, height: 800, name: '1280x800' });
     await testViewport(browser, base, { width: 1280, height: 480, name: '1280x480' });
     await testViewport(browser, base, { width: 360, height: 740, name: '360x740' });
+    for (const [w, h] of [[900, 700], [1100, 700], [900, 420], [1100, 420]]) await testTopBarStable(browser, base, w, h);
   } finally {
     if (browser) await browser.close();
     stop();
