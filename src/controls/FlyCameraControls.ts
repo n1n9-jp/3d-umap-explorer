@@ -358,7 +358,9 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
    * 緩急は始めと終わりが緩やかで、速さの山が手前（`flightEase`）。基準の所要時間（既定 600 ミリ秒）は、移動の距離と
    * `cloudRadius` に応じて 0.8〜1.8 倍に伸縮する。動いていたカメラ（キーを離したあとの滑走中など）の速度は引き継ぐ。
    * 「動きを減らす」設定（`prefers-reduced-motion: reduce`）なら、所要時間は 0.5 倍で、速度は引き継がない。
-   * 移動中にキー移動やドラッグ回転をすると中断する（ホイールは中断しない）。
+   * 引き継ぐ速さは、`T·|v0| ≤ 2.5 × 移動の距離` に抑える（近い点へ速く滑り込んでも、通り越して戻らない）。
+   * 移動中にキー移動やドラッグ回転をすると中断し、その瞬間の移動の速度を引き継いで、加速（キーの入力があるとき）や
+   * 滑走（ないとき）へ滑らかにつなげる（動きを減らす設定では、その場で止まる）。ホイールは中断しない。
    */
   flyTo(target: Vector3, options?: FlyToOptions): void {
     if (!this._enabled || this.disposed) return;

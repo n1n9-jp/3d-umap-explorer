@@ -9,7 +9,7 @@ import {
   createMoveInput,
 } from './FlyMotion';
 import type { MoveInput } from './FlyMotion';
-import { flightEase, scaledFlightDuration } from './easing';
+import { FLIGHT_CARRY_LIMIT, flightCarry, flightEase, scaledFlightDuration } from './easing';
 
 const deg = (d: number) => (d * Math.PI) / 180;
 
@@ -564,6 +564,212 @@ describe('FlyMotion: flyTo', () => {
     const m = new FlyMotion();
     m.flyTo(new Vector3(0, 0, -1));
     expect(m.step(1 / 60, createMoveInput())).toBe(true);
+  });
+});
+
+describe('FlyMotion: flyTo の速度の引き継ぎ（行き過ぎない・引き返さない）', () => {
+  const STOP = 0.03;
+  const R = 1.2;
+  const U = new Vector3(0, 0, -1); // 進む方向（S → E）
+
+  /** 原点から -Z へ距離 L の終点へ飛ぶ。v0 は進む方向から angle だけ傾けた、大きさ speed の速度。 */
+  function start(L: number, speed: number, angle: number, opts: { reducedMotion?: boolean } = {}): { m: FlyMotion; v0: Vector3; E: Vector3 } {
+    const m = new FlyMotion();
+    m.setPose(new Vector3(0, 0, 0), new Vector3(0, 0, -1));
+    const v0 = new Vector3(speed * Math.sin(angle), 0, -speed * Math.cos(angle));
+    m.velocity.copy(v0);
+    m.flyTo(new Vector3(0, 0, -(L + STOP)), { distance: STOP, durationMs: 600, cloudRadius: R, ...opts });
+    return { m, v0, E: new Vector3(0, 0, -L) };
+  }
+
+  const Ls = [0.02, 0.05, 0.1, 0.3, 1, 3];
+  const speeds = [0, 0.3, 0.8, 1.4, 2];
+  const angles = [0, 30, 60, 90, 120, 150, 180].map(deg);
+
+  it('L・v0 の大きさ・向きを振った格子のすべてで: 終点を越えず、引き返さず、t=0 の速度が v0（抑える前の範囲）、終わりは目標で速度 0', () => {
+    for (const L of Ls) {
+      for (const speed of speeds) {
+        for (const angle of angles) {
+          const { m, v0, E } = start(L, speed, angle);
+          const info = m.flightInfo!;
+          const T = info.durationMs / 1000;
+          const unclamped = T * speed <= FLIGHT_CARRY_LIMIT * L;
+          // 引き継いだ速さ: 抑える前の範囲では v0 のまま、超えたら T·|v0| = c·L
+          if (unclamped) expect(info.carriedSpeed).toBeCloseTo(speed, 12);
+          else expect(info.carriedSpeed * T).toBeCloseTo(FLIGHT_CARRY_LIMIT * L, 9);
+
+          // t=0 の速度（ごく短い 1 歩の差分）
+          const p0 = m.position.clone();
+          const h = 1e-6;
+          m.step(h, createMoveInput());
+          const vStart = m.position.clone().sub(p0).divideScalar(h);
+          const carried = v0.clone().multiplyScalar(speed > 0 ? info.carriedSpeed / speed : 0);
+          expect(vStart.distanceTo(carried)).toBeLessThan(1e-3 * (1 + L / T));
+          if (unclamped) expect(vStart.distanceTo(v0)).toBeLessThan(1e-3 * (1 + L / T));
+
+          let prevD = m.position.distanceTo(E);
+          let approaching = false;
+          let prevSpeed = 0;
+          for (let i = 0; i < 2000 && m.isFlying; i++) {
+            const before = m.position.clone();
+            m.step(1 / 240, createMoveInput());
+            // 進む方向の成分は、終点を越えない（止まる距離の手前で止まり、点を通り越さない）
+            expect(m.position.dot(U)).toBeLessThanOrEqual(L + 1e-12);
+            const d = m.position.distanceTo(E);
+            // 引き返さない: 近づき始めたら、離れない
+            if (approaching) expect(d).toBeLessThanOrEqual(prevD + 1e-12);
+            if (d < prevD - 1e-12) approaching = true;
+            prevD = d;
+            prevSpeed = m.position.distanceTo(before) * 240;
+          }
+          expect(m.isFlying).toBe(false);
+          expect(m.position.distanceTo(E)).toBeLessThan(1e-12);
+          expect(m.yaw).toBeCloseTo(0, 9);
+          expect(m.pitch).toBeCloseTo(0, 9);
+          expect(m.velocity.length()).toBe(0);
+          expect(prevSpeed).toBeLessThan(0.02 * (L / T) + 0.01 * speed + 1e-9); // 終わりの直前の速さは 0 へ向かう
+        }
+      }
+    }
+  });
+
+  it('進む方向へ向かう v0 では、終点までの距離が始めから単調に縮む', () => {
+    for (const L of Ls) {
+      for (const speed of speeds) {
+        for (const angle of angles.filter((a) => a <= deg(90))) {
+          const { m, E } = start(L, speed, angle);
+          let prevD = m.position.distanceTo(E);
+          while (m.isFlying) {
+            m.step(1 / 240, createMoveInput());
+            const d = m.position.distanceTo(E);
+            expect(d).toBeLessThanOrEqual(prevD + 1e-12);
+            prevD = d;
+          }
+        }
+      }
+    }
+  });
+
+  it('横向きの膨らみは、移動の距離の c × max g = 2.5 × 0.08192 ≈ 0.205 倍まで', () => {
+    const bound = FLIGHT_CARRY_LIMIT * flightCarry(0.2);
+    expect(bound).toBeCloseTo(0.2048, 9);
+    let worst = 0;
+    for (const L of Ls) {
+      for (const speed of speeds) {
+        for (const angle of angles) {
+          const { m } = start(L, speed, angle);
+          while (m.isFlying) {
+            m.step(1 / 240, createMoveInput());
+            worst = Math.max(worst, Math.hypot(m.position.x, m.position.y) / L);
+          }
+        }
+      }
+    }
+    expect(worst).toBeLessThanOrEqual(bound + 1e-9);
+    expect(worst).toBeGreaterThan(bound * 0.95); // 速い横向きの v0 では、上限近くまで膨らむ（抑え方が効いている）
+  });
+
+  it('速い滑走（v0 1.8）から近い点（L 0.05）へ飛んでも、点の手前で止まり、通り越して戻らない', () => {
+    const { m, E } = start(0.05, 1.8, 0);
+    const target = new Vector3(0, 0, -(0.05 + STOP));
+    let minToTarget = Infinity;
+    while (m.isFlying) {
+      m.step(1 / 60, createMoveInput());
+      minToTarget = Math.min(minToTarget, m.position.distanceTo(target));
+    }
+    expect(minToTarget).toBeGreaterThanOrEqual(STOP - 1e-12);
+    expect(m.position.distanceTo(E)).toBeLessThan(1e-12);
+  });
+
+  it('刻み幅（dt）を変えても、途中と終わりの姿勢が一致する', () => {
+    for (const [L, speed, angle] of [[0.05, 1.8, 0], [0.3, 1, deg(90)], [1, 2, deg(150)]] as const) {
+      const a = start(L, speed, angle).m;
+      const b = start(L, speed, angle).m;
+      run(a, 0.3, 1 / 30, createMoveInput());
+      run(b, 0.3, 1 / 240, createMoveInput());
+      expectClose(a.position, b.position, 1e-12);
+      expect(a.yaw).toBeCloseTo(b.yaw, 12);
+      run(a, 2, 1 / 30, createMoveInput());
+      run(b, 2, 1 / 240, createMoveInput());
+      expect(a.isFlying || b.isFlying).toBe(false);
+      expectClose(a.position, b.position, 1e-12);
+      expect(a.yaw).toBeCloseTo(b.yaw, 12);
+      expect(a.pitch).toBeCloseTo(b.pitch, 12);
+    }
+  });
+});
+
+describe('FlyMotion: 自動移動の途中の操作（速度を引き継いで中断する）', () => {
+  /** 原点から -Z へ 1 の移動を始め、速さの山（t ≈ 1/3）まで進める。そのときの移動の速度を返す。 */
+  function midFlight(reducedMotion = false): { m: FlyMotion; v: Vector3 } {
+    const m = new FlyMotion({ speed: 0.3 });
+    m.setPose(new Vector3(0, 0, 0), new Vector3(0, 0, -1));
+    m.flyTo(new Vector3(0, 0, -1.03), { distance: 0.03, durationMs: 600, reducedMotion });
+    const T = m.flightInfo!.durationMs / 1000;
+    run(m, T / 3, T / 60, createMoveInput());
+    expect(m.isFlying).toBe(true);
+    return { m, v: m.currentVelocity(new Vector3()) };
+  }
+
+  /** 1 歩の平均の速さ（位置の差 / dt）。 */
+  function stepSpeed(m: FlyMotion, dt: number, inp: MoveInput): number {
+    const before = m.position.clone();
+    m.step(dt, inp);
+    return m.position.distanceTo(before) / dt;
+  }
+
+  it('移動キーを押すと中断し、その瞬間の速度から加速へつながる（速さが急に 0 にならない）', () => {
+    const { m, v } = midFlight();
+    const speed = v.length();
+    expect(speed).toBeGreaterThan(2); // 山の速さ（平均の約 1.8 倍）
+    const dt = 1 / 60;
+    const s1 = stepSpeed(m, dt, input({ forward: true }));
+    expect(m.isFlying).toBe(false);
+    // 加速の時定数 0.15 秒で目標（0.3）へ向かう: 1 フレームでは e^(−dt/0.15) ≈ 0.89 しか減らない
+    const decay = Math.exp(-dt / DEFAULT_ACCEL_TIME_CONSTANT);
+    expect(s1).toBeGreaterThan(speed * decay * 0.95);
+    expect(m.velocity.length()).toBeCloseTo(0.3 + (speed - 0.3) * decay, 6);
+    // 速度の向きは、飛行の速度の向きのまま（前へ）
+    expect(m.velocity.clone().normalize().dot(v.clone().normalize())).toBeGreaterThan(0.999);
+    // その後は目標速度へ落ち着く
+    run(m, 1.5, dt, input({ forward: true }));
+    expect(m.velocity.length()).toBeCloseTo(0.3, 3);
+  });
+
+  it('ドラッグ（rotateBy）で中断すると、その瞬間の速度で滑走へつながる', () => {
+    const { m, v } = midFlight();
+    const speed = v.length();
+    m.rotateBy(0.01, 0);
+    expect(m.isFlying).toBe(false);
+    expectClose(m.velocity, v, 1e-12);
+    const dt = 1 / 60;
+    const s1 = stepSpeed(m, dt, createMoveInput());
+    expect(m.isGliding).toBe(true);
+    expect(s1).toBeGreaterThan(speed * Math.exp(-dt / DEFAULT_GLIDE_TIME_CONSTANT));
+    expect(m.velocity.length()).toBeCloseTo(speed * Math.exp(-dt / DEFAULT_GLIDE_TIME_CONSTANT), 9);
+    // 滑走はやがて止まる
+    run(m, 5, dt, createMoveInput());
+    expect(m.velocity.length()).toBe(0);
+    expect(m.isGliding).toBe(false);
+  });
+
+  it('動きを減らす設定で始めた移動は、中断するとその場で止まる', () => {
+    {
+      const { m } = midFlight(true);
+      m.rotateBy(0.01, 0);
+      expect(m.isFlying).toBe(false);
+      expect(m.velocity.length()).toBe(0);
+      const before = m.position.clone();
+      m.step(1 / 60, createMoveInput());
+      expect(m.position.distanceTo(before)).toBe(0);
+    }
+    {
+      const { m } = midFlight(true);
+      m.step(1 / 60, input({ forward: true }));
+      expect(m.isFlying).toBe(false);
+      // 速度 0 から加速する（1 フレームで目標 0.3 の 1 − e^(−dt/0.15) 程度）
+      expect(m.velocity.length()).toBeCloseTo(0.3 * (1 - Math.exp(-1 / 60 / DEFAULT_ACCEL_TIME_CONSTANT)), 9);
+    }
   });
 });
 

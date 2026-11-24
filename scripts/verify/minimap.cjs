@@ -29,7 +29,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require('playwright');
 const {
-  loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, add, mul, len, norm, readInfoRect, readUiRects, waitCameraIdle, expectedFlightDuration,
+  loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, add, mul, len, norm, readInfoRect, readUiRects, waitCameraIdle, expectedFlightDuration, flightEase,
 } = require('./lib.cjs');
 
 const root = path.resolve(__dirname, '../..');
@@ -488,6 +488,11 @@ async function testClickAndSelection(page, views) {
   check('地図のクリックで、クリックした位置（奥行きはそのまま）へ移動する', moving.ok && dPos < 1e-4 && near(m2.camera.x, target.x, 0.01) && near(m2.camera.y, target.y, 0.01),
     `着いた位置と期待の差 ${dPos.toExponential(2)}、印 (${m2.camera.x.toFixed(2)}, ${m2.camera.y.toFixed(2)})、クリック (${target.x}, ${target.y})`);
   check('移動は滑らか（途中の位置が線の上で、端でない）', midOnLine.t > 0 && midOnLine.t < 1 && midOnLine.off < 1e-4, `途中 t=${midOnLine.t.toFixed(3)}、線からのずれ ${midOnLine.off.toExponential(2)}`);
+  // 進み方は、点へ飛ぶ移動と同じ緩急 f(t) = 1 − (1−t)³(1+3t)（途中の状態の進みと、そのときの位置の割合が一致する）
+  const midProg = mid.flight && mid.flight.kind === 'home' ? mid.flight.progress : null;
+  check('地図のクリックの移動の進みが、緩急 f(t) = 1 − (1−t)³(1+3t) のとおり（点へ飛ぶ移動と同じ）',
+    midProg !== null && midProg > 0 && midProg < 1 && Math.abs(midOnLine.t - flightEase(midProg)) < 1e-4,
+    midProg === null ? '途中の状態が読めない' : `進み ${midProg.toFixed(3)}、位置の割合 ${midOnLine.t.toFixed(4)}、f(進み) ${flightEase(midProg).toFixed(4)}`);
   check('視線の向きは変わらない', dDir < 1e-6, `差 ${dDir.toExponential(2)}`);
   check('点の選択は変わらない', ixAfter.selected === p.i, `選択 ${ixAfter.selected}`);
   check('奥行きの表示は変わらない', near(m2.depth.value, cam.w, 1e-6), `${cam.w.toFixed(4)} → ${m2.depth.value.toFixed(4)}`);

@@ -1,28 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { HomeFlight, homeFlightDuration, interpolatePose, poseLookAt, smootherstep, type FlightPose } from './homeFlight';
+import { FLIGHT_ORIENT_END, flightEase } from '../controls/easing';
+import { HomeFlight, homeFlightDuration, interpolatePose, poseLookAt, type FlightPose } from './homeFlight';
 
 const A: FlightPose = { position: [1, 0, 0], yaw: 0.2, pitch: 0.1 };
 const B: FlightPose = { position: [-1, 2, 4], yaw: -0.4, pitch: -0.3 };
-
-describe('smootherstep', () => {
-  it('端で 0 と 1、中点で 0.5、単調増加、範囲外は丸める', () => {
-    expect(smootherstep(0)).toBe(0);
-    expect(smootherstep(1)).toBe(1);
-    expect(smootherstep(0.5)).toBeCloseTo(0.5, 12);
-    expect(smootherstep(-1)).toBe(0);
-    expect(smootherstep(2)).toBe(1);
-    let prev = -1;
-    for (let i = 0; i <= 100; i++) {
-      const v = smootherstep(i / 100);
-      expect(v).toBeGreaterThanOrEqual(prev);
-      prev = v;
-    }
-  });
-  it('始まりと終わりが緩やか（端の近くの進みが一様な補間より小さい）', () => {
-    expect(smootherstep(0.05)).toBeLessThan(0.01);
-    expect(1 - smootherstep(0.95)).toBeLessThan(0.01);
-  });
-});
 
 describe('interpolatePose', () => {
   it('t=0 と t=1 で両端、途中は位置・yaw・pitch が線形', () => {
@@ -42,6 +23,12 @@ describe('interpolatePose', () => {
     const mid = interpolatePose(from, to, 0.5);
     // 3 → -3 は、0 を通る約 6 rad ではなく、π を通る約 0.28 rad で回る
     expect(Math.abs(Math.cos(mid.yaw) - Math.cos(Math.PI))).toBeLessThan(1e-9);
+  });
+  it('向きの進み `orient` を別に与えると、位置は t、向きは orient で補間する', () => {
+    const p = interpolatePose(A, B, 0.25, 1);
+    expect(p.position).toEqual([0.5, 0.5, 1]);
+    expect(p.yaw).toBeCloseTo(B.yaw, 12);
+    expect(p.pitch).toBeCloseTo(B.pitch, 12);
   });
 });
 
@@ -116,7 +103,49 @@ describe('homeFlightDuration', () => {
     expect(homeFlightDuration(origin, far, 1, 1, true)).toBeCloseTo(0.5 * homeFlightDuration(origin, far, 1, 1, false), 12);
   });
 
-  it('進み方は smootherstep のまま（所要時間が伸びても、進みの割合で同じ姿勢）', () => {
+  it('位置は f(t)（flightEase）のとおりに進み、向きは f(t/0.7) で、進みの 70% で合い終える', () => {
+    const T = 1.3;
+    const f = new HomeFlight(A, B, T);
+    const steps = 52;
+    for (let i = 1; i < steps; i++) {
+      const p = f.advance(T / steps);
+      const t = f.progress;
+      const e = flightEase(t);
+      for (let k = 0; k < 3; k++) {
+        const want = (A.position[k] as number) + ((B.position[k] as number) - (A.position[k] as number)) * e;
+        expect(p.position[k]).toBeCloseTo(want, 9);
+      }
+      const o = flightEase(t / FLIGHT_ORIENT_END);
+      expect(p.yaw).toBeCloseTo(A.yaw + (B.yaw - A.yaw) * o, 9);
+      expect(p.pitch).toBeCloseTo(A.pitch + (B.pitch - A.pitch) * o, 9);
+      if (t >= FLIGHT_ORIENT_END) {
+        expect(p.yaw).toBeCloseTo(B.yaw, 12);
+        expect(p.pitch).toBeCloseTo(B.pitch, 12);
+      } else {
+        expect(Math.abs(p.yaw - B.yaw)).toBeGreaterThan(1e-9);
+      }
+    }
+  });
+
+  it('速さの山は進みの 1/3 のあたり（点へ飛ぶ移動と同じ緩急）', () => {
+    const f = new HomeFlight(A, B, 1);
+    const total = Math.hypot(...B.position.map((v, i) => v - (A.position[i] as number)));
+    let prev = [...A.position];
+    let peak = 0;
+    let peakAt = 0;
+    for (let i = 1; i <= 300; i++) {
+      const p = f.advance(1 / 300);
+      const step = Math.hypot(...p.position.map((v, k) => v - (prev[k] as number))) / total;
+      if (step > peak) {
+        peak = step;
+        peakAt = i / 300;
+      }
+      prev = p.position;
+    }
+    expect(Math.abs(peakAt - 1 / 3)).toBeLessThan(0.01);
+  });
+
+  it('所要時間が伸びても、進みの割合で同じ姿勢', () => {
     const a = new HomeFlight(A, B, 1);
     const b = new HomeFlight(A, B, 1.7);
     const pa = a.advance(0.3);

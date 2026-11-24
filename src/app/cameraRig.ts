@@ -99,6 +99,8 @@ export interface FlightState {
   durationMs: number;
   /** 進み（0〜1。経過時間 / 所要時間。緩急の前の値）。 */
   progress: number;
+  /** 点・塊へ飛ぶ移動（`kind: 'fly'`）で、始めたときに引き継いだ速さ（単位/秒。距離に応じて抑えたあと）。ホームへの移動にはない。 */
+  carriedSpeed?: number;
 }
 
 /** 飛行モードで、移動中のホーム復帰を中断させるキー（`FlyCameraControls` の移動キーと同じ）。 */
@@ -375,7 +377,10 @@ export class CameraRig {
     if (this.flying) {
       if (this.fly.isFlying) return;
       this.flying = false; // 着いた（または操作で中断した）
-      this.autoSpeed?.reset();
+      // 着いたなら止まっているので、係数は次のフレームで現在地の目標へそろえてよい。操作で中断したなら、
+      // 移動の速度を引き継いで動き続けているので、いまの係数から平滑化を続ける（滑走の速さが跳ばない）
+      if (this.fly.getResidualMotion().velocity.lengthSq() > 0) this.autoSpeed?.continueFrom(this.fly.speedScale);
+      else this.autoSpeed?.reset();
       return;
     }
     if (!this._autoSpeedEnabled || !this.autoSpeed) return;
@@ -456,7 +461,7 @@ export class CameraRig {
   private flightState(): FlightState | null {
     if (this.flight) return { kind: 'home', durationMs: this.flight.durationSeconds * 1000, progress: this.flight.progress };
     const info = this._mode === 'fly' ? this.fly.flightInfo : null;
-    return info ? { kind: 'fly', durationMs: info.durationMs, progress: info.progress } : null;
+    return info ? { kind: 'fly', durationMs: info.durationMs, progress: info.progress, carriedSpeed: info.carriedSpeed } : null;
   }
 
   /** カメラの現在の位置と向き（yaw / pitch）。 */

@@ -17,7 +17,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require('playwright');
 const {
-  loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, len, norm, waitReorient, expectedFlightDuration,
+  loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, len, norm, waitReorient, expectedFlightDuration, flightEase,
 } = require('./lib.cjs');
 
 const root = path.resolve(__dirname, '../..');
@@ -104,11 +104,9 @@ function projectAll(ds, s, aspect) {
   return { extent, minDepth, outside };
 }
 
-const smootherstep = (t) => { const x = Math.min(1, Math.max(0, t)); return x * x * x * (x * (x * 6 - 15) + 10); };
-
 /**
- * ホームへの移動の所要時間（基準 1 秒を距離で伸縮した式）と、進み方（smootherstep のまま）を、フレームごとの状態から確かめる。
- * カメラは止まった状態から始める。`label` は表示用、`R` は点群の半径。
+ * ホームへの移動の所要時間（基準 1 秒を距離で伸縮した式）と、進み方を、フレームごとの状態から確かめる。進み方は点へ飛ぶ移動とそろえ、
+ * 位置は緩急 f(t) = 1 − (1−t)³(1+3t)、向きは進みの 70% で合い終える。カメラは止まった状態から始める。`label` は表示用、`R` は点群の半径。
  */
 function checkHomeTiming(label, s0, home, samples, R) {
   const flights = samples.filter((x) => x.flight);
@@ -123,9 +121,20 @@ function checkHomeTiming(label, s0, home, samples, R) {
   for (const x of flights) {
     const v = sub(x.p, s0.position);
     const f = (v[0] * e[0] + v[1] * e[1] + v[2] * e[2]) / (dist * dist);
-    maxErr = Math.max(maxErr, Math.abs(f - smootherstep(x.flight.progress)));
+    maxErr = Math.max(maxErr, Math.abs(f - flightEase(x.flight.progress)));
   }
-  check(`${label}: 位置の進みが smootherstep のとおり（フレームごと）`, maxErr < 1e-4, `誤差の最大 ${maxErr.toExponential(2)}`);
+  check(`${label}: 位置の進みが緩急 f(t) = 1 − (1−t)³(1+3t) のとおり（フレームごと。点へ飛ぶ移動と同じ）`, maxErr < 1e-4, `誤差の最大 ${maxErr.toExponential(2)}`);
+  // 向きは進みの 70% で合い終える（70% 以降は終わりの向きのまま、50% 未満はまだ合っていない）
+  const endDir = samples[samples.length - 1].d;
+  const turn = angleBetween(s0.direction, endDir);
+  if (turn > 0.05) {
+    const after70 = flights.filter((x) => x.flight.progress >= 0.7);
+    const before50 = flights.filter((x) => x.flight.progress < 0.5);
+    check(`${label}: 向きは進みの 70% で合い終える`, after70.length > 0 && after70.every((x) => angleBetween(x.d, endDir) < 1e-6) && before50.every((x) => angleBetween(x.d, endDir) > 1e-4),
+      `全回転 ${turn.toFixed(3)} rad、70% 以降 ${after70.length} フレーム、50% 未満 ${before50.length} フレーム`);
+  } else {
+    console.log(`  [実測] ${label}: 向きの変化 ${turn.toFixed(4)} rad（小さいので、70% で合い終えるかは見ない）`);
+  }
 }
 
 const pitchOf = (d) => Math.asin(Math.max(-1, Math.min(1, d[1])));

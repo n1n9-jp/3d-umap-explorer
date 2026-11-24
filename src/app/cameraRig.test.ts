@@ -122,7 +122,8 @@ describe('CameraRig.goHome', () => {
       rig.update(0.1);
       maxStep = Math.max(maxStep, camera.position.distanceTo(prev));
       maxTurn = Math.max(maxTurn, forward(camera).angleTo(prevDir));
-      if (i === 4) {
+      // 向きは進みの 70% で合い終えるので、途中の向きは進みの 30% あたりで見る
+      if (i === 2) {
         sawMidPos = camera.position.distanceTo(startPos) > 0.1 * total && camera.position.distanceTo(new Vector3(...HOME.pos)) > 0.1 * total;
         sawMidDir = forward(camera).angleTo(startDir) > 0.1 && forward(camera).angleTo(homeDir) > 0.1;
       }
@@ -132,10 +133,11 @@ describe('CameraRig.goHome', () => {
     expect(sawMidPos).toBe(true);
     expect(sawMidDir).toBe(true);
     expect(maxStep).toBeLessThan(total * 0.2);
-    expect(maxTurn).toBeLessThan(startDir.angleTo(homeDir) * 0.2);
+    // 向きは 70% の間に合わせる（速さの山は 16/9 ÷ 0.7 ≈ 2.5 倍。0.1 刻みで 1 フレーム 0.26 程度まで）
+    expect(maxTurn).toBeLessThan(startDir.angleTo(homeDir) * 0.3);
   });
 
-  it('始まりと終わりが緩やか（最初と最後のフレームの移動量が中ほどより小さい）', () => {
+  it('始まりと終わりが緩やか（最初と最後のフレームの移動量が、速さの山より小さい。山は進みの 1/3 のあたり）', () => {
     const { camera, rig } = createRig();
     rig.setView({ pos: [1.5, 0, -0.5], look: [0, 0, -3] });
     rig.goHome(HOME);
@@ -146,8 +148,11 @@ describe('CameraRig.goHome', () => {
       steps.push(camera.position.distanceTo(prev));
       prev = camera.position.clone();
     }
-    expect(steps[0]).toBeLessThan((steps[4] as number) * 0.3);
-    expect(steps[9]).toBeLessThan((steps[4] as number) * 0.3);
+    const peak = Math.max(...steps);
+    expect(steps.indexOf(peak)).toBeGreaterThanOrEqual(2);
+    expect(steps.indexOf(peak)).toBeLessThanOrEqual(4);
+    expect(steps[0]).toBeLessThan(peak * 0.35);
+    expect(steps[9]).toBeLessThan(peak * 0.05); // 長く減速して止まる
   });
 
   it('途中の姿勢は横傾き（roll）を持たない', () => {
@@ -1455,6 +1460,32 @@ describe('CameraRig: 自動移動と、モードの切り替えの移り変わ�
       expect(rig.getState().overview?.zooming).toBe(false);
       if (action === 'goHome') expect(camera.position.toArray()).toEqual(HOME.pos);
       else expect(camera.position.distanceTo(arrived)).toBeLessThan(1e-12); // 向き直しは位置を動かさない
+    }
+  });
+
+  it('自動移動の途中で W を押す・ドラッグする: 移動の速度を引き継いで中断し、速さが急に 0 にならない', () => {
+    for (const how of ['key', 'drag'] as const) {
+      const { camera, win, el, rig } = createRig({ cloudRadius: 1 });
+      rig.setView({ pos: [0, 0, 1.5], look: [0, 0, 0] });
+      rig.flyTo(new Vector3(0, 0, -0.5), { distance: 0.05, durationMs: 1000 });
+      for (let i = 0; i < 18; i++) rig.update(dt); // 速さの山のあたり
+      expect(rig.fly.isFlying).toBe(true);
+      let prev = camera.position.clone();
+      rig.update(dt);
+      const before = camera.position.distanceTo(prev) / dt; // 中断の前のフレームの速さ
+      expect(before).toBeGreaterThan(0.5);
+      if (how === 'key') win.emit('keydown', { code: 'KeyW', target: null });
+      else {
+        el.emit('pointerdown', { button: 0, pointerId: 1, clientX: 100, clientY: 100 });
+        el.emit('pointermove', { pointerId: 1, clientX: 103, clientY: 100 });
+      }
+      prev = camera.position.clone();
+      rig.update(dt);
+      const after = camera.position.distanceTo(prev) / dt; // 中断の後のフレームの速さ
+      expect(rig.fly.isFlying).toBe(false);
+      expect(rig.getState().flight).toBeNull();
+      expect(after).toBeGreaterThan(before * 0.8);
+      expect(after).toBeLessThan(before * 1.05);
     }
   });
 

@@ -8,6 +8,31 @@ export const FLIGHT_ORIENT_END = 0.7;
 /** 「動きを減らす」設定（`prefers-reduced-motion: reduce`）での所要時間の倍率。 */
 export const REDUCED_MOTION_DURATION_FACTOR = 0.5;
 
+/**
+ * 引き継ぐ速度の上限（移動の距離 L に対する比）。`T·|v0| ≤ FLIGHT_CARRY_LIMIT·L` に抑える。
+ * 引き継ぎの形 `t(1−t)⁴` と合わせて、進む方向の成分が終点を越えず、終点までの距離が引き返さず、
+ * 横向きの膨らみが `0.08192 × 2.5 ≈ 0.205·L` に収まる（数値で確かめた範囲では 5 まで引き返さない）。
+ */
+export const FLIGHT_CARRY_LIMIT = 2.5;
+
+/**
+ * 引き継ぎの形 `g(t) = t(1−t)⁴`。位置へ `T·v0·g(t)` として足す。g(0)=g(1)=0、g′(0)=1（t=0 で速度が v0）、g′(1)=0。
+ * 終わりで (1−t)⁴ と、緩急の残り `1−f(t) ≈ 4(1−t)³` より速く 0 に近づく。最大は t=1/5 で 0.08192。範囲外は 0。
+ */
+export function flightCarry(t: number): number {
+  if (!(t > 0 && t < 1)) return 0;
+  const u = 1 - t;
+  return t * u * u * u * u;
+}
+
+/** `flightCarry` の導関数 `(1−t)³(1−5t)`（t ≤ 0 は 1、t ≥ 1 は 0）。 */
+export function flightCarryDerivative(t: number): number {
+  if (!(t < 1)) return 0;
+  if (!(t > 0)) return 1;
+  const u = 1 - t;
+  return u * u * u * (1 - 5 * t);
+}
+
 /** 所要時間の倍率の下限・上限（基準の所要時間に対する比）。 */
 export const FLIGHT_DURATION_MIN_FACTOR = 0.8;
 export const FLIGHT_DURATION_MAX_FACTOR = 1.8;

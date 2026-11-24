@@ -25,6 +25,8 @@
  *     飛行・俯瞰の両方。目印の上で始まって、目印が canvas へ合成したポインタイベントで慣性を止めた押下も、点のクリックにならない
  *   - ダブルクリック: その点へ移動し、止まった位置がその点から決めた距離で、点が画面の中央に十分な大きさで見える
  *   - 俯瞰モードでのダブルクリック: 飛行モードへ切り替わって移動する
+ *   - 速い滑走から近い点へ飛ぶ: 引き継いだ速度で、点を通り越さず（止まる距離を下回らず）、点までの距離が単調に縮む
+ *   - 点へ飛ぶ移動の途中で W を押す: 移動の速度を引き継いで中断し、中断の前後で速さが連続している
  *   - コンソールエラーがない
  * ソフトウェア描画では 1 フレームが約 200 ミリ秒かかるので、待ちはフレーム数と状態の変化で数える。
  * 失敗があれば終了コード 1 で終わる。スクリーンショットを --out に保存する。
@@ -34,7 +36,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require('playwright');
 const {
-  loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, len, sendPointer, pointerGesture, flickPoints, readInfoRect, readUiRects, inRects, waitReorient, waitCameraIdle, flightEase, expectedFlightDuration,
+  loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, len, sendPointer, pointerGesture, flickPoints, readInfoRect, readUiRects, inRects, waitReorient, waitCameraIdle, sampleUntil, flightEase, expectedFlightDuration,
 } = require('./lib.cjs');
 
 const root = path.resolve(__dirname, '../..');
@@ -771,10 +773,10 @@ async function startFrameLog(page) {
   await page.evaluate(() => {
     const log = (window.__frameLog = []);
     window.__frameLogOn = true;
-    const tick = () => {
+    const tick = (ts) => {
       if (!window.__frameLogOn) return;
       const s = window.__explorer.getState();
-      log.push({ p: s.position, d: s.direction, flight: s.flight, mode: s.mode });
+      log.push({ p: s.position, d: s.direction, flight: s.flight, mode: s.mode, ts, speedScale: s.speedScale, effectiveSpeed: s.effectiveSpeed });
       requestAnimationFrame(tick);
     };
     requestAnimationFrame(tick);
@@ -876,6 +878,117 @@ async function testFlyEasing(page, ds, views) {
   if (p) await checkFlyEasing(page, p, '動きを減らす設定（遠い点）', { radius, reduced: true });
   else check('動きを減らす設定: 検証に使う点が見つかる', false);
   await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await page.keyboard.press('Escape');
+}
+
+/**
+ * フレームごとの記録から、各フレームの速さ（前のフレームからの移動量 / そのフレームの模擬の時間）を求める。
+ * 模擬の時間は、描画のループと同じ min(0.1, フレームの間隔)（記録は描画のループと同じフレームの時刻で取る）。
+ */
+function frameSpeeds(log) {
+  return log.map((x, i) => {
+    if (i === 0) return null;
+    const dt = Math.min(0.1, (x.ts - log[i - 1].ts) / 1000);
+    return dt > 0 ? len(sub(x.p, log[i - 1].p)) / dt : null;
+  });
+}
+
+/**
+ * 速い滑走から近い点へ飛ぶ: 点群の外の何もない場所で、点群の縁の点へ向かって W を押し続け、速度の自動調整で速くなった状態で離した直後に、
+ * 前方のその点をダブルクリックする。滑走の速度を引き継いでも、毎フレームのカメラから点までの距離が止まる距離を下回らず（通り越さず）、
+ * 単調に縮む（引き返さない）ことを確かめる。
+ */
+async function testFastGlideFlyTo(page, ds) {
+  console.log('\n[速い滑走から近い点へ飛ぶ（引き継いだ速度で通り越さない）]');
+  await page.keyboard.press('Escape');
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  if ((await state(page)).mode !== 'fly') {
+    await page.keyboard.press('KeyO');
+    await page.waitForFunction(() => window.__explorer.getState().mode === 'fly');
+    await waitCameraIdle(page);
+  }
+  // 点群の中心から最も遠い点 P（縁の点）。その外側の延長線上から、P を正面に見て近づく
+  const P = (() => {
+    const c = [0, 0, 0];
+    for (let i = 0; i < ds.count; i++) for (let k = 0; k < 3; k++) c[k] += ds.positions[3 * i + k] / ds.count;
+    let best = 0, bi = 0;
+    for (let i = 0; i < ds.count; i++) {
+      const d = len(sub([ds.positions[3 * i], ds.positions[3 * i + 1], ds.positions[3 * i + 2]], c));
+      if (d > best) { best = d; bi = i; }
+    }
+    const p = [ds.positions[3 * bi], ds.positions[3 * bi + 1], ds.positions[3 * bi + 2]];
+    const n = sub(p, c).map((v) => v / best);
+    return { p, n };
+  })();
+  const startPos = P.p.map((v, k) => v + P.n[k] * 3);
+  await setView(page, startPos, P.p);
+  await waitStill(page);
+  await page.mouse.move(cx, cy);
+  const RELEASE_AT = 1.1; // 離すときの、P までの距離（離したあとの滑走 v·τ ≈ 0.9 より遠い）
+  await page.keyboard.down('KeyW');
+  const run = await sampleUntil(page, (s) => len(sub(s.position, P.p)) <= RELEASE_AT, 6);
+  await startFrameLog(page);
+  await page.keyboard.up('KeyW');
+  await page.mouse.dblclick(cx, cy); // 前方の P（画面の中央）
+  let started = null;
+  for (let k = 0; k < 20 && !started; k++) { await frames(page, 1); const s = await state(page); if (s.flight) started = s; }
+  await waitCameraIdle(page);
+  await frames(page, 1);
+  const log = await stopFrameLog(page);
+  const end = await state(page);
+  const pressed = run[run.length - 1];
+  const target = (await ix(page)).selected;
+  check('（前提）何もない場所で W を押し続け、速度の自動調整で速くなってから離した', !run.timedOut && pressed.speedScale >= 2,
+    `係数 ${pressed.speedScale.toFixed(2)}、実速度 ${pressed.effectiveSpeed.toFixed(3)}、P までの距離 ${len(sub(pressed.position, P.p)).toFixed(3)}`);
+  if (!started || target === null) { check('前方の点へ飛ぶ移動が始まる', false, `flight ${JSON.stringify(started && started.flight)}、選択 ${target}`); return; }
+  const Q = [ds.positions[3 * target], ds.positions[3 * target + 1], ds.positions[3 * target + 2]];
+  const stop = (await page.evaluate((i) => window.__explorer.interaction.stopDistance(i), target)).distance;
+  const i0 = log.findIndex((x) => x.flight && x.flight.kind === 'fly');
+  const flightLog = [...log.slice(Math.max(0, i0 - 1)), { p: end.position }];
+  const dists = flightLog.map((x) => len(sub(x.p, Q)));
+  const carried = i0 >= 0 ? log[i0].flight.carriedSpeed : 0;
+  const minD = Math.min(...dists);
+  let maxUp = 0;
+  for (let i = 1; i < dists.length; i++) maxUp = Math.max(maxUp, dists[i] - dists[i - 1]);
+  console.log(`  [実測] 点 #${target}、止まる距離 ${stop.toFixed(4)}、引き継いだ速さ ${carried.toFixed(3)}、所要時間 ${log[i0] ? log[i0].flight.durationMs.toFixed(0) : '?'}ms、距離 ${dists.map((d) => d.toFixed(3)).join(' → ')}`);
+  check('（前提）滑走の速度を引き継いで飛ぶ（引き継いだ速さが 0.3 以上）', i0 >= 0 && carried >= 0.3, `引き継いだ速さ ${carried.toFixed(3)}`);
+  check('毎フレームのカメラから点までの距離が、止まる距離を下回らない（点を通り越さない）', minD >= stop - 1e-6, `最小 ${minD.toFixed(5)}、止まる距離 ${stop.toFixed(5)}`);
+  check('点までの距離が単調に縮む（引き返さない）', maxUp <= 1e-6, `増えた量の最大 ${maxUp.toExponential(2)}`);
+  check('止まる距離の位置に着く', Math.abs(dists[dists.length - 1] - stop) < 1e-4, `着いた距離 ${dists[dists.length - 1].toFixed(5)}`);
+  await page.keyboard.press('Escape');
+}
+
+/** 点へ飛ぶ移動の途中で W を押す: 移動の速度を引き継いで中断し、中断の前後のフレームで速さが急に 0 にならない。 */
+async function testInterruptByKey(page, views) {
+  console.log('\n[点へ飛ぶ移動の途中で W を押す（速度を引き継いで中断する）]');
+  await page.keyboard.press('Escape');
+  await setView(page, views[0].pos, views[0].look);
+  await waitStill(page);
+  const p = await findVisiblePoint(page, { minPx: 3 });
+  if (!p) { check('移動の途中の W: 検証に使う点が見つかる', false); return; }
+  await startFrameLog(page);
+  await page.mouse.dblclick(p.x, p.y);
+  let s = null;
+  for (let k = 0; k < 60; k++) {
+    await frames(page, 1);
+    s = await state(page);
+    if (s.flight && s.flight.progress >= 0.2) break;
+  }
+  await page.keyboard.down('KeyW');
+  await frames(page, 3);
+  await page.keyboard.up('KeyW');
+  await waitStill(page);
+  const log = await stopFrameLog(page);
+  check('（前提）W を押したのは、点へ飛ぶ移動の途中', !!(s && s.flight && s.flight.kind === 'fly' && s.flight.progress < 0.8), JSON.stringify(s && s.flight));
+  const k = log.map((x) => !!x.flight).lastIndexOf(true); // 移動の最後のフレーム
+  const speeds = frameSpeeds(log);
+  if (k < 1 || k + 1 >= log.length) { check('中断の前後のフレームが記録できる', false, `${log.length} フレーム、最後の移動 ${k}`); return; }
+  const before = speeds[k], after = speeds[k + 1];
+  const target = log[k + 1].effectiveSpeed;
+  console.log(`  [実測] 中断の直前の進み ${log[k].flight.progress.toFixed(3)}、速さ ${speeds.slice(Math.max(1, k - 2), k + 4).map((v) => v.toFixed(3)).join(' → ')}（中断の前 ${before.toFixed(3)}、後 ${after.toFixed(3)}、W の目標速度 ${target.toFixed(3)}）`);
+  check('移動は W で中断した（終わる前に flight が消えた）', log[k].flight.progress < 0.9 && !log[k + 1].flight, `最後の進み ${log[k].flight.progress.toFixed(3)}`);
+  check('中断の前後で速さが連続している（中断の後のフレームの速さが、前のフレームの半分以上）', before > 0 && after >= before * 0.5 && after <= before * 1.2,
+    `前 ${before.toFixed(3)}、後 ${after.toFixed(3)}（比 ${(after / before).toFixed(2)}）`);
   await page.keyboard.press('Escape');
 }
 
@@ -986,6 +1099,8 @@ async function main() {
     await testOverviewDoubleClick(page, overview);
     await testFlyEasing(page, ds, views);
     await testFlightAndModeSwitch(page, views);
+    await testFastGlideFlyTo(page, ds);
+    await testInterruptByKey(page, views);
     await page.close();
 
     check('コンソールエラーがない', consoleErrors.length === 0, consoleErrors.join(' | '));

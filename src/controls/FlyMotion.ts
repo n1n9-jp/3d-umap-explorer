@@ -1,7 +1,10 @@
 import { Vector3 } from 'three';
 import { MAX_WHEEL_EVENT_NOTCHES } from './WheelGesture';
 import {
+  FLIGHT_CARRY_LIMIT,
   FLIGHT_ORIENT_END,
+  flightCarry,
+  flightCarryDerivative,
   flightEase,
   flightEaseDerivative,
   reducedFlightDuration,
@@ -124,8 +127,10 @@ interface FlightState {
   yawDelta: number;
   startPitch: number;
   endPitch: number;
-  /** 始めたときのカメラの速度（単位/秒）。位置へ `T·v0·t·(1−t)²` として足す。 */
+  /** 始めたときのカメラの速度（単位/秒。`T·|v0| ≤ FLIGHT_CARRY_LIMIT·L` に抑えたもの）。位置へ `T·v0·t·(1−t)⁴` として足す。 */
   startVelocity: Vector3;
+  /** 動きを減らす設定で始めたか。操作で中断したとき、移動の速度を引き継がずに止める。 */
+  reducedMotion: boolean;
   durationMs: number;
   elapsedMs: number;
 }
@@ -237,10 +242,13 @@ export class FlyMotion {
     return this._speed !== before;
   }
 
-  /** 視点を回す。正の `dYaw` で左へ、正の `dPitch` で上へ。飛行中なら中断する。 */
+  /**
+   * 視点を回す。正の `dYaw` で左へ、正の `dPitch` で上へ。飛行中なら中断し、その瞬間の移動の速度を
+   * `velocity` へ渡す（以降は滑走として滑らかに減る。動きを減らす設定で始めた移動なら、その場で止める）。
+   */
   rotateBy(dYaw: number, dPitch: number): void {
     if (dYaw === 0 && dPitch === 0) return;
-    this.flight = null;
+    this.interruptFlight();
     this.yaw = wrapAngle(this.yaw + dYaw);
     this.pitch = clamp(this.pitch + dPitch, -MAX_PITCH, MAX_PITCH);
     this.dirty = true;
@@ -275,7 +283,12 @@ export class FlyMotion {
       else startVelocity.copy(this.velocity);
     }
 
-    const durationMs = reducedFlightDuration(scaledFlightDuration(baseMs, this.position.distanceTo(end), options.cloudRadius), reduced);
+    const travel = this.position.distanceTo(end);
+    const durationMs = reducedFlightDuration(scaledFlightDuration(baseMs, travel, options.cloudRadius), reduced);
+    // 引き継ぐ速さを、移動の距離に応じて抑える（T·|v0| ≤ c·L）。速い滑走から近い点へ飛んでも、経路が膨らみすぎない。
+    const carryLength = (durationMs / 1000) * startVelocity.length();
+    const carryMax = FLIGHT_CARRY_LIMIT * travel;
+    if (carryLength > carryMax) startVelocity.multiplyScalar(carryMax / carryLength);
 
     this.velocity.set(0, 0, 0);
     this._gliding = false;
@@ -287,6 +300,7 @@ export class FlyMotion {
       startPitch: this.pitch,
       endPitch,
       startVelocity,
+      reducedMotion: reduced,
       durationMs,
       elapsedMs: 0,
     };
@@ -353,7 +367,8 @@ export class FlyMotion {
 
     if (this.flight) {
       if (hasMoveInput) {
-        this.flight = null; // 操作による中断。以降は通常の移動として扱う。
+        // 操作による中断。その瞬間の移動の速度を引き継ぎ、以降は通常の移動（加速）として扱う。
+        this.interruptFlight();
       } else {
         this.advanceFlight(dt * 1000);
         return true;
@@ -441,10 +456,11 @@ export class FlyMotion {
       this.pitch = fl.endPitch;
       this.flight = null;
     } else {
-      // 位置: 緩急 f(t) での補間に、始めの速度の引き継ぎ T·v0·t(1−t)²（t=0 で速度 v0、t=1 で位置・速度への寄与 0）を足す。
+      // 位置: 緩急 f(t) での補間に、始めの速度の引き継ぎ T·v0·t(1−t)⁴（t=0 で速度 v0、t=1 で位置・速度への寄与 0）を足す。
+      // 引き継ぎは終わりで (1−t)⁴ と、緩急の残り 1−f(t) ≈ 4(1−t)³ より速く消えるので、終点を越えて戻らない。
       const e = flightEase(t);
       this.position.lerpVectors(fl.startPosition, fl.endPosition, e);
-      const carry = (fl.durationMs / 1000) * t * (1 - t) * (1 - t);
+      const carry = (fl.durationMs / 1000) * flightCarry(t);
       this.position.addScaledVector(fl.startVelocity, carry);
       // 向き: 進みの 70% で合い終える（着く前に対象を捉え終える）。
       const o = flightEase(t / FLIGHT_ORIENT_END);
@@ -455,14 +471,26 @@ export class FlyMotion {
     this.dirty = false;
   }
 
-  /** 飛行の現在の速度（単位/秒）を `out` に書く。位置の式 `S + (E−S)·f(t) + T·v0·t(1−t)²` の時間微分。 */
+  /**
+   * 自動移動を操作で中断する。その瞬間の移動の速度を `velocity` へ渡すので、カメラはその場で急に止まらず、
+   * キーの入力があれば加速へ、なければ滑走へ滑らかにつながる。動きを減らす設定で始めた移動なら、その場で止める。
+   */
+  private interruptFlight(): void {
+    const fl = this.flight;
+    if (!fl) return;
+    this.flight = null;
+    if (fl.reducedMotion) this.velocity.set(0, 0, 0);
+    else this.flightVelocity(fl, this.velocity);
+  }
+
+  /** 飛行の現在の速度（単位/秒）を `out` に書く。位置の式 `S + (E−S)·f(t) + T·v0·t(1−t)⁴` の時間微分。 */
   private flightVelocity(fl: FlightState, out: Vector3): Vector3 {
     const t = fl.durationMs <= 0 ? 1 : Math.min(1, fl.elapsedMs / fl.durationMs);
     if (t >= 1 || fl.durationMs <= 0) return out.set(0, 0, 0);
     const T = fl.durationMs / 1000;
     out.subVectors(fl.endPosition, fl.startPosition).multiplyScalar(flightEaseDerivative(t) / T);
-    // d/dt [t(1−t)²] = (1−t)(1−3t)。T·v0 を T で割るので、v0 に掛かる係数はそのまま
-    return out.addScaledVector(fl.startVelocity, (1 - t) * (1 - 3 * t));
+    // T·v0·g(t) の時間微分は v0·g′(t)（T で割るので、v0 に掛かる係数は g′ のまま）
+    return out.addScaledVector(fl.startVelocity, flightCarryDerivative(t));
   }
 
   private lookTowards(x: number, y: number, z: number): void {

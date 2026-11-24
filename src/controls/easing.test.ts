@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  FLIGHT_CARRY_LIMIT,
   FLIGHT_DURATION_MAX_FACTOR,
   FLIGHT_DURATION_MIN_FACTOR,
+  flightCarry,
+  flightCarryDerivative,
   flightEase,
   flightEaseDerivative,
   reducedFlightDuration,
@@ -97,5 +100,30 @@ describe('reducedFlightDuration', () => {
   it('動きを減らす設定なら 0.5 倍、そうでなければそのまま', () => {
     expect(reducedFlightDuration(800, true)).toBe(400);
     expect(reducedFlightDuration(800, false)).toBe(800);
+  });
+});
+
+describe('flightCarry: g(t) = t(1−t)⁴（始めの速度の引き継ぎの形）', () => {
+  it('g(0)=g(1)=0、g′(0)=1、g′(1)=0、最大は t=1/5 で 0.08192', () => {
+    expect(flightCarry(0)).toBe(0);
+    expect(flightCarry(1)).toBe(0);
+    expect(flightCarryDerivative(0)).toBe(1);
+    expect(flightCarryDerivative(1)).toBe(0);
+    expect(flightCarry(0.2)).toBeCloseTo(0.08192, 12);
+    for (let i = 0; i <= 1000; i++) expect(flightCarry(i / 1000)).toBeLessThanOrEqual(0.08192 + 1e-15);
+  });
+
+  it('導関数 (1−t)³(1−5t) が、差分の傾きと一致する', () => {
+    const h = 1e-6;
+    for (const t of [0.05, 0.2, 0.4, 0.7, 0.95]) {
+      expect(flightCarryDerivative(t)).toBeCloseTo((flightCarry(t + h) - flightCarry(t - h)) / (2 * h), 6);
+    }
+  });
+
+  it('上限 c の範囲では、進む方向の成分が終点を越えない: c·g(t) ≤ 1 − f(t)（すべての t で）', () => {
+    for (let i = 1; i < 10000; i++) {
+      const t = i / 10000;
+      expect(FLIGHT_CARRY_LIMIT * flightCarry(t)).toBeLessThanOrEqual(1 - flightEase(t) + 1e-15);
+    }
   });
 });

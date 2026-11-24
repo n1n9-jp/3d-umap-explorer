@@ -1,10 +1,12 @@
-import { reducedFlightDuration, scaledFlightDuration } from '../controls/easing';
+import { FLIGHT_ORIENT_END, flightEase, reducedFlightDuration, scaledFlightDuration } from '../controls/easing';
 import { directionFromAngles, type Vec3, type ViewAngles } from '../render/view';
 
 /**
  * 現在の視点からホームの視点へ、位置と向きを一緒に補間する移動。DOM にも three.js にも依存しない。
  * 向きは yaw と pitch で補間するので、途中の姿勢も横傾き（roll）を持たない（飛行モードへ切り替えても跳ばない）。
- * yaw は短いほうの回り方で補間する。進み方は始まりと終わりが緩やかな smootherstep。
+ * yaw は短いほうの回り方で補間する。進み方は、点や塊へ飛ぶ移動（`FlyMotion.flyTo`）とそろえ、位置は
+ * `flightEase`（`f(t) = 1 − (1−t)³(1+3t)`。速さの山が進みの 1/3 で、長く減速して止まる）、向きは
+ * `f(t / 0.7)`（進みの 70% で合わせ終え、全体が見える向きを早めに捉える）。
  * 所要時間は、基準（`HOME_DURATION_SECONDS`・ミニマップは 0.6 秒）を、移動の距離に応じて 0.8〜1.8 倍に伸縮する
  * （`homeFlightDuration`）。「動きを減らす」設定のときは、さらに 0.5 倍。
  */
@@ -30,12 +32,6 @@ export function homeFlightDuration(
   return reducedFlightDuration(scaledFlightDuration(baseSeconds, distance, radius), reduced);
 }
 
-/** 0→1 の smootherstep（始まりと終わりで速度と加速度が 0）。範囲外は端に丸める。 */
-export function smootherstep(t: number): number {
-  const x = Math.min(1, Math.max(0, t));
-  return x * x * x * (x * (x * 6 - 15) + 10);
-}
-
 /** 角度差を (-π, π] に畳む。 */
 function wrapAngle(a: number): number {
   const twoPi = Math.PI * 2;
@@ -44,16 +40,19 @@ function wrapAngle(a: number): number {
   return r;
 }
 
-/** `from` から `to` への進み具合 `t`（0〜1、イージング済み）の姿勢。 */
-export function interpolatePose(from: FlightPose, to: FlightPose, t: number): FlightPose {
+/**
+ * `from` から `to` への姿勢。位置は進み具合 `t`（0〜1、イージング済み）、向き（yaw・pitch）は `orient`
+ * （0〜1、イージング済み。省略すると `t`）で補間する。
+ */
+export function interpolatePose(from: FlightPose, to: FlightPose, t: number, orient: number = t): FlightPose {
   return {
     position: [
       from.position[0] + (to.position[0] - from.position[0]) * t,
       from.position[1] + (to.position[1] - from.position[1]) * t,
       from.position[2] + (to.position[2] - from.position[2]) * t,
     ],
-    yaw: from.yaw + wrapAngle(to.yaw - from.yaw) * t,
-    pitch: from.pitch + (to.pitch - from.pitch) * t,
+    yaw: from.yaw + wrapAngle(to.yaw - from.yaw) * orient,
+    pitch: from.pitch + (to.pitch - from.pitch) * orient,
   };
 }
 
@@ -86,6 +85,7 @@ export class HomeFlight {
   advance(dt: number): FlightPose {
     if (Number.isFinite(dt) && dt > 0) this.elapsed += dt;
     if (this.done) return { position: [...this.to.position], yaw: this.to.yaw, pitch: this.to.pitch };
-    return interpolatePose(this.from, this.to, smootherstep(this.progress));
+    const t = this.progress;
+    return interpolatePose(this.from, this.to, flightEase(t), flightEase(t / FLIGHT_ORIENT_END));
   }
 }
