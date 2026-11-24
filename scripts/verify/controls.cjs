@@ -1112,11 +1112,11 @@ async function testInertiaReducedMotion(browser, base, center) {
   await frames(page, 1);
   const z2 = await state(page);
   check('「視差効果を減らす」では、俯瞰モードのピンチでも距離が 1 度に動く', !z2.overview.zooming && Math.abs(dist(z2) / dist(z1) - Math.exp(-0.3)) < 1e-6, `倍率 ${(dist(z2) / dist(z1)).toFixed(6)}`);
-  // 切り替えの移り変わりもない: 向き直さず（従来どおり位置も向きも保つ）、残った移動の速度も捨てる
+  // 切り替えの移り変わりもない: 向き直しの動きは付けず、位置を保ったまま 1 度で中心へ向け、残った移動の速度も捨てる
   await page.keyboard.press('KeyO');
   await page.waitForFunction(() => window.__explorer.getState().mode === 'fly');
   const away = add(center, [1.4, 0.4, 1.5]);
-  await setView(page, away, add(away, sub(away, center)));
+  await setView(page, away, add(away, sub(away, center))); // 中心に背を向ける
   await frames(page, 2);
   await page.keyboard.down('KeyW');
   await waitSim(page, 1);
@@ -1128,10 +1128,12 @@ async function testInertiaReducedMotion(browser, base, center) {
   await page.keyboard.up('KeyW');
   const rq = await sampleFrames(page, () => false, 4);
   const r2 = rq[rq.length - 1];
-  check('「視差効果を減らす」では、W を押したまま O で俯瞰へ切り替えても、向き直さず（reorienting にならない）、残った速度で進まない（settling にならない）',
-    r1.mode === 'overview' && r0.effectiveSpeed > 0.1 && rq.every((s) => !s.reorienting && !s.settling) && !r1.reorienting && !r1.settling &&
-    len(sub(r2.position, r0.position)) < 1e-9 && angleBetween(r2.direction, r0.direction) < 1e-9,
-    `位置の差 ${len(sub(r2.position, r0.position)).toExponential(1)}、向きの差 ${angleBetween(r2.direction, r0.direction).toExponential(1)} rad`);
+  const toCenter1 = norm(sub(center, r1.position));
+  check('「視差効果を減らす」では、W を押したまま O で俯瞰へ切り替えると、位置を保ったまま 1 度で中心へ向き（reorienting にならない）、残った速度で進まない（settling にならない）',
+    r1.mode === 'overview' && r0.effectiveSpeed > 0.1 && rq.every((s) => !s.reorienting && !s.settling && !s.animating) && !r1.reorienting && !r1.settling &&
+    len(sub(r1.position, r0.position)) < 1e-9 && len(sub(r2.position, r1.position)) < 1e-9 &&
+    angleBetween(r1.direction, toCenter1) < 1e-4 && angleBetween(r2.direction, r1.direction) < 1e-9 && angleBetween(r0.direction, toCenter1) > 1,
+    `位置の差 ${len(sub(r2.position, r0.position)).toExponential(1)}、切り替えた瞬間の中心とのずれ ${angleBetween(r1.direction, toCenter1).toExponential(1)} rad（前は ${angleBetween(r0.direction, toCenter1).toFixed(2)} rad）、そのあとの向きの変化 ${angleBetween(r2.direction, r1.direction).toExponential(1)} rad`);
   await page.close();
 }
 

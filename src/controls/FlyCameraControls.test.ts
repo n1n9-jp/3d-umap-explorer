@@ -1619,3 +1619,72 @@ describe('FlyCameraControls: 残っている動きの取り出しと取り込み
     expect(r.controls.getPose().position.toArray()).toEqual([0, 0, 0]);
   });
 });
+
+describe('FlyCameraControls: 「動きを減らす」設定の問い合わせと、自動移動の残りの速度', () => {
+  type ChangeListener = (e: { matches: boolean }) => void;
+  const watched = (initial: boolean) => {
+    const mql = {
+      matches: initial,
+      listeners: new Set<ChangeListener>(),
+      addEventListener(type: string, fn: ChangeListener) { if (type === 'change') this.listeners.add(fn); },
+      removeEventListener(type: string, fn: ChangeListener) { if (type === 'change') this.listeners.delete(fn); },
+      set(matches: boolean) { this.matches = matches; for (const fn of [...this.listeners]) fn({ matches }); },
+    };
+    let calls = 0;
+    const win = new FakeTarget() as FakeTarget & { matchMedia?: () => typeof mql };
+    win.matchMedia = () => { calls++; return mql; };
+    const el = new FakeTarget();
+    el.ownerDocument = { defaultView: win };
+    const camera = new PerspectiveCamera(60, 1, 0.001, 10);
+    const controls = new FlyCameraControls(camera, el as unknown as HTMLElement);
+    return { win, el, camera, controls, mql, calls: () => calls };
+  };
+
+  it('自分で作った問い合わせは 1 回だけで、毎フレーム問い合わせ直さない。change で次のフレームから反映し、dispose で外す', () => {
+    const r = watched(false);
+    r.win.emit('keydown', { code: 'KeyW', key: 'w', ctrlKey: false, metaKey: false, altKey: false });
+    frames(r.controls, 0.5);
+    expect(r.calls()).toBe(1);
+    expect(r.controls.glideTimeConstant).toBe(0.5);
+    expect(r.controls.accelTimeConstant).toBe(0.15);
+    expect(r.controls.rotationTimeConstant).toBe(0.35);
+    r.mql.set(true);
+    expect(r.controls.glideTimeConstant).toBe(0.12);
+    expect(r.controls.accelTimeConstant).toBe(0.12);
+    expect(r.controls.rotationTimeConstant).toBe(0);
+    frames(r.controls, 0.5);
+    expect(r.calls()).toBe(1);
+    expect(r.mql.listeners.size).toBe(1);
+    r.controls.dispose();
+    expect(r.mql.listeners.size).toBe(0);
+  });
+
+  it('渡された問い合わせを使い、自分では作らない（dispose でも外さない）', () => {
+    const r = watched(false);
+    const shared = { reduced: true };
+    const el = new FakeTarget();
+    el.ownerDocument = { defaultView: r.win };
+    const before = r.calls();
+    const c = new FlyCameraControls(new PerspectiveCamera(), el as unknown as HTMLElement, { reducedMotion: shared });
+    expect(r.calls()).toBe(before);
+    expect(c.glideTimeConstant).toBe(0.12);
+    shared.reduced = false;
+    expect(c.glideTimeConstant).toBe(0.5);
+    c.dispose();
+  });
+
+  it('getResidualMotion: 自動移動の最中は、その瞬間の移動の速度を返す（止まっていれば 0）', () => {
+    const r = watched(false);
+    r.controls.setPose(new Vector3(0, 0, 1.2), new Vector3(0, 0, 0));
+    expect(r.controls.getResidualMotion().velocity.length()).toBe(0);
+    r.controls.flyTo(new Vector3(0, 0, -1), { distance: 0.1, durationMs: 1000 });
+    expect(r.controls.getResidualMotion().velocity.length()).toBe(0); // 始めの速さは 0
+    for (let i = 0; i < 20; i++) r.controls.update(0.01); // 進み 0.2
+    const v = r.controls.getResidualMotion().velocity.clone();
+    const p0 = r.camera.position.clone();
+    r.controls.update(1e-4);
+    const numeric = r.camera.position.clone().sub(p0).divideScalar(1e-4);
+    expect(v.length()).toBeGreaterThan(0.5);
+    expect(numeric.distanceTo(v)).toBeLessThan(v.length() * 1e-2);
+  });
+});

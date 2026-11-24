@@ -798,3 +798,40 @@ describe('OverviewControls: 回転の慣性', () => {
     expect(r.controls.update(1 / 60)).toBe(false);
   });
 });
+
+describe('OverviewControls: 「動きを減らす」設定の問い合わせ', () => {
+  type ChangeListener = (e: { matches: boolean }) => void;
+  it('自分で作った問い合わせは 1 回だけで、change で次のフレームから反映し（距離の時定数・回転の慣性）、dispose で外す', () => {
+    const mql = {
+      matches: false,
+      listeners: new Set<ChangeListener>(),
+      addEventListener(type: string, fn: ChangeListener) { if (type === 'change') this.listeners.add(fn); },
+      removeEventListener(type: string, fn: ChangeListener) { if (type === 'change') this.listeners.delete(fn); },
+      set(matches: boolean) { this.matches = matches; for (const fn of [...this.listeners]) fn({ matches }); },
+    };
+    let calls = 0;
+    const win = new FakeTarget() as FakeTarget & { matchMedia?: () => typeof mql };
+    win.matchMedia = () => { calls++; return mql; };
+    const el = new FakeTarget();
+    (el as unknown as { ownerDocument: unknown }).ownerDocument = { defaultView: win };
+    const camera = new PerspectiveCamera(60, 1, 0.001, 20);
+    camera.position.set(0, 0, 1);
+    const controls = new OverviewControls(camera, el as unknown as HTMLElement);
+    controls.enabled = true;
+    expect(controls.zoomTimeConstant).toBe(0.15);
+    expect(controls.rotationTimeConstant).toBe(0.45);
+    el.emit('wheel', { deltaY: 100, deltaX: 0, deltaMode: 0, timeStamp: 1000 });
+    expect(controls.isZooming).toBe(true);
+    for (let i = 0; i < 30; i++) controls.update(1 / 60);
+    mql.set(true);
+    expect(controls.zoomTimeConstant).toBe(0);
+    expect(controls.rotationTimeConstant).toBe(0);
+    el.emit('wheel', { deltaY: 100, deltaX: 0, deltaMode: 0, timeStamp: 3000 });
+    expect(controls.isZooming).toBe(false); // 1 度に動く
+    for (let i = 0; i < 30; i++) controls.update(1 / 60);
+    expect(calls).toBe(1);
+    expect(mql.listeners.size).toBe(1);
+    controls.dispose();
+    expect(mql.listeners.size).toBe(0);
+  });
+});

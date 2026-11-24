@@ -1,7 +1,8 @@
 import { Quaternion, Vector3 } from 'three';
 import type { PerspectiveCamera } from 'three';
 import { DEFAULT_WHEEL_GESTURE_LIMIT_NOTCHES, isDiscreteWheelDelta, WheelGestureLimiter } from '../controls/WheelGesture';
-import { eventTimeMs, OVERVIEW_INERTIA_TIME_CONSTANT, prefersReducedMotion, RotationInertia } from '../controls/RotationInertia';
+import { eventTimeMs, OVERVIEW_INERTIA_TIME_CONSTANT, RotationInertia } from '../controls/RotationInertia';
+import { ReducedMotionQuery, type ReducedMotionSource } from '../controls/reducedMotion';
 import type { RotationInertiaOptions } from '../controls/RotationInertia';
 
 /**
@@ -139,6 +140,11 @@ export interface OverviewControlsOptions {
    * 省略すると、0.15 秒で、「動きを減らす」設定（`prefers-reduced-motion: reduce`）なら 0。
    */
   zoomTimeConstant?: number;
+  /**
+   * 「動きを減らす」設定の問い合わせ（`CameraRig` が 1 つ作って、飛行・俯瞰の操作で共有する）。
+   * 省略すると、自分で 1 つ作り、`dispose` で外す。
+   */
+  reducedMotion?: ReducedMotionSource;
 }
 
 const PIXELS_PER_NOTCH = 100;
@@ -173,6 +179,9 @@ export class OverviewControls {
   private readonly wheelGesture: WheelGestureLimiter;
   private readonly inertia: RotationInertia;
   private readonly win: Window | null;
+  /** 「動きを減らす」設定の問い合わせ。自分で作ったときだけ `ownReducedMotion` に持ち、`dispose` で外す。 */
+  private readonly reducedMotion: ReducedMotionSource;
+  private readonly ownReducedMotion: ReducedMotionQuery | null;
   /** 時定数を明示したときの値。null は自動（既定値。ただし「動きを減らす」設定なら 0）。 */
   private explicitZoomTimeConstant: number | null;
   /** 目標の距離の対数。寄っている途中でなければ null（その間、距離の持ち主はカメラの位置）。 */
@@ -185,7 +194,9 @@ export class OverviewControls {
     this.wheelFactor = options.wheelFactor ?? 1.15;
     this.wheelGesture = new WheelGestureLimiter({ limitNotches: overviewGestureLimitNotches(this.wheelFactor) });
     this.win = domElement.ownerDocument?.defaultView ?? (typeof window !== 'undefined' ? window : null);
-    this.inertia = new RotationInertia({ defaultTimeConstant: OVERVIEW_INERTIA_TIME_CONSTANT, ...options.rotationInertia }, this.win);
+    this.ownReducedMotion = options.reducedMotion ? null : new ReducedMotionQuery(this.win);
+    this.reducedMotion = options.reducedMotion ?? (this.ownReducedMotion as ReducedMotionQuery);
+    this.inertia = new RotationInertia({ defaultTimeConstant: OVERVIEW_INERTIA_TIME_CONSTANT, ...options.rotationInertia }, this.reducedMotion);
     this.explicitZoomTimeConstant = options.zoomTimeConstant ?? null;
     domElement.addEventListener('pointerdown', this.onPointerDown);
     domElement.addEventListener('pointermove', this.onPointerMove);
@@ -218,7 +229,7 @@ export class OverviewControls {
    */
   get zoomTimeConstant(): number {
     if (this.explicitZoomTimeConstant !== null) return this.explicitZoomTimeConstant;
-    return prefersReducedMotion(this.win) ? 0 : OVERVIEW_ZOOM_TIME_CONSTANT;
+    return this.reducedMotion.reduced ? 0 : OVERVIEW_ZOOM_TIME_CONSTANT;
   }
 
   set zoomTimeConstant(value: number | null) {
@@ -368,6 +379,7 @@ export class OverviewControls {
     this.domElement.removeEventListener('lostpointercapture', this.onPointerCancel);
     this.domElement.removeEventListener('wheel', this.onWheel);
     this.win?.removeEventListener('blur', this.onBlur);
+    this.ownReducedMotion?.dispose();
     this.endDrag();
     this.inertia.cancelDrag();
     this.inertia.stop();

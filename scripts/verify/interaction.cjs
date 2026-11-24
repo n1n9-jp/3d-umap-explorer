@@ -879,6 +879,61 @@ async function testFlyEasing(page, ds, views) {
   await page.keyboard.press('Escape');
 }
 
+/** 自動移動とモードの切り替えの組み合わせ: 飛んでいる最中の O と、俯瞰モードから飛ぶときの始まり。 */
+async function testFlightAndModeSwitch(page, views) {
+  console.log('\n[自動移動とモードの切り替えの組み合わせ]');
+  await page.keyboard.press('Escape');
+  if ((await state(page)).mode !== 'fly') {
+    await page.keyboard.press('KeyO');
+    await page.waitForFunction(() => window.__explorer.getState().mode === 'fly');
+  }
+  await setView(page, views[0].pos, views[0].look);
+  await waitStill(page);
+  const p = await findVisiblePoint(page, { minPx: 3 });
+  if (!p) { check('自動移動の途中の O: 検証に使う点が見つかる', false); return; }
+  await page.mouse.dblclick(p.x, p.y);
+  for (let k = 0; k < 60; k++) {
+    await frames(page, 1);
+    const s = await state(page);
+    if (!s.flight || s.flight.progress > 0.1) break;
+  }
+  const { pre, post } = await page.evaluate(() => {
+    const pre = window.__explorer.getState();
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyO', bubbles: true }));
+    return { pre, post: window.__explorer.getState() };
+  });
+  check('（前提）O を押したのは、点へ飛ぶ移動の途中', pre.mode === 'fly' && pre.flight && pre.flight.kind === 'fly' && pre.flight.progress > 0 && pre.flight.progress < 1,
+    JSON.stringify(pre.flight));
+  check('自動移動の途中で O を押すと、移動をやめて俯瞰へ切り替わり（flight が null）、残りの速度は残った動き（settling）になる。切り替えの瞬間は跳ばない',
+    post.mode === 'overview' && post.flight === null && post.settling && post.animating && len(sub(post.position, pre.position)) < 1e-9,
+    JSON.stringify({ mode: post.mode, flight: post.flight, settling: post.settling, animating: post.animating }));
+  const last = await waitCameraIdle(page);
+  const moved = len(sub(last.position, post.position));
+  const still = await waitStill(page);
+  check('残った動きで少し進んで止まり（animating が false）、そのあとは位置が変わらない',
+    last.mode === 'overview' && !last.animating && !last.settling && !last.flight && moved > 1e-5 && len(sub(still.position, last.position)) < 1e-9,
+    `O のあとに進んだ距離 ${moved.toFixed(4)}`);
+
+  // 俯瞰モードから点へ飛ぶ: 切り替えの残った動き・向き直しは止め、その時点の姿勢から始める
+  await setView(page, views[0].pos, views[0].look);
+  await waitStill(page);
+  const q = await findVisiblePoint(page, { minPx: 3 });
+  if (!q) { check('俯瞰モードから飛ぶ: 検証に使う点が見つかる', false); return; }
+  const before = await state(page);
+  await page.mouse.dblclick(q.x, q.y);
+  let first = null;
+  for (let k = 0; k < 40 && !first; k++) {
+    await frames(page, 1);
+    const s = await state(page);
+    if (s.flight) first = s;
+  }
+  check('俯瞰モードから点へ飛ぶと、飛行モードで緩急のついた移動が始まり、切り替えの残った動き・向き直しは起きない',
+    before.mode === 'overview' && first && first.mode === 'fly' && first.flight.kind === 'fly' && !first.settling && !first.reorienting && first.animating,
+    first ? JSON.stringify({ mode: first.mode, flight: first.flight, settling: first.settling, reorienting: first.reorienting }) : '移動が始まらない');
+  await waitCameraIdle(page);
+  await page.keyboard.press('Escape');
+}
+
 async function main() {
   const dataDir = path.join(root, 'public', dataPath);
   const ds = loadDataset(dataDir);
@@ -930,6 +985,7 @@ async function main() {
     await testDoubleClick(page, edge);
     await testOverviewDoubleClick(page, overview);
     await testFlyEasing(page, ds, views);
+    await testFlightAndModeSwitch(page, views);
     await page.close();
 
     check('コンソールエラーがない', consoleErrors.length === 0, consoleErrors.join(' | '));

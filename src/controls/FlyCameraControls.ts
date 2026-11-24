@@ -9,7 +9,8 @@ import {
 } from './FlyMotion';
 import type { FlightInfo, FlyMotionOptions, FlyPose, FlyToOptions, MoveInput } from './FlyMotion';
 import { isDiscreteWheelDelta, WheelGestureLimiter } from './WheelGesture';
-import { eventTimeMs, FLY_INERTIA_TIME_CONSTANT, prefersReducedMotion, RotationInertia } from './RotationInertia';
+import { eventTimeMs, FLY_INERTIA_TIME_CONSTANT, RotationInertia } from './RotationInertia';
+import { ReducedMotionQuery, type ReducedMotionSource } from './reducedMotion';
 import type { RotationInertiaOptions } from './RotationInertia';
 
 export type { FlightInfo, FlyPose, FlyToOptions } from './FlyMotion';
@@ -37,6 +38,11 @@ export interface FlyCameraControlsOptions extends Omit<FlyMotionOptions, 'accelT
   moveInertia?: MoveInertiaOptions;
   /** 点群の半径。`flyTo` の所要時間を、移動の距離に応じて伸縮するときの目安にする。省略すると伸縮しない。 */
   cloudRadius?: number;
+  /**
+   * 「動きを減らす」設定の問い合わせ（`CameraRig` が 1 つ作って、飛行・俯瞰の操作で共有する）。
+   * 省略すると、自分で 1 つ作り、`dispose` で外す。
+   */
+  reducedMotion?: ReducedMotionSource;
 }
 
 /** 残っている動き（`getResidualMotion`）。 */
@@ -129,6 +135,9 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
   private readonly motion: FlyMotion;
   private readonly input: MoveInput = createMoveInput();
   private readonly win: Window;
+  /** 「動きを減らす」設定の問い合わせ。自分で作ったときだけ `ownReducedMotion` に持ち、`dispose` で外す。 */
+  private readonly reducedMotion: ReducedMotionSource;
+  private readonly ownReducedMotion: ReducedMotionQuery | null;
   private readonly euler = new Euler(0, 0, 0, 'YXZ');
   private readonly dirTmp = new Vector3();
   private readonly posTmp = new Vector3();
@@ -153,10 +162,12 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
     this.cloudRadius = options.cloudRadius;
     this.motion = new FlyMotion(options);
     this.win = domElement.ownerDocument?.defaultView ?? window;
+    this.ownReducedMotion = options.reducedMotion ? null : new ReducedMotionQuery(this.win);
+    this.reducedMotion = options.reducedMotion ?? (this.ownReducedMotion as ReducedMotionQuery);
     this.explicitAccel = finiteOrNull(options.moveInertia?.accelTimeConstant);
     this.explicitGlide = finiteOrNull(options.moveInertia?.glideTimeConstant);
     this.syncMoveInertia();
-    this.inertia = new RotationInertia({ defaultTimeConstant: FLY_INERTIA_TIME_CONSTANT, ...options.rotationInertia }, this.win);
+    this.inertia = new RotationInertia({ defaultTimeConstant: FLY_INERTIA_TIME_CONSTANT, ...options.rotationInertia }, this.reducedMotion);
 
     camera.updateMatrixWorld();
     this.motion.position.copy(camera.getWorldPosition(new Vector3()));
@@ -238,7 +249,7 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
    * 代入しなければ既定の 0.15 秒（「動きを減らす」設定なら 0.12 秒）。`null` を代入すると、その既定へ戻す。
    */
   get accelTimeConstant(): number {
-    return this.explicitAccel ?? (prefersReducedMotion(this.win) ? REDUCED_MOTION_TIME_CONSTANT : DEFAULT_ACCEL_TIME_CONSTANT);
+    return this.explicitAccel ?? (this.reducedMotion.reduced ? REDUCED_MOTION_TIME_CONSTANT : DEFAULT_ACCEL_TIME_CONSTANT);
   }
 
   set accelTimeConstant(value: number | null) {
@@ -251,7 +262,7 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
    * 代入しなければ既定の 0.5 秒（「動きを減らす」設定なら 0.12 秒）。`null` を代入すると、その既定へ戻す。
    */
   get glideTimeConstant(): number {
-    return this.explicitGlide ?? (prefersReducedMotion(this.win) ? REDUCED_MOTION_TIME_CONSTANT : DEFAULT_GLIDE_TIME_CONSTANT);
+    return this.explicitGlide ?? (this.reducedMotion.reduced ? REDUCED_MOTION_TIME_CONSTANT : DEFAULT_GLIDE_TIME_CONSTANT);
   }
 
   set glideTimeConstant(value: number | null) {
@@ -297,12 +308,12 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
 
   /**
    * いま残っている動き（移動の速度と、回転の慣性の角速度）。モードの切り替えで無効にする前に読み、
-   * 呼び出し側が減衰させ続けるために使う。何も残っていなければ 0。
+   * 呼び出し側が減衰させ続けるために使う。自動移動（`flyTo`）の最中なら、移動の速度はその瞬間の移動の速度。何も残っていなければ 0。
    */
   getResidualMotion(): FlyResidualMotion {
     const active = this.inertia.active;
     return {
-      velocity: this.motion.velocity.clone(),
+      velocity: this.motion.currentVelocity(new Vector3()), // 自動移動の最中なら、その瞬間の移動の速度
       yawRate: active ? this.inertia.yawRate : 0,
       pitchRate: active ? this.inertia.pitchRate : 0,
     };
@@ -355,7 +366,7 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
     this.motion.flyTo(target, {
       ...options,
       cloudRadius: options?.cloudRadius ?? this.cloudRadius,
-      reducedMotion: options?.reducedMotion ?? prefersReducedMotion(this.win),
+      reducedMotion: options?.reducedMotion ?? this.reducedMotion.reduced,
     });
   }
 
@@ -394,6 +405,7 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
     this.win.removeEventListener('keydown', this.onKeyDown);
     this.win.removeEventListener('keyup', this.onKeyUp);
     this.win.removeEventListener('blur', this.onBlur);
+    this.ownReducedMotion?.dispose();
     if (this.domElement.style && this.prevTouchAction !== null) {
       this.domElement.style.touchAction = this.prevTouchAction;
     }

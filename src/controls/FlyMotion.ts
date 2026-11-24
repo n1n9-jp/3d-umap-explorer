@@ -305,6 +305,15 @@ export class FlyMotion {
     this.flight = null;
   }
 
+  /**
+   * いまのカメラの速度（単位/秒）を `out` に書く。自動移動の最中は、その瞬間の移動の速度（位置の式の時間微分）、
+   * そうでなければ `velocity`（キー移動・滑走の速度）。モードを切り替えた瞬間に残っている動きを読むのに使う。
+   */
+  currentVelocity(out: Vector3): Vector3 {
+    if (this.flight) return this.flightVelocity(this.flight, out);
+    return out.copy(this.velocity);
+  }
+
   /** 速度と進行中の飛行を捨てる（無効化時など）。 */
   stop(): void {
     this.flight = null;
