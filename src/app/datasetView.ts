@@ -204,7 +204,7 @@ export class DatasetView {
       this.spatialIndex = options.spatialIndex ?? new SpatialIndex(arrays.positions);
       const autoParams = autoSpeedParams(manifest.density); // manifest に density がなければ使わない
       const autoSpeed = autoParams ? new AutoSpeed(this.spatialIndex, autoParams) : null;
-      this.controller = new CameraRig(camera, renderer.domElement, cloudCenter, { autoSpeed });
+      this.controller = new CameraRig(camera, renderer.domElement, cloudCenter, { autoSpeed, cloudRadius: arrays.bounds.radius });
 
       // ---- クラスタの目印と現在地（src/labels/。粗い階層を使う。クラスタのないデータセットでは何もしない）----
       this.clusterLabels = new ClusterLabels({

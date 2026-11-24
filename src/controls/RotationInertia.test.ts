@@ -467,26 +467,25 @@ describe('prefers-reduced-motion', () => {
   });
 
   it('時定数を指定しなければ、「動きを減らす」が有効なとき既定で無効になる', () => {
-    const inertia = new RotationInertia({}, win(true));
+    const inertia = new RotationInertia({}, { reduced: true });
     expect(inertia.timeConstant).toBe(0);
     expect(inertia.enabled).toBe(false);
     expect(inertia.start(1, 0)).toBe(false);
   });
 
   it('時定数を明示すれば、「動きを減らす」でも使える。null で自動に戻る', () => {
-    const inertia = new RotationInertia({ timeConstant: 0.3 }, win(true));
+    const inertia = new RotationInertia({ timeConstant: 0.3 }, { reduced: true });
     expect(inertia.enabled).toBe(true);
     inertia.timeConstant = null;
     expect(inertia.enabled).toBe(false);
   });
 
   it('「動きを減らす」でなければ既定の 0.3 秒', () => {
-    expect(new RotationInertia({}, win(false)).timeConstant).toBe(DEFAULT_INERTIA_TIME_CONSTANT);
+    expect(new RotationInertia({}, { reduced: false }).timeConstant).toBe(DEFAULT_INERTIA_TIME_CONSTANT);
   });
 });
 
 describe('RotationInertia: モードごとの既定の時定数', () => {
-  const win = (reduce: boolean) => ({ matchMedia: (q: string) => ({ matches: reduce && q.includes('reduce') }) as MediaQueryList });
 
   it('飛行モード 0.35 秒・俯瞰モード 0.45 秒。省略したときの既定は 0.3 秒', () => {
     expect(FLY_INERTIA_TIME_CONSTANT).toBe(0.35);
@@ -508,8 +507,8 @@ describe('RotationInertia: モードごとの既定の時定数', () => {
 
   it('既定の時定数の指定が不正（NaN）なら 0.3 秒。「動きを減らす」設定なら、既定の値によらず無効', () => {
     expect(new RotationInertia({ defaultTimeConstant: Number.NaN }).timeConstant).toBe(0.3);
-    expect(new RotationInertia({ defaultTimeConstant: 0.45 }, win(true)).timeConstant).toBe(0);
-    expect(new RotationInertia({ timeConstant: 0.45, defaultTimeConstant: 0.35 }, win(true)).timeConstant).toBe(0.45);
+    expect(new RotationInertia({ defaultTimeConstant: 0.45 }, { reduced: true }).timeConstant).toBe(0);
+    expect(new RotationInertia({ timeConstant: 0.45, defaultTimeConstant: 0.35 }, { reduced: true }).timeConstant).toBe(0.45);
   });
 
   it('総回転量は、既定の時定数に比例する（v0 · τ）', () => {

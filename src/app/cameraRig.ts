@@ -4,10 +4,11 @@ import { FlyCameraControls, type FlyToOptions, type MoveInertiaOptions } from '.
 import { MAX_VIEW_PITCH, viewAngles, type ViewAngles, type ViewSpec } from '../render/view';
 import { OverviewControls, orbitPose, type OverviewZoomState } from './overviewControls';
 import type { AutoSpeed } from './autoSpeed';
-import { HOME_DURATION_SECONDS, HomeFlight, poseLookAt, type FlightPose } from './homeFlight';
+import { HOME_DURATION_SECONDS, HomeFlight, homeFlightDuration, poseLookAt, type FlightPose } from './homeFlight';
 import { REORIENT_MIN_ANGLE, Reorient, ResidualMotion, wrapAngle } from './modeTransition';
 import { isFromEditable } from './keyEvents';
-import { prefersReducedMotion, type RotationInertiaOptions } from '../controls/RotationInertia';
+import type { RotationInertiaOptions } from '../controls/RotationInertia';
+import { ReducedMotionQuery } from '../controls/reducedMotion';
 
 export type CameraMode = 'fly' | 'overview';
 
@@ -32,6 +33,8 @@ export interface CameraState {
   autoSpeed: AutoSpeedState;
   /** ホームの視点へ移動中か（`goHome` の途中）。 */
   homing: boolean;
+  /** 自動移動（`flyTo`・`goHome`）の最中なら、その所要時間と進み。最中でなければ null。 */
+  flight: FlightState | null;
   /** ドラッグを離したあとの回転の慣性で回っている最中か（現在のモード）。 */
   rotating: boolean;
   /** 俯瞰モードの中心までの距離の状態（目標の距離・実際の距離・寄っている途中か）。飛行モードでは null。 */
@@ -45,6 +48,11 @@ export interface CameraState {
    * `reorienting` か `settling` が true の間は、操作をしていなくてもカメラが動いている。
    */
   settling: boolean;
+  /**
+   * カメラが自動で動いている最中か。自動移動（`flight`）・ホームへの移動（`homing`）・向き直し（`reorienting`）・
+   * 切り替えの残った動き（`settling`）のいずれかが有効な間は true（操作をしていなくても、カメラが動く）。
+   */
+  animating: boolean;
 }
 
 /** 密度に応じた速度の自動調整の状態。 */
@@ -77,6 +85,20 @@ export interface CameraRigOptions {
    * 「動きを減らす」設定（`prefers-reduced-motion: reduce`）なら、どちらも 0.12 秒（キーを離すとすぐ止まる）。
    */
   moveInertia?: MoveInertiaOptions;
+  /**
+   * 点群の半径（データセットの `bounds.radius`）。自動移動（`flyTo`・`goHome`）の所要時間を、移動の距離との比で
+   * 0.8〜1.8 倍に伸縮する目安にする。省略すると伸縮しない。
+   */
+  cloudRadius?: number;
+}
+
+/** 自動移動（点・塊へ飛ぶ `flyTo`、ホームへの `goHome`）の進行状況。検証用。 */
+export interface FlightState {
+  kind: 'fly' | 'home';
+  /** 実際の所要時間（ミリ秒。距離による伸縮と動きを減らす設定の倍率を反映済み）。 */
+  durationMs: number;
+  /** 進み（0〜1。経過時間 / 所要時間。緩急の前の値）。 */
+  progress: number;
 }
 
 /** 飛行モードで、移動中のホーム復帰を中断させるキー（`FlyCameraControls` の移動キーと同じ）。 */
@@ -92,7 +114,9 @@ const FLY_MOVE_CODES = new Set([
  * 切り替えた瞬間に残っている移動の速度と回転の慣性は、時定数 0.15 秒で減らして消す（切り替え先の入力はすぐに受け付ける）。
  * 滑走中に切り替えても、滑走（時定数 0.5 秒）は引き継がず、その速度を残った動き（0.15 秒）として消す。俯瞰 → 飛行では、
  * 飛行は速度 0 から始まり、寄っている途中の距離は止める。残った動きが消えるまでの間は、`getState().settling` が true。
- * 「動きを減らす」設定（`prefers-reduced-motion: reduce`）では、向き直さず、残った動きも捨てる（従来の切り替え）。
+ * 「動きを減らす」設定（`prefers-reduced-motion: reduce`）では、飛行 → 俯瞰で、位置を保ったまま 1 度で中心へ向け（動きは付けない）、
+ * 残った動きは捨てる。
+ * 自動移動（`flyTo`）の最中に俯瞰へ切り替えると、移動をやめ、その瞬間の移動の速度を残った動き（0.15 秒）として消す。
  * 有効でない側の操作は入力に反応しない。
  */
 export class CameraRig {
@@ -112,6 +136,10 @@ export class CameraRig {
   private readonly euler = new Euler(0, 0, 0, 'YXZ');
   private readonly win: Window;
   private readonly domElement: HTMLElement;
+  /** 点群の半径。自動移動の所要時間を伸縮する目安。 */
+  private readonly cloudRadius: number | undefined;
+  /** 「動きを減らす」設定の問い合わせ。1 つだけ作り、飛行・俯瞰の操作と共有する（`dispose` で外す）。 */
+  private readonly reducedMotion: ReducedMotionQuery;
   /** ホームの視点へ移動中なら、その移動。 */
   private flight: HomeFlight | null = null;
   /** flyTo による自動移動の最中（速度の自動調整を止めている） */
@@ -126,10 +154,18 @@ export class CameraRig {
     this.domElement = domElement;
     this.win = domElement.ownerDocument?.defaultView ?? window;
     this.center = center.clone();
-    this.fly = new FlyCameraControls(camera, domElement, { rotationInertia: options.rotationInertia, moveInertia: options.moveInertia });
+    this.cloudRadius = options.cloudRadius;
+    this.reducedMotion = new ReducedMotionQuery(this.win);
+    this.fly = new FlyCameraControls(camera, domElement, {
+      rotationInertia: options.rotationInertia,
+      moveInertia: options.moveInertia,
+      cloudRadius: options.cloudRadius,
+      reducedMotion: this.reducedMotion,
+    });
     this.overview = new OverviewControls(camera, domElement, {
       rotationInertia: options.rotationInertia,
       zoomTimeConstant: options.zoomTimeConstant,
+      reducedMotion: this.reducedMotion,
     });
     this.overview.pivot.copy(this.center);
     this.fly.addEventListener('speedchange', this.notify);
@@ -159,7 +195,8 @@ export class CameraRig {
       // 無効にする前に、残っている移動の速度と回転の慣性を読む。キーを離したあとの滑走中なら、その速度も含む。
       // 滑走（時定数 0.5 秒）は引き継がず、切り替えの残った動き（時定数 0.15 秒）として消す。
       const left = this.fly.getResidualMotion();
-      this.fly.enabled = false; // 押されているキー・滑走・慣性をここで捨てる
+      this.fly.enabled = false; // 押されているキー・滑走・慣性・自動移動（flyTo）をここで捨てる
+      this.flying = false;
       this.overview.pivot.copy(this.center);
       this.overview.enabled = true;
       this.carryResidual(left.velocity, left.yawRate, left.pitchRate, false);
@@ -254,9 +291,16 @@ export class CameraRig {
     return this.reorient !== null;
   }
 
+  /** 自動移動・ホームへの移動・向き直し・切り替えの残った動きのいずれかで、カメラが自動で動いている最中か。 */
+  get animating(): boolean {
+    return this.flight !== null || (this._mode === 'fly' && this.fly.isFlying) || this.reorient !== null || this.residual.active;
+  }
+
   /**
-   * 現在の位置と向きから `view`（ホームの視点）へ、約 1 秒かけて滑らかに移動する。モードは変えない。
-   * 位置と向きの両方を補間し、始まりと終わりを緩やかにする。移動中に操作（飛行モードでは移動キーとドラッグ、
+   * 現在の位置と向きから `view`（ホームの視点）へ、滑らかに移動する。モードは変えない。
+   * 位置と向きの両方を補間し、始まりと終わりを緩やかにする。所要時間は、基準 `durationSeconds`（既定 1 秒。
+   * ミニマップのクリックは 0.6 秒）を、移動の距離に応じて 0.8〜1.8 倍に伸縮する（点群の半径 `cloudRadius` との比。
+   * 「動きを減らす」設定なら、さらに 0.5 倍）。移動中に操作（飛行モードでは移動キーとドラッグ、
    * 俯瞰モードではドラッグとホイール・ピンチ）をするか、`setView` を呼ぶと中断してその場に留まる。
    * 移動の間は、速度の自動調整は働かない（終わったあと、着いた位置から調整し直す）。
    */
@@ -270,7 +314,8 @@ export class CameraRig {
     this.stopTransition();
     const from = this.currentPose();
     const to: FlightPose = { position: [...view.pos], ...viewAngles(view, from) };
-    this.flight = new HomeFlight(from, to, durationSeconds);
+    const seconds = homeFlightDuration(from, to, durationSeconds, this.cloudRadius, this.reducedMotion.reduced);
+    this.flight = new HomeFlight(from, to, seconds);
     this.notify();
   }
 
@@ -286,11 +331,15 @@ export class CameraRig {
   /**
    * `target` を注視する位置へ自動移動する（`FlyCameraControls.flyTo`）。俯瞰モードなら飛行モードへ切り替えてから。
    * 移動中は速度の自動調整を止め（移動の速さは所要時間で決まり、係数には依らない）、着いたら止まった状態として測り直す。
+   * 所要時間は、`options.durationMs`（基準）を、移動の距離と点群の半径（`cloudRadius`）に応じて伸縮する（`FlyMotion.flyTo`）。
    */
   flyTo(target: Vector3, options?: FlyToOptions): void {
     this.cancelHome(); // ホームへの移動中なら中断して、その場から飛ぶ
-    this.setMode('fly');
-    this.stopTransition(); // 切り替えで残った動きは、flyTo の移動に重ねない
+    this.overview.stopZoom(); // 寄っている途中の距離は止める（移動のあとに再開しない）
+    this.setMode('fly'); // 俯瞰なら、ここで向き直しをやめ、周回の残りは残った動きとして受け取る
+    // 切り替えで残った動き（俯瞰の周回の残り・向き直し）は止め、その時点の姿勢から移動を始める。
+    // 飛行操作は切り替えで速度 0 から始まるので、周回の残りは移動の初速（v0）に引き継がない。
+    this.stopTransition();
     this.fly.flyTo(target, options);
     this.flying = this.fly.isFlying;
   }
@@ -375,6 +424,7 @@ export class CameraRig {
         distance: this.autoSpeed ? this.autoSpeed.distance : null,
       },
       homing: this.flight !== null,
+      flight: this.flightState(),
       rotating: this.isRotatingByInertia,
       overview: this._mode === 'overview' ? this.overview.zoomState() : null,
       moveInertia: {
@@ -384,6 +434,7 @@ export class CameraRig {
       },
       reorienting: this.reorient !== null,
       settling: this.residual.active,
+      animating: this.animating,
     };
   }
 
@@ -398,7 +449,14 @@ export class CameraRig {
     this.fly.removeEventListener('speedchange', this.notify);
     this.fly.dispose();
     this.overview.dispose();
+    this.reducedMotion.dispose();
     this.listeners.clear();
+  }
+
+  private flightState(): FlightState | null {
+    if (this.flight) return { kind: 'home', durationMs: this.flight.durationSeconds * 1000, progress: this.flight.progress };
+    const info = this._mode === 'fly' ? this.fly.flightInfo : null;
+    return info ? { kind: 'fly', durationMs: info.durationMs, progress: info.progress } : null;
   }
 
   /** カメラの現在の位置と向き（yaw / pitch）。 */
@@ -434,7 +492,7 @@ export class CameraRig {
 
   /** 切り替えた瞬間に残っていた動きを、減らして消す動きとして引き継ぐ。「動きを減らす」設定やホームへの移動中は捨てる。 */
   private carryResidual(velocity: Vector3 | null, yawRate: number, pitchRate: number, orbit: boolean): void {
-    if (prefersReducedMotion(this.win) || this.flight) {
+    if (this.reducedMotion.reduced || this.flight) {
       this.residual.stop();
       return;
     }
@@ -444,17 +502,23 @@ export class CameraRig {
 
   /**
    * 飛行 → 俯瞰の切り替えで、位置を保ったまま点群の中心へ向き直す動きを始める。向きのずれが 3° 未満なら何もしない。
-   * 「動きを減らす」設定なら向き直さない（従来どおり、位置も向きも保ったまま回転の中心だけを決め直す）。
+   * 「動きを減らす」設定なら、動きを付けずに 1 度で中心へ向ける（中心が画面の外にあるまま、最初のドラッグで大きく振り回されないように）。
    * ホームへの移動中は、その移動を優先する。
    */
   private startReorient(): void {
-    if (this.flight || prefersReducedMotion(this.win)) return;
+    if (this.flight) return;
     this.camera.updateMatrixWorld();
     const position = this.camera.getWorldPosition(new Vector3());
     const toCenter = this.center.clone().sub(position);
     if (!(toCenter.length() > 1e-9)) return;
     const forward = this.camera.getWorldDirection(this.dir);
     if (!(forward.angleTo(toCenter) >= REORIENT_MIN_ANGLE)) return;
+    if (this.reducedMotion.reduced) {
+      // 向き直しの終わりと同じ向き（いまの位置から中心を見る向き。仰角は ±89° に収める）へ、1 度に向ける
+      const angles = viewAngles({ pos: position.toArray(), look: this.center.toArray() }, this.cameraAngles());
+      this.setCameraAngles(angles.yaw, angles.pitch);
+      return;
+    }
     this.reorient = new Reorient(this.cameraAngles());
   }
 

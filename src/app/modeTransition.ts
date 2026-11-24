@@ -1,6 +1,7 @@
 import { Vector3 } from 'three';
 import { MAX_VIEW_PITCH, type ViewAngles } from '../render/view';
 import { RotationInertia } from '../controls/RotationInertia';
+import { flightEase } from '../controls/easing';
 
 /**
  * 飛行モードと俯瞰モードを切り替えるときの、カメラの移り変わり。DOM にも three.js のカメラにも依存しない。
@@ -26,11 +27,12 @@ export const RESIDUAL_TIME_CONSTANT = 0.15;
 /** 移動の速度がこれ未満（単位/秒）なら、止まったとみなす（`FlyMotion` の停止判定と同じ）。 */
 const STOP_SPEED = 1e-5;
 
-/** 向き直しの進み方 `f(t) = 1 − (1−t)³(1+3t)`。始まりと終わりの速さが 0。範囲外は端に丸める。 */
+/**
+ * 向き直しの進み方 `f(t) = 1 − (1−t)³(1+3t)`。始まりと終わりの速さが 0。範囲外は端に丸める。
+ * 点・塊へ飛ぶ自動移動と同じ式（`flightEase`。src/controls/easing.ts）。
+ */
 export function reorientEase(t: number): number {
-  const x = Math.min(1, Math.max(0, t));
-  const u = 1 - x;
-  return 1 - u * u * u * (1 + 3 * x);
+  return flightEase(t);
 }
 
 function clampPitch(pitch: number): number {

@@ -34,7 +34,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require('playwright');
-const { loadDataset, waitForServer, startPreview, CHROMIUM_ARGS, sub, len, readInfoRect } = require('./lib.cjs');
+const { loadDataset, waitForServer, startPreview, CHROMIUM_ARGS, sub, len, readInfoRect, waitCameraIdle } = require('./lib.cjs');
 
 const root = path.resolve(__dirname, '../..');
 const args = process.argv.slice(2);
@@ -236,6 +236,7 @@ async function viewNear(page, center, dist) {
 
 /** カメラが止まるまで待つ */
 async function waitStill(page, maxFrames = 80) {
+  await waitCameraIdle(page); // 自動移動・ホームへの移動・向き直し・切り替えの残った動きが終わるまで（模擬の時間で）
   let prev = await camState(page);
   for (let k = 0; k < maxFrames; k++) {
     await frames(page, 1);

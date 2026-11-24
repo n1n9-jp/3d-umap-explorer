@@ -1,3 +1,7 @@
+import type { ReducedMotionSource } from './reducedMotion';
+
+export { prefersReducedMotion } from './reducedMotion';
+
 /**
  * ドラッグで視点を回したあとの回転の慣性。DOM にも three.js にも依存せず、
  * ポインタの座標と時刻から「離したときの回転の速さ」を求め、その速さで回り続けて減速するまでを受け持つ。
@@ -46,15 +50,6 @@ export interface RotationInertiaOptions {
   minReleaseSpeedPx?: number;
   /** この距離を超えて動かさなかった押下は、クリックとして慣性を付けない（CSS ピクセル）。 */
   dragThresholdPx?: number;
-}
-
-/** OS・ブラウザの「視差効果を減らす」（`prefers-reduced-motion: reduce`）が有効か。判定できなければ false。 */
-export function prefersReducedMotion(win: Pick<Window, 'matchMedia'> | null | undefined): boolean {
-  try {
-    return typeof win?.matchMedia === 'function' && win.matchMedia('(prefers-reduced-motion: reduce)').matches === true;
-  } catch {
-    return false;
-  }
 }
 
 /** イベントの時刻（ミリ秒）。`timeStamp` がなければ現在時刻。 */
@@ -181,13 +176,14 @@ export class RotationInertia {
   dPitch = 0;
 
   private readonly tracker: DragVelocityTracker;
-  private readonly win: Pick<Window, 'matchMedia'> | null;
+  /** 「動きを減らす」設定の問い合わせ（持ち主が作り、持ち主が `dispose` する）。null なら設定を見ない。 */
+  private readonly reducedMotion: ReducedMotionSource | null;
   private vYaw = 0;
   private vPitch = 0;
   private _active = false;
   private stoppedBy: object | null = null;
 
-  constructor(options: RotationInertiaOptions = {}, win: Pick<Window, 'matchMedia'> | null = null) {
+  constructor(options: RotationInertiaOptions = {}, reducedMotion: ReducedMotionSource | null = null) {
     this.explicitTimeConstant = options.timeConstant ?? null;
     const fallback = options.defaultTimeConstant;
     this.defaultTimeConstant = typeof fallback === 'number' && Number.isFinite(fallback) ? fallback : DEFAULT_INERTIA_TIME_CONSTANT;
@@ -195,13 +191,13 @@ export class RotationInertia {
     this.stopSpeed = options.stopSpeed ?? DEFAULT_INERTIA_STOP_SPEED;
     this.minReleaseSpeedPx = options.minReleaseSpeedPx ?? DEFAULT_MIN_RELEASE_SPEED_PX;
     this.tracker = new DragVelocityTracker(options.releaseWindowSeconds, options.dragThresholdPx);
-    this.win = win;
+    this.reducedMotion = reducedMotion;
   }
 
   /** 実際に使う時定数（秒）。0 以下は無効。省略したときは、「動きを減らす」設定なら 0、そうでなければ既定値。 */
   get timeConstant(): number {
     if (this.explicitTimeConstant !== null) return this.explicitTimeConstant;
-    return prefersReducedMotion(this.win) ? 0 : this.defaultTimeConstant;
+    return this.reducedMotion?.reduced === true ? 0 : this.defaultTimeConstant;
   }
 
   /** 時定数を決める。0 以下で無効。null で自動（既定値、「動きを減らす」設定なら無効）に戻す。NaN は無視する。 */
