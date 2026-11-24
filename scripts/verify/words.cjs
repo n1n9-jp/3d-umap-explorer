@@ -24,7 +24,7 @@
  *   - クラスタの内部では、ほかのクラスタの目印が小さく薄くなり、単語と重なる目印は隠れる（理由 words）
  *   - クラスタに属さない点の単語の文字は、点の灰色より明るい色（NOISE_TEXT_COLOR）で描く
  *   - カメラを単語の群れへ向けたあと真後ろを向かせても（選んだあとにカメラの後ろへ回った単語）、コンソールにエラーも警告も出ず、
- *     画面に異常な図形（背景でも点でも文字でもない大きな領域）が出ない。単語の群れの中を通り抜けても同じ
+ *     画面に異常な図形（背景でも点でも文字でもない大きな領域）が出ない（背景でない画素がつながった領域の最大の面積で見る）。単語を追い越しても同じ
  *   - カメラを速く回している間も、表示中の単語のいまの矩形（`currentRects`。描かれている文字の位置）が、表示中の目印の矩形と重ならない。
  *     選び直しの間隔が短くなり（motion.ts）、障害物との間隔に余裕が加わることを確かめる
  *   - コンソールエラーがない
@@ -43,6 +43,8 @@ const outDir = path.resolve(root, opt('out', 'artifacts/words'));
 const port = Number(opt('port', '4340'));
 const width = 1280, height = 800;
 
+/** 後ろへ回った単語の検証で、背景でない画素がつながった領域の面積の上限（画素数。1280×800 の約 1.5%。文字や丸い点は 1 桁〜数百画素の領域に分かれる） */
+const BLOB_LIMIT_PX = 15000;
 const results = [];
 function check(name, ok, detail = '') {
   results.push({ name, ok: !!ok });
@@ -602,6 +604,7 @@ async function testDpr(browser, base, page1) {
 
 /** 2 つの PNG の、違う画素の割合（チャンネルの差が threshold を超える画素）と、違う画素の外接矩形の面積の割合。 */
 async function imageDiff(util, a, b, threshold = 24) {
+  // a・b は base64 の PNG
   return util.evaluate(async ({ a, b, threshold }) => {
     const load = async (s) => { const img = new Image(); img.src = `data:image/png;base64,${s}`; await img.decode(); return img; };
     const [ia, ib] = await Promise.all([load(a), load(b)]);
@@ -616,7 +619,44 @@ async function imageDiff(util, a, b, threshold = 24) {
     }
     const total = ia.width * ia.height;
     return { fraction: n / total, boxFraction: n ? ((box[2] - box[0] + 1) * (box[3] - box[1] + 1)) / total : 0, n };
-  }, { a: a.toString('base64'), b: b.toString('base64'), threshold });
+  }, { a, b, threshold });
+}
+
+/**
+ * 画像の中の、背景でない画素（背景色との差が threshold を超える）がつながった領域のうち、最大のものの面積（画素数）。
+ * `exclude`（x, y, w, h）の中は数えない（ミニマップのような、色のついた大きな図形）。単語の文字や丸い点は小さな領域に分かれるが、
+ * 異常に大きな図形（シェーダの計算結果が不定のときに出るおそれのあるもの）は、1 つの大きな領域になる。
+ */
+async function largestBlob(util, png, exclude, threshold = 24) {
+  return util.evaluate(async ({ png, exclude, threshold }) => {
+    const img = new Image(); img.src = `data:image/png;base64,${png}`; await img.decode();
+    const c = new OffscreenCanvas(img.width, img.height); const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+    const { data, width, height } = g.getImageData(0, 0, img.width, img.height);
+    const bg = [data[0], data[1], data[2]];
+    const mask = new Uint8Array(width * height);
+    for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+      if (exclude && x >= exclude[0] && x < exclude[0] + exclude[2] && y >= exclude[1] && y < exclude[1] + exclude[3]) continue;
+      const o = 4 * (y * width + x);
+      if (Math.max(Math.abs(data[o] - bg[0]), Math.abs(data[o + 1] - bg[1]), Math.abs(data[o + 2] - bg[2])) > threshold) mask[y * width + x] = 1;
+    }
+    let best = 0; const stack = [];
+    for (let i = 0; i < mask.length; i++) {
+      if (mask[i] !== 1) continue;
+      let area = 0; stack.push(i); mask[i] = 2;
+      while (stack.length) {
+        const j = stack.pop(); area++;
+        const x = j % width, y = (j - x) / width;
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+          const nx = x + dx, ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+          const k = ny * width + nx;
+          if (mask[k] === 1) { mask[k] = 2; stack.push(k); }
+        }
+      }
+      if (area > best) best = area;
+    }
+    return best;
+  }, { png, exclude, threshold });
 }
 
 async function testBehindCamera(browser, page) {
@@ -628,31 +668,43 @@ async function testBehindCamera(browser, page) {
     await setView(page, v);
     const s0 = await waitWords(page);
     const warn0 = consoleWarnings.length, err0 = consoleErrors.length;
-    await setView(page, makeView(dir));
-    // 向きを変えた直後のフレームを撮る。選んだ単語はカメラの後ろへ回り、消えるまでの数フレームは、まだインスタンスとして描かれる
-    const shots = [];
-    let stale = 0;
-    for (let k = 0; k < 4; k++) {
-      await frames(page, 1);
-      const w = await words(page);
-      if (w.drawnGlyphs > 0) stale++;
-      shots.push(await page.screenshot());
-    }
+    // 向きを変えた直後の 4 フレームの描画（canvas）を、アプリの描画のすぐあとに（同じフレームの中で）取り出す。
+    // 選んだ単語はカメラの後ろへ回り、消えるまでの数フレームは、まだインスタンスとして描かれている
+    const shots = await page.evaluate(({ view, n }) => new Promise((resolve) => {
+      const canvas = document.querySelector('canvas');
+      const out = [];
+      const step = () => requestAnimationFrame(() => {
+        out.push({ png: canvas.toDataURL('image/png').split(',')[1], glyphs: window.__explorer.words.getState().drawnGlyphs });
+        if (out.length < n) step(); else resolve(out);
+      });
+      window.__explorer.setView(view);
+      step();
+    }), { view: makeView(dir), n: 4 });
+    const stale = shots.filter((x) => x.glyphs > 0).length;
     await waitWords(page);
-    const settled = await page.screenshot();
+    const settled = (await page.evaluate(() => new Promise((resolve) => {
+      const canvas = document.querySelector('canvas');
+      requestAnimationFrame(() => resolve(canvas.toDataURL('image/png').split(',')[1]));
+    })));
+    const mm = await page.evaluate(() => { const r = document.getElementById('minimap')?.getBoundingClientRect(); return r && r.width > 0 ? [Math.floor(r.left) - 2, Math.floor(r.top) - 2, Math.ceil(r.width) + 4, Math.ceil(r.height) + 4] : null; });
+    const blobs = [];
+    for (const shot of shots) blobs.push(await largestBlob(util, shot.png, mm));
+    const settledBlob = await largestBlob(util, settled, mm);
     const diffs = [];
-    for (const shot of shots) diffs.push(await imageDiff(util, shot, settled));
+    for (const shot of shots) diffs.push(await imageDiff(util, shot.png, settled));
+    if (process.env.WORDS_DEBUG_SHOTS) { fs.mkdirSync(outDir, { recursive: true }); shots.forEach((x, k) => fs.writeFileSync(path.join(outDir, `behind-${name.slice(0, 4)}-${k}.png`), Buffer.from(x.png, 'base64'))); fs.writeFileSync(path.join(outDir, `behind-${name.slice(0, 4)}-settled.png`), Buffer.from(settled, 'base64')); }
     const worst = diffs.reduce((m, d) => (d.fraction > m.fraction ? d : m), diffs[0]);
-    check(`${name}: 前提: 向きを変える前に単語が表示されていて、向きを変えたあとも、描画データが残るフレームがある`, s0.shown.length > 20 && stale >= 1, `表示 ${s0.shown.length} 語、描画データが残ったフレーム ${stale}/4`);
+    check(`${name}: 前提: 向きを変える前に単語が表示されていて、向きを変えた直後に、後ろへ回った単語の描画データが残るフレームがある`, s0.shown.length > 20 && stale >= 1, `表示 ${s0.shown.length} 語、描画データが残ったフレーム ${stale}/4`);
     check(`${name}: コンソールにエラーも警告も出ない`, consoleWarnings.length === warn0 && consoleErrors.length === err0,
       `警告 ${consoleWarnings.length - warn0} 件、エラー ${consoleErrors.length - err0} 件${consoleWarnings.length > warn0 ? `（${consoleWarnings.slice(warn0).join(' / ').slice(0, 300)}）` : ''}`);
-    check(`${name}: 直後の 4 フレームの画面が、落ち着いたあとの画面と同じ（違う画素 1% 未満・外接矩形も 5% 未満。異常な大きな図形がない）`,
-      worst.fraction < 0.01 && worst.boxFraction < 0.05, `違う画素 最大 ${(100 * worst.fraction).toFixed(3)}%、外接矩形 ${(100 * worst.boxFraction).toFixed(2)}%`);
+    const maxBlob = Math.max(...blobs);
+    check(`${name}: 直後の 4 フレームの画面に、異常に大きな図形（背景でない画素がつながった領域）がない（最大 ${BLOB_LIMIT_PX} 画素 = 画面の約 1.5% 以下）`,
+      maxBlob <= BLOB_LIMIT_PX, `最大の領域 ${maxBlob} 画素（落ち着いたあとの画面では ${settledBlob} 画素）、落ち着いたあとの画面との違い 最大 ${(100 * worst.fraction).toFixed(2)}%（新しい向きの単語が現れる分を含む）`);
     return worst;
   };
   await run('真後ろを向く', (d) => ({ pos: v.pos, look: add(v.pos, mul(d, -0.5)) }));
-  await run('単語の群れの中を通り抜ける（カメラが単語を追い越す）', (d) => ({ pos: add(v.pos, mul(d, 0.15)), look: add(v.pos, mul(d, 0.65)) }));
-  await run('真上を向く', () => ({ pos: v.pos, look: add(v.pos, [0, 0.5, 0]) }));
+  await run('真上を向く（カメラと同じ高さの単語は、奥行きがほぼ 0 になる）', () => ({ pos: v.pos, look: add(v.pos, [0, 0.5, 0]) }));
+  await run('単語の群れの中を 0.15 進んで真上を向く（カメラが単語を追い越す）', (d) => ({ pos: add(v.pos, mul(d, 0.15)), look: add(add(v.pos, mul(d, 0.15)), [0, 0.5, 0]) }));
   await util.close();
   await setView(page, v);
   await waitWords(page);
@@ -746,32 +798,38 @@ async function main() {
   fs.mkdirSync(outDir, { recursive: true });
   const { base, stop } = startPreview(root, port);
   let browser;
+  // --only behind,fast: カメラの後ろへ回った単語と、速い回転の検証だけ（開発中の繰り返し用）
+  const quick = opt('only', null);
   try {
     await waitForServer(base);
     browser = await chromium.launch({ args: CHROMIUM_ARGS });
     const page = await openPage(browser, base, 'data=word2vec-10k');
-    await testDisplay(page);
-    await testHoverSelect(page);
-    await testStability(page);
-    await testFarAndToggle(page);
-    await testDpr(browser, base, page);
-    await testBehindCamera(browser, page);
-    await testFastRotation(page);
+    if (!quick) {
+      await testDisplay(page);
+      await testHoverSelect(page);
+      await testStability(page);
+      await testFarAndToggle(page);
+      await testDpr(browser, base, page);
+    }
+    if (!quick || quick.split(',').includes('behind')) await testBehindCamera(browser, page);
+    if (!quick || quick.split(',').includes('fast')) await testFastRotation(page);
     const ws = await words(page);
     metrics.select = ws.select;
     metrics.params = ws.params;
-    await testSwitching(page);
+    if (!quick) await testSwitching(page);
     await page.close();
   } finally {
     if (browser) await browser.close();
     stop();
   }
-  console.log('\n[計測（ソフトウェア描画なので参考値）]');
-  console.log(`  グリフアトラス: ${metrics.atlas.glyphs} 字、${metrics.atlas.width}×${metrics.atlas.height}、生成 ${metrics.atlas.buildMs.toFixed(1)}ms`);
-  console.log(`  選び直し: ${metrics.select.count} 回、平均 ${metrics.select.meanMs.toFixed(2)}ms、最大 ${metrics.select.maxMs.toFixed(2)}ms（候補 ${metrics.select.candidates}）`);
-  console.log(`  フレーム時間（中央値）: 文字あり ${metrics.frameMs.wordsOn.toFixed(1)}ms（${metrics.frameMs.shown} 語・${metrics.frameMs.glyphs} 字） / 文字なし ${metrics.frameMs.wordsOff.toFixed(1)}ms`);
-  console.log(`  設定: ${JSON.stringify(metrics.params)}`);
-  console.log(`  内部の視点の単語（先頭 30）: ${metrics.insideWords}`);
+  if (!quick) {
+    console.log('\n[計測（ソフトウェア描画なので参考値）]');
+    console.log(`  グリフアトラス: ${metrics.atlas.glyphs} 字、${metrics.atlas.width}×${metrics.atlas.height}、生成 ${metrics.atlas.buildMs.toFixed(1)}ms`);
+    console.log(`  選び直し: ${metrics.select.count} 回、平均 ${metrics.select.meanMs.toFixed(2)}ms、最大 ${metrics.select.maxMs.toFixed(2)}ms（候補 ${metrics.select.candidates}）`);
+    console.log(`  フレーム時間（中央値）: 文字あり ${metrics.frameMs.wordsOn.toFixed(1)}ms（${metrics.frameMs.shown} 語・${metrics.frameMs.glyphs} 字） / 文字なし ${metrics.frameMs.wordsOff.toFixed(1)}ms`);
+    console.log(`  設定: ${JSON.stringify(metrics.params)}`);
+    console.log(`  内部の視点の単語（先頭 30）: ${metrics.insideWords}`);
+  }
   fs.writeFileSync(path.join(outDir, 'report.json'), JSON.stringify({ results, metrics, consoleErrors }, null, 2));
   const failed = results.filter((r) => !r.ok);
   console.log(consoleErrors.length ? `\nコンソールエラー ${consoleErrors.length} 件:\n${consoleErrors.join('\n')}` : '\nコンソールエラー: なし');

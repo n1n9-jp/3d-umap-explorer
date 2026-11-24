@@ -72,6 +72,11 @@ async function main() {
       const stats = await page.evaluate(() => window.__explorer.measureFrames(60));
       const file = path.join(outDir, `${v.name}.png`);
       await page.screenshot({ path: file });
+      // 変更の前後の画像の比較（imagediff.cjs）で、目印と現在地の部分を除くための矩形（CSS ピクセル。x, y, w, h）
+      const chips = await page.evaluate(() => [...document.querySelectorAll('.cluster-label, #cluster-location')]
+        .filter((e) => !e.hidden && getComputedStyle(e).visibility !== 'hidden' && getComputedStyle(e).display !== 'none')
+        .map((e) => { const r = e.getBoundingClientRect(); return [Math.floor(r.left) - 1, Math.floor(r.top) - 1, Math.ceil(r.width) + 2, Math.ceil(r.height) + 2]; }));
+      fs.writeFileSync(path.join(outDir, `${v.name}.chips.json`), JSON.stringify(chips));
       results.push({ ...v, file: path.relative(root, file), frame: stats });
       console.log(`${v.label}: ?pos=${v.pos.join(',')}&look=${v.look.join(',')}`);
       console.log(`  フレーム時間 中央値 ${stats.medianMs.toFixed(1)}ms / 平均 ${stats.meanMs.toFixed(1)}ms / p95 ${stats.p95Ms.toFixed(1)}ms → ${path.relative(root, file)}`);
