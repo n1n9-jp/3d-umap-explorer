@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { bindShortcut, eventOrigin, isEditableTarget, isShortcutPress } from './keyEvents';
+import { bindShortcut, eventOrigin, isCharacterPress, isEditableTarget, isShortcutPress } from './keyEvents';
 
 const el = (props: Record<string, unknown>) => props as unknown as EventTarget;
 
@@ -66,5 +66,24 @@ describe('bindShortcut', () => {
     expect(n).toBe(1);
     unbind();
     expect(listeners.size).toBe(0);
+  });
+});
+
+describe('isCharacterPress', () => {
+  const press = (init: Partial<KeyboardEvent> & { altGraph?: boolean }, origin?: EventTarget) => {
+    const { altGraph, ...rest } = init;
+    return keyEvent({ code: 'Minus', key: '?', shiftKey: true, getModifierState: (m: string) => m === 'AltGraph' && altGraph === true, ...rest }, origin);
+  };
+  it('物理キーの位置ではなく、入力された文字で判定する', () => {
+    expect(isCharacterPress(press({}), '?')).toBe(true);
+    expect(isCharacterPress(press({ code: 'Slash', key: '_' }), '?')).toBe(false);
+  });
+  it('Ctrl・Meta・AltGr でない Alt・リピート・入力欄の中は受けない。AltGr は受ける', () => {
+    expect(isCharacterPress(press({ ctrlKey: true }), '?')).toBe(false);
+    expect(isCharacterPress(press({ metaKey: true }), '?')).toBe(false);
+    expect(isCharacterPress(press({ altKey: true }), '?')).toBe(false);
+    expect(isCharacterPress(press({ repeat: true }), '?')).toBe(false);
+    expect(isCharacterPress(press({}, el({ tagName: 'INPUT' })), '?')).toBe(false);
+    expect(isCharacterPress(press({ ctrlKey: true, altKey: true, altGraph: true }), '?')).toBe(true);
   });
 });

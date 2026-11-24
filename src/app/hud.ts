@@ -1,5 +1,5 @@
 import type { CameraMode } from './cameraRig';
-import { isShortcutPress } from './keyEvents';
+import { isCharacterPress } from './keyEvents';
 
 /** モードの名前（左上のモードの表示と、操作説明で使う）。 */
 export const MODE_LABEL: Record<CameraMode, string> = { fly: '飛行', overview: '俯瞰' };
@@ -147,9 +147,15 @@ export class HudDisclosure {
   }
 }
 
-/** `?`（Shift + `/`）の押下か。修飾キーなしの `/` と、入力欄の中の入力は含めない。 */
+/**
+ * `?` の文字を入力した押下か。物理キーの位置ではなく、入力された文字（`e.key`）で見る。
+ * US・JIS の Shift + `/`、ドイツ語の Shift + `ß`、フランス語の Shift + `M` など、配列ごとに `?` を打つキーで働き、
+ * ほかの配列で Shift + `/` の位置にある文字（`_` など）では働かない。
+ * `key` が取れない環境のための、物理キーの位置での予備の判定は置かない（配列によっては、`?` ではない文字で誤って開閉するため）。
+ * 修飾キー・リピート・入力欄の扱いは `isCharacterPress`（`keyEvents.ts`）による。
+ */
 export function isHudToggleKey(e: KeyboardEvent): boolean {
-  return e.shiftKey && isShortcutPress(e, 'Slash');
+  return isCharacterPress(e, '?');
 }
 
 // ---- 画面 ----
@@ -204,15 +210,19 @@ export function showHudFailure(doc: Document, message: string): void {
 
 /**
  * 左下の HUD（index.html の `#hud`）。常に出す要約（飛行速度と自動調整）、開閉できる詳細、畳んでいても出す通知からなる。
- * 開閉は、ボタン（`aria-expanded`）と `toggle()` で行う（`?` キーは main.ts が `isHudToggleKey` で受けて `toggle()` を呼ぶ）。
+ * 開閉は、ボタン（`aria-expanded`）と `toggle()` で行う（`?` の文字のキーは main.ts が `isHudToggleKey` で受けて `toggle()` を呼ぶ）。
  * 内容が変わらなければ、要素には触れない。
  */
 export class HudView {
   private readonly els: HudElements;
   private readonly disclosure = new HudDisclosure();
   private shown: boolean | null = null;
-  private summaryText: string | null = null;
-  private detailKey: string | null = null;
+  /** 要約の項目（chip）の要素と、いま出している文字。項目の数が変わらなければ、変わった項目だけ書き換える。 */
+  private summaryChips: HTMLElement[] = [];
+  private summaryTexts: string[] = [];
+  /** 詳細の行（`formatHudDetail` の順）の要素と、行ごとにいま出している内容。変わった行だけ書き換える。 */
+  private detailRows: HTMLElement[] = [];
+  private detailTexts: string[] = [];
   private noticeText: string | null = null;
 
   constructor(private readonly doc: Document, private readonly viewportWidth: () => number) {
@@ -251,32 +261,27 @@ export class HudView {
   clearFailure(): void {
     if (!this.els.root.classList.contains('error')) return;
     this.els.root.classList.remove('error');
-    this.summaryText = this.detailKey = this.noticeText = null;
+    this.forgetContent();
   }
 
   showFailure(message: string): void {
     showHudFailure(this.doc, message);
-    this.summaryText = this.detailKey = this.noticeText = null;
+    this.forgetContent();
+  }
+
+  /** 画面の内容を覚えていない状態に戻す（次の `render` で作り直す）。 */
+  private forgetContent(): void {
+    this.summaryChips = [];
+    this.summaryTexts = [];
+    this.detailRows = [];
+    this.detailTexts = [];
+    this.noticeText = null;
   }
 
   render(info: HudInfo): void {
     const { summary, detail, notice } = this.els;
-    const summaryText = formatHudSummary(info);
-    if (summaryText !== this.summaryText) {
-      this.summaryText = summaryText;
-      const nodes: Node[] = [];
-      hudSummaryParts(info).forEach((part, i) => {
-        if (i > 0) nodes.push(this.doc.createTextNode(SUMMARY_SEPARATOR));
-        nodes.push(this.span('hud-chip', part));
-      });
-      summary.replaceChildren(...nodes);
-    }
-    const lines = formatHudDetail(info);
-    const key = lines.join('\n');
-    if (key !== this.detailKey) {
-      this.detailKey = key;
-      detail.replaceChildren(...lines.map((line, i) => this.detailLine(line, i, info)));
-    }
+    this.renderSummary(hudSummaryParts(info), summary);
+    this.renderDetail(info, detail);
     const text = formatHudNotice(info);
     if (text !== this.noticeText) {
       this.noticeText = text;
@@ -305,26 +310,62 @@ export class HudView {
     return span;
   }
 
-  private detailLine(line: string, i: number, info: HudInfo): HTMLElement {
-    const div = this.doc.createElement('div');
-    if (i === VIEW_LINE) {
-      // 視点の URL パラメータは区切りがないので、幅が足りなければ文字の途中で折り返す（「?」だけが行に残らないように）
-      div.className = 'hud-view';
-      div.textContent = line;
-    } else if (i === HELP_LINE) {
-      // 操作説明の各項目を折り返さない 1 つのまとまりにして、幅が足りないときは項目の切れ目（区切りの `/` のあと）で折り返す
-      const items = hudHelpItems(info);
+  /** 要約。項目の数が変わったときだけ作り直し、そうでなければ、文字の変わった項目だけ書き換える。 */
+  private renderSummary(parts: string[], summary: HTMLElement): void {
+    const intact = this.summaryChips.length === parts.length && this.summaryChips.every((c) => c.parentNode === summary);
+    if (!intact) {
       const nodes: Node[] = [];
-      items.forEach((item, k) => {
-        // 区切りは前の項目に付けて、行頭に「/」が来ないようにする（表示される文字列は、項目を ' / ' でつないだものと同じ）
-        nodes.push(this.span('hud-item', k < items.length - 1 ? `${item} /` : item));
-        if (k < items.length - 1) nodes.push(this.doc.createTextNode(' '));
+      this.summaryChips = parts.map((part, i) => {
+        if (i > 0) nodes.push(this.doc.createTextNode(SUMMARY_SEPARATOR));
+        const chip = this.span('hud-chip', part);
+        nodes.push(chip);
+        return chip;
       });
-      div.replaceChildren(...nodes);
-    } else {
-      div.textContent = line;
+      this.summaryTexts = [...parts];
+      summary.replaceChildren(...nodes);
+      return;
     }
+    parts.forEach((part, i) => {
+      if (part === this.summaryTexts[i]) return;
+      this.summaryTexts[i] = part;
+      this.summaryChips[i]!.textContent = part;
+    });
+  }
+
+  /** 詳細の 3 行。行の要素は残し、内容の変わった行だけ書き換える（操作説明は、項目が変わったときだけ項目の要素を作り直す）。 */
+  private renderDetail(info: HudInfo, detail: HTMLElement): void {
+    const lines = formatHudDetail(info);
+    const intact = this.detailRows.length === lines.length && this.detailRows.every((r) => r.parentNode === detail);
+    if (!intact) {
+      this.detailRows = lines.map((_, i) => this.detailRow(i));
+      this.detailTexts = lines.map(() => '');
+      detail.replaceChildren(...this.detailRows);
+    }
+    lines.forEach((line, i) => {
+      if (line === this.detailTexts[i]) return;
+      this.detailTexts[i] = line;
+      const row = this.detailRows[i]!;
+      if (i === HELP_LINE) this.fillHelpLine(row, hudHelpItems(info));
+      else row.textContent = line;
+    });
+  }
+
+  private detailRow(i: number): HTMLElement {
+    const div = this.doc.createElement('div');
+    // 視点の URL パラメータは区切りがないので、幅が足りなければ文字の途中で折り返す（「?」だけが行に残らないように）
+    if (i === VIEW_LINE) div.className = 'hud-view';
     return div;
+  }
+
+  /** 操作説明の各項目を折り返さない 1 つのまとまりにして、幅が足りないときは項目の切れ目（区切りの `/` のあと）で折り返す。 */
+  private fillHelpLine(div: HTMLElement, items: string[]): void {
+    const nodes: Node[] = [];
+    items.forEach((item, k) => {
+      // 区切りは前の項目に付けて、行頭に「/」が来ないようにする（表示される文字列は、項目を ' / ' でつないだものと同じ）
+      nodes.push(this.span('hud-item', k < items.length - 1 ? `${item} /` : item));
+      if (k < items.length - 1) nodes.push(this.doc.createTextNode(' '));
+    });
+    div.replaceChildren(...nodes);
   }
 
   private applyExpanded(): void {

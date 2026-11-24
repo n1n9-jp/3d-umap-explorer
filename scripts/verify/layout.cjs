@@ -503,6 +503,44 @@ async function testHudWide(browser, base) {
   await frames(page, 2);
   const h3 = await readHudLayout(page);
   check('? キーでもう一度押すと畳む', !h3.state.expanded && h3.aria === 'false');
+  // ? の文字のキーイベントで開閉する（配列によって、? を打つ物理キーは違う）
+  const press = (init) => page.evaluate((i) => window.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, ...i })), init);
+  await page.keyboard.press('?'); // US の配列: Shift + / で key が ?
+  await frames(page, 2);
+  check('? の文字のキー（Playwright の「?」）で開く', (await readHudLayout(page)).state.expanded === true);
+  await press({ key: '_', code: 'Slash', shiftKey: true }); // ドイツ語の配列で Slash の位置のキーを Shift と押す
+  await frames(page, 2);
+  check('ドイツ語の配列で Slash の位置のキー（key は _）を Shift と押しても開閉しない', (await readHudLayout(page)).state.expanded === true);
+  await press({ key: '?', code: 'Minus', shiftKey: true }); // ドイツ語の配列の ?
+  await frames(page, 2);
+  check('ドイツ語の配列の ?（Shift + Minus の位置で key が ?）で畳む', (await readHudLayout(page)).state.expanded === false);
+  await press({ key: '?', code: 'KeyM', shiftKey: true }); // フランス語の配列の ?
+  await frames(page, 2);
+  check('フランス語の配列の ?（Shift + KeyM の位置で key が ?）で開く', (await readHudLayout(page)).state.expanded === true);
+  await press({ key: '?', code: 'Slash', shiftKey: true, ctrlKey: true });
+  await frames(page, 2);
+  check('Ctrl を伴う ? では開閉しない', (await readHudLayout(page)).state.expanded === true);
+  // 視点の行だけが変わっても、操作説明の行（と項目）の要素は作り直されない
+  await page.evaluate(() => {
+    const rows = [...document.getElementById('hud-detail').children];
+    window.__hudRows = rows;
+    window.__hudItems = [...rows[1].children];
+    window.__hudViewText = rows[2].textContent;
+  });
+  const cam = await page.evaluate(() => window.__explorer.getState());
+  await page.evaluate((c) => window.__explorer.setView({ pos: [c.position[0] + 0.3, c.position[1], c.position[2]], look: c.lookAt }), cam);
+  await page.waitForFunction(() => document.getElementById('hud-detail').children[2].textContent !== window.__hudViewText, null, { timeout: 20000 }).catch(() => {});
+  const keep = await page.evaluate(() => {
+    const rows = [...document.getElementById('hud-detail').children];
+    return {
+      viewChanged: rows[2].textContent !== window.__hudViewText,
+      rowsSame: rows.length === window.__hudRows.length && rows.every((r, i) => r === window.__hudRows[i]),
+      itemsSame: rows[1].children.length === window.__hudItems.length && [...rows[1].children].every((c, i) => c === window.__hudItems[i]),
+    };
+  });
+  check('カメラを動かして視点の行が変わっても、詳細の行と操作説明の項目の要素は同じまま', keep.viewChanged && keep.rowsSame && keep.itemsSame, JSON.stringify(keep));
+  await page.keyboard.press('?'); // 畳んだ状態に戻す（このあとの確認は、畳んだ状態から始まる）
+  await frames(page, 2);
   // 検証用の入口
   await page.evaluate(() => window.__explorer.hud.toggle());
   await frames(page, 2);

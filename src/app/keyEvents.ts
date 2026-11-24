@@ -36,6 +36,22 @@ export function isShortcutPress(e: KeyboardEvent, code: string): boolean {
   return !isFromEditable(e);
 }
 
+/** AltGr（Alt Graph）が押されているか。Windows では Ctrl + Alt としても報告されるので、`getModifierState` で見分ける。 */
+function isAltGraph(e: KeyboardEvent): boolean {
+  return typeof e.getModifierState === 'function' && e.getModifierState('AltGraph');
+}
+
+/**
+ * `key`（入力された文字）が `char` の押下か。配列によって文字を打つキーの位置が違う記号（`?` など）のショートカットに使う。
+ * Shift は問わない（その配列で `char` を打つのに要るなら付いている）。AltGr は許す（配列によっては `char` を打つのに要る）。
+ * Ctrl・Meta、AltGr ではない Alt、リピート、変換中（IME）、入力欄の中は受けない。
+ */
+export function isCharacterPress(e: KeyboardEvent, char: string): boolean {
+  if (e.key !== char || e.repeat || e.isComposing || e.metaKey) return false;
+  if (!isAltGraph(e) && (e.ctrlKey || e.altKey)) return false;
+  return !isFromEditable(e);
+}
+
 type KeyTarget = Pick<Window, 'addEventListener' | 'removeEventListener'>;
 
 /** `win` の keydown で `code` のショートカットを受けて `handler` を呼ぶ。返す関数でリスナーを外す。 */

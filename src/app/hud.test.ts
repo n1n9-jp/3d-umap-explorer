@@ -202,22 +202,45 @@ describe('HUD の開閉の既定', () => {
   });
 });
 
-describe('? キー（Shift + /）', () => {
-  const key = (init: Partial<KeyboardEvent> & { tag?: string }) => {
-    const { tag, ...rest } = init;
-    return { code: 'Slash', key: '?', shiftKey: true, repeat: false, ctrlKey: false, metaKey: false, altKey: false,
+describe('? キー（入力された文字 ? で判定する）', () => {
+  /** 配列ごとの `?` の押下。`code` は物理キーの位置、`key` は入力された文字。 */
+  const key = (init: Partial<KeyboardEvent> & { tag?: string; altGraph?: boolean }) => {
+    const { tag, altGraph, ...rest } = init;
+    return { code: 'Slash', key: '?', shiftKey: true, repeat: false, isComposing: false, ctrlKey: false, metaKey: false, altKey: false,
+      getModifierState: (m: string) => m === 'AltGraph' && altGraph === true,
       target: { tagName: tag ?? 'BODY' }, composedPath: () => [], ...rest } as unknown as KeyboardEvent;
   };
-  it('Shift + / で押したときだけ働く', () => {
+  it('US・JIS の配列（Shift + Slash の位置で ?）で働く', () => {
     expect(isHudToggleKey(key({}))).toBe(true);
-    expect(isHudToggleKey(key({ shiftKey: false, key: '/' }))).toBe(false); // 修飾キーなしの /
-    expect(isHudToggleKey(key({ code: 'KeyO' }))).toBe(false);
   });
-  it('押しっぱなしの繰り返し・Ctrl・Meta・Alt つきは受けない', () => {
+  it('ドイツ語の配列（Shift + Minus の位置で ?）、フランス語の配列（Shift + KeyM の位置で ?）で働く', () => {
+    expect(isHudToggleKey(key({ code: 'Minus' }))).toBe(true);
+    expect(isHudToggleKey(key({ code: 'KeyM' }))).toBe(true);
+  });
+  it('ドイツ語の配列で Slash の位置のキーを Shift と押したとき（key は _）は働かない', () => {
+    expect(isHudToggleKey(key({ code: 'Slash', key: '_' }))).toBe(false);
+  });
+  it('修飾キーなしの / ・ほかのキーでは働かない。物理キーの位置だけを見る予備の判定はない', () => {
+    expect(isHudToggleKey(key({ shiftKey: false, key: '/' }))).toBe(false);
+    expect(isHudToggleKey(key({ code: 'KeyO', key: 'o' }))).toBe(false);
+    expect(isHudToggleKey(key({ key: '' }))).toBe(false);
+    expect(isHudToggleKey(key({ key: 'Unidentified' }))).toBe(false);
+  });
+  it('Shift を伴わずに ? を打てる配列でも働く', () => {
+    expect(isHudToggleKey(key({ shiftKey: false, code: 'Digit7' }))).toBe(true);
+  });
+  it('AltGr で ? を打つ配列で働く（Windows は ctrlKey と altKey も付く）。AltGr でない Ctrl・Alt は受けない', () => {
+    expect(isHudToggleKey(key({ shiftKey: false, altKey: true, altGraph: true }))).toBe(true); // Linux など
+    expect(isHudToggleKey(key({ shiftKey: false, ctrlKey: true, altKey: true, altGraph: true }))).toBe(true); // Windows
+    expect(isHudToggleKey(key({ altKey: true }))).toBe(false);
+    expect(isHudToggleKey(key({ ctrlKey: true, altKey: true }))).toBe(false);
+  });
+  it('押しっぱなしの繰り返し・Ctrl・Meta つき・変換中は受けない（AltGr があっても Meta は受けない）', () => {
     expect(isHudToggleKey(key({ repeat: true }))).toBe(false);
     expect(isHudToggleKey(key({ ctrlKey: true }))).toBe(false);
     expect(isHudToggleKey(key({ metaKey: true }))).toBe(false);
-    expect(isHudToggleKey(key({ altKey: true }))).toBe(false);
+    expect(isHudToggleKey(key({ metaKey: true, altGraph: true }))).toBe(false);
+    expect(isHudToggleKey(key({ isComposing: true }))).toBe(false);
   });
   it('入力欄（input・textarea・select）の中の入力は受けない', () => {
     for (const tag of ['INPUT', 'TEXTAREA', 'SELECT']) expect(isHudToggleKey(key({ tag }))).toBe(false);
