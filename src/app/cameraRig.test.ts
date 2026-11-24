@@ -173,7 +173,7 @@ describe('CameraRig.goHome', () => {
     expect(pitchOf(camera)).toBeCloseTo(-MAX_VIEW_PITCH, 9);
   });
 
-  it('飛行モードの移動キーで中断し、その場に留まる', () => {
+  it('飛行モードの移動キーで中断する（ホームへの補間は止まり、その場から飛行操作に移る）', () => {
     for (const code of ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyE', 'KeyQ', 'ArrowUp']) {
       const { camera, win, rig } = createRig();
       rig.setView({ pos: [1.5, 0, -0.5], look: [0, 0, -3] });
@@ -1763,5 +1763,130 @@ describe('CameraRig: 「動きを減らす」設定の問い合わせ', () => {
     expect(mql.listeners.size).toBe(1);
     rig.dispose();
     expect(mql.listeners.size).toBe(0);
+  });
+});
+
+describe('CameraRig: ホームへの移動を操作で中断すると、その瞬間の移動の速度を引き継ぐ', () => {
+  const DT = 1 / 240;
+  /** 速さの山の手前（進み 0.3 付近）まで進めて、中断の直前の 1 フレームの平均の速さを返す。 */
+  function startHoming(mode: 'fly' | 'overview', reducedMotion = false) {
+    const r = createRig({ reducedMotion });
+    r.rig.setView({ pos: [1.5, 0.4, -0.5], look: [0, 0, -3] });
+    r.rig.setMode(mode);
+    r.rig.setView({ pos: [1.5, 0.4, -0.5], look: [0, 0, -3] });
+    r.rig.goHome(HOME);
+    const T = (r.rig.getState().flight?.durationMs ?? 0) / 1000;
+    let prev = r.camera.position.clone();
+    for (let t = 0; t < 0.3 * T; t += DT) {
+      prev = r.camera.position.clone();
+      r.rig.update(DT);
+    }
+    expect(r.rig.getState().homing).toBe(true);
+    const before = r.camera.position.distanceTo(prev) / DT;
+    expect(before).toBeGreaterThan(0.5);
+    return { ...r, before, T };
+  }
+  /** 1 フレーム進めて、その平均の速さ。 */
+  function frameSpeed(r: { camera: PerspectiveCamera; rig: CameraRig }, dt = DT): number {
+    const p = r.camera.position.clone();
+    r.rig.update(dt);
+    return r.camera.position.distanceTo(p) / dt;
+  }
+
+  it('飛行モードで移動キーを押すと、中断の前後で速さが連続し、加速へつながる', () => {
+    for (const code of ['KeyW', 'KeyS', 'KeyA']) {
+      const r = startHoming('fly');
+      r.win.emit('keydown', { code, target: null });
+      expect(r.rig.getState().homing).toBe(false);
+      const after = frameSpeed(r);
+      expect(after / r.before).toBeGreaterThan(0.95);
+      expect(after / r.before).toBeLessThan(1.05);
+      // 速度は飛行の速度として残り、キーの目標速度へ近づく（その場で止まらない）
+      expect(r.rig.fly.getResidualMotion().velocity.length()).toBeGreaterThan(r.before * 0.9);
+      for (let i = 0; i < 240; i++) r.rig.update(DT);
+      const v = r.rig.fly.getResidualMotion().velocity.length();
+      expect(Math.abs(v - r.rig.getState().effectiveSpeed)).toBeLessThan(0.05 * r.rig.getState().effectiveSpeed);
+    }
+  });
+
+  it('飛行モードでドラッグすると、中断の前後で速さが連続し、滑走へつながる', () => {
+    const r = startHoming('fly');
+    r.el.emit('pointerdown', { button: 0, pointerId: 1, clientX: 100, clientY: 100 });
+    expect(r.rig.getState().homing).toBe(false);
+    const after = frameSpeed(r);
+    expect(after / r.before).toBeGreaterThan(0.95);
+    expect(after / r.before).toBeLessThan(1.05);
+    expect(r.rig.fly.isGliding).toBe(true);
+    // 滑走: 速さは時定数 0.5 秒で減り、やがて止まる
+    let last = after;
+    for (let i = 0; i < 60; i++) last = frameSpeed(r);
+    expect(last).toBeLessThan(after);
+    expect(last).toBeGreaterThan(after * 0.5);
+    for (let i = 0; i < 240 * 4; i++) r.rig.update(DT);
+    expect(r.rig.fly.getResidualMotion().velocity.length()).toBe(0);
+  });
+
+  it('刻み幅を変えても、中断のあとの位置が一致する（飛行モードの滑走）', () => {
+    const run = (dt: number) => {
+      const r = startHoming('fly');
+      r.el.emit('pointerdown', { button: 0, pointerId: 1, clientX: 100, clientY: 100 });
+      for (let t = 0; t < 0.5 - 1e-9; t += dt) r.rig.update(dt);
+      return r.camera.position.clone();
+    };
+    expect(run(1 / 30).distanceTo(run(1 / 120))).toBeLessThan(1e-9);
+  });
+
+  for (const [label, emit] of [
+    ['ドラッグ', (el: { emit: (t: string, p: object) => void }) => el.emit('pointerdown', { button: 0, pointerId: 1, clientX: 100, clientY: 100 })],
+    ['ホイール', (el: { emit: (t: string, p: object) => void }) => el.emit('wheel', { deltaY: 100, deltaMode: 0, ctrlKey: false, timeStamp: 0 })],
+    ['ピンチ', (el: { emit: (t: string, p: object) => void }) => el.emit('wheel', { deltaY: -5, deltaMode: 0, ctrlKey: true, timeStamp: 0 })],
+  ] as const) {
+    it(`俯瞰モードで${label}をすると、速度が残った動き（時定数 0.15 秒）として消える`, () => {
+      const r = startHoming('overview');
+      const v0 = r.before;
+      emit(r.el);
+      expect(r.rig.getState().homing).toBe(false);
+      expect(r.rig.getState().settling).toBe(true);
+      if (label === 'ドラッグ') {
+        const after = frameSpeed(r);
+        expect(after / v0).toBeGreaterThan(0.95);
+        expect(after / v0).toBeLessThan(1.05);
+      }
+      // 約 0.53 秒（0.15 × ln(1/0.03)）で止まる
+      for (let t = 0; t < 0.6; t += DT) r.rig.update(DT);
+      expect(r.rig.getState().settling).toBe(false);
+    });
+  }
+
+  it('俯瞰モードのドラッグの中断では、残った動きの総量が v·τ·(1 − 0.03) で、回転の操作はそのまま働く', () => {
+    const r = startHoming('overview');
+    const start = r.camera.position.clone();
+    r.el.emit('pointerdown', { button: 0, pointerId: 1, clientX: 100, clientY: 100 });
+    for (let t = 0; t < 0.7; t += DT) r.rig.update(DT);
+    // 回転の操作をしていないので、位置の変化は残った移動の分だけ
+    const moved = r.camera.position.distanceTo(start);
+    expect(moved).toBeGreaterThan(r.before * 0.15 * 0.97 * 0.95);
+    expect(moved).toBeLessThan(r.before * 0.15 * 0.97 * 1.05);
+    // そのあとのドラッグは、俯瞰の回転として働く
+    const q = r.camera.quaternion.clone();
+    r.el.emit('pointermove', { pointerId: 1, clientX: 160, clientY: 100 });
+    r.rig.update(DT);
+    expect(r.camera.quaternion.angleTo(q)).toBeGreaterThan(0.01);
+  });
+
+  it('動きを減らす設定では、その場で止まる（飛行・俯瞰とも）', () => {
+    for (const mode of ['fly', 'overview'] as const) {
+      const r = startHoming(mode, true);
+      if (mode === 'fly') r.el.emit('pointerdown', { button: 0, pointerId: 1, clientX: 100, clientY: 100 });
+      else r.el.emit('wheel', { deltaY: 0.0001, deltaMode: 0, ctrlKey: false, timeStamp: 0 });
+      expect(r.rig.getState().homing).toBe(false);
+      expect(r.rig.getState().settling).toBe(false);
+      expect(r.rig.fly.getResidualMotion().velocity.length()).toBe(0);
+      if (mode === 'fly') {
+        const at = r.camera.position.clone();
+        for (let i = 0; i < 10; i++) r.rig.update(DT);
+        expect(r.camera.position.distanceTo(at)).toBe(0);
+      }
+    }
   });
 });

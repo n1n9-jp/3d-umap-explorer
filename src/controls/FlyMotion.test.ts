@@ -9,7 +9,7 @@ import {
   createMoveInput,
 } from './FlyMotion';
 import type { MoveInput } from './FlyMotion';
-import { FLIGHT_CARRY_LIMIT, flightCarry, flightEase, scaledFlightDuration } from './easing';
+import { FLIGHT_CARRY_LIMIT, FLIGHT_EXCESS_LIMIT, flightCarry, flightEase, scaledFlightDuration } from './easing';
 
 const deg = (d: number) => (d * Math.PI) / 180;
 
@@ -576,7 +576,9 @@ describe('FlyMotion: flyTo の速度の引き継ぎ（行き過ぎない・引�
   function start(L: number, speed: number, angle: number, opts: { reducedMotion?: boolean } = {}): { m: FlyMotion; v0: Vector3; E: Vector3 } {
     const m = new FlyMotion();
     m.setPose(new Vector3(0, 0, 0), new Vector3(0, 0, -1));
-    const v0 = new Vector3(speed * Math.sin(angle), 0, -speed * Math.cos(angle));
+    // 真横（90°）は、進む方向の成分を正確に 0 にする（cos の丸めで、わずかに近づく向きにならないように）
+    const c = Math.abs(Math.cos(angle)) < 1e-12 ? 0 : Math.cos(angle);
+    const v0 = new Vector3(speed * Math.sin(angle), 0, -speed * c);
     m.velocity.copy(v0);
     m.flyTo(new Vector3(0, 0, -(L + STOP)), { distance: STOP, durationMs: 600, cloudRadius: R, ...opts });
     return { m, v0, E: new Vector3(0, 0, -L) };
@@ -584,28 +586,24 @@ describe('FlyMotion: flyTo の速度の引き継ぎ（行き過ぎない・引�
 
   const Ls = [0.02, 0.05, 0.1, 0.3, 1, 3];
   const speeds = [0, 0.3, 0.8, 1.4, 2];
-  const angles = [0, 30, 60, 90, 120, 150, 180].map(deg);
+  const angles = [0, 30, 60, 85, 90, 95, 120, 150, 180].map(deg);
 
-  it('L・v0 の大きさ・向きを振った格子のすべてで: 終点を越えず、引き返さず、t=0 の速度が v0（抑える前の範囲）、終わりは目標で速度 0', () => {
+  it('L・v0 の大きさ・向きを振った格子のすべてで: 飛び始めの速度が v0（連続）、終点を越えず、引き返さず、終わりは目標で速度 0', () => {
     for (const L of Ls) {
       for (const speed of speeds) {
         for (const angle of angles) {
           const { m, v0, E } = start(L, speed, angle);
           const info = m.flightInfo!;
           const T = info.durationMs / 1000;
-          const unclamped = T * speed <= FLIGHT_CARRY_LIMIT * L;
-          // 引き継いだ速さ: 抑える前の範囲では v0 のまま、超えたら T·|v0| = c·L
-          if (unclamped) expect(info.carriedSpeed).toBeCloseTo(speed, 12);
-          else expect(info.carriedSpeed * T).toBeCloseTo(FLIGHT_CARRY_LIMIT * L, 9);
-
-          // t=0 の速度（ごく短い 1 歩の差分）
+          // 引き継いだ速さ（飛び始めの速さ）は、上限を超えても v0 のまま（超えた分は指数で減らす項で引き継ぐ）
+          expect(info.carriedSpeed).toBeCloseTo(speed, 12);
+          // 飛び始めの速度: 位置の式の時間微分が v0 に一致し、ごく短い 1 歩の差分も v0 に一致する
+          expect(m.currentVelocity(new Vector3()).distanceTo(v0)).toBeLessThan(1e-12);
           const p0 = m.position.clone();
-          const h = 1e-6;
+          const h = 1e-8;
           m.step(h, createMoveInput());
           const vStart = m.position.clone().sub(p0).divideScalar(h);
-          const carried = v0.clone().multiplyScalar(speed > 0 ? info.carriedSpeed / speed : 0);
-          expect(vStart.distanceTo(carried)).toBeLessThan(1e-3 * (1 + L / T));
-          if (unclamped) expect(vStart.distanceTo(v0)).toBeLessThan(1e-3 * (1 + L / T));
+          expect(vStart.distanceTo(v0)).toBeLessThan(1e-4 * speed + 1e-5 * (1 + L / T));
 
           let prevD = m.position.distanceTo(E);
           let approaching = false;
@@ -633,10 +631,10 @@ describe('FlyMotion: flyTo の速度の引き継ぎ（行き過ぎない・引�
     }
   });
 
-  it('進む方向へ向かう v0 では、終点までの距離が始めから単調に縮む', () => {
+  it('終点へ近づく向きの v0（進む方向となす角が 90° 未満）では、終点までの距離が始めから単調に縮む', () => {
     for (const L of Ls) {
       for (const speed of speeds) {
-        for (const angle of angles.filter((a) => a <= deg(90))) {
+        for (const angle of angles.filter((a) => a < deg(90))) {
           const { m, E } = start(L, speed, angle);
           let prevD = m.position.distanceTo(E);
           while (m.isFlying) {
@@ -650,23 +648,42 @@ describe('FlyMotion: flyTo の速度の引き継ぎ（行き過ぎない・引�
     }
   });
 
-  it('横向きの膨らみは、移動の距離の c × max g = 2.5 × 0.08192 ≈ 0.205 倍まで', () => {
-    const bound = FLIGHT_CARRY_LIMIT * flightCarry(0.2);
-    expect(bound).toBeCloseTo(0.2048, 9);
+  it('横向きの膨らみは、引き継ぎの項 c × max g ≈ 0.279 と、超えた分の項 0.4 を足した、移動の距離の 0.68 倍まで', () => {
+    const carryBound = FLIGHT_CARRY_LIMIT * flightCarry(0.2);
+    expect(carryBound).toBeCloseTo(3.4 * 0.08192, 9);
+    const bound = carryBound + FLIGHT_EXCESS_LIMIT;
     let worst = 0;
+    let worstCarryOnly = 0;
     for (const L of Ls) {
       for (const speed of speeds) {
         for (const angle of angles) {
           const { m } = start(L, speed, angle);
+          const T = m.flightInfo!.durationMs / 1000;
+          const carryOnly = T * speed <= FLIGHT_CARRY_LIMIT * L;
           while (m.isFlying) {
             m.step(1 / 240, createMoveInput());
-            worst = Math.max(worst, Math.hypot(m.position.x, m.position.y) / L);
+            const bulge = Math.hypot(m.position.x, m.position.y) / L;
+            worst = Math.max(worst, bulge);
+            if (carryOnly) worstCarryOnly = Math.max(worstCarryOnly, bulge);
           }
         }
       }
     }
     expect(worst).toBeLessThanOrEqual(bound + 1e-9);
-    expect(worst).toBeGreaterThan(bound * 0.95); // 速い横向きの v0 では、上限近くまで膨らむ（抑え方が効いている）
+    expect(worstCarryOnly).toBeLessThanOrEqual(carryBound + 1e-9); // 上限の範囲では、引き継ぎの項だけの膨らみ
+    expect(worst).toBeGreaterThan(carryBound); // 速い横向きの v0 では、超えた分の項のぶん、さらに膨らむ
+  });
+
+  it('飛び始めの前後で速さが連続する: 速い滑走から近い点へ飛んでも、最初の 1 フレーム（1/60 秒）の平均の速さが急に落ちない', () => {
+    // 1.8 単位/秒の滑走から距離 0.05 の前方の点へ（上限で切っていたときは、最初の 1 フレームで約 0.11〜0.14 倍に落ちた）
+    for (const [L, speed, minRatio] of [[0.05, 1.8, 0.6], [0.1, 1.8, 0.8], [0.02, 2, 0.25], [0.3, 2, 0.9]] as const) {
+      const { m } = start(L, speed, 0);
+      const p0 = m.position.clone();
+      m.step(1 / 60, createMoveInput());
+      const ratio = (m.position.distanceTo(p0) * 60) / speed;
+      expect(ratio).toBeGreaterThan(minRatio);
+      expect(ratio).toBeLessThanOrEqual(1 + 1e-9);
+    }
   });
 
   it('速い滑走（v0 1.8）から近い点（L 0.05）へ飛んでも、点の手前で止まり、通り越して戻らない', () => {
@@ -682,7 +699,7 @@ describe('FlyMotion: flyTo の速度の引き継ぎ（行き過ぎない・引�
   });
 
   it('刻み幅（dt）を変えても、途中と終わりの姿勢が一致する', () => {
-    for (const [L, speed, angle] of [[0.05, 1.8, 0], [0.3, 1, deg(90)], [1, 2, deg(150)]] as const) {
+    for (const [L, speed, angle] of [[0.05, 1.8, 0], [0.02, 2, deg(30)], [0.3, 1, deg(90)], [0.05, 2, deg(120)], [1, 2, deg(150)]] as const) {
       const a = start(L, speed, angle).m;
       const b = start(L, speed, angle).m;
       run(a, 0.3, 1 / 30, createMoveInput());

@@ -9,11 +9,55 @@ export const FLIGHT_ORIENT_END = 0.7;
 export const REDUCED_MOTION_DURATION_FACTOR = 0.5;
 
 /**
- * 引き継ぐ速度の上限（移動の距離 L に対する比）。`T·|v0| ≤ FLIGHT_CARRY_LIMIT·L` に抑える。
- * 引き継ぎの形 `t(1−t)⁴` と合わせて、進む方向の成分が終点を越えず、終点までの距離が引き返さず、
- * 横向きの膨らみが `0.08192 × 2.5 ≈ 0.205·L` に収まる（数値で確かめた範囲では 5 まで引き返さない）。
+ * 引き継ぐ速度の上限（移動の距離 L に対する比）。`T·|v0| ≤ FLIGHT_CARRY_LIMIT·L` までを引き継ぎの項 `T·v0·t(1−t)⁴` で引き継ぐ。
+ * 引き継ぎの形 `t(1−t)⁴` と合わせて、進む方向の成分が終点を越えず（5 まで）、終点までの距離が近づき始めたあとに離れない。
+ * 後者は、真横に近い v0 で √12 ≈ 3.46 が境目（飛び始めは、緩急で近づく距離 6·L·t² より、横へ進む距離 T·|v0|·t のほうが
+ * 終点までの距離を伸ばす: (T·|v0|)² > 12·L² で離れる）なので、少し下の 3.4 とする。この項による横向きの膨らみは
+ * `0.08192 × 3.4 ≈ 0.279·L` まで。上限を超えた分の速度は、捨てずに、指数で減らす項（`flightExcess`）で引き継ぐ。
  */
-export const FLIGHT_CARRY_LIMIT = 2.5;
+export const FLIGHT_CARRY_LIMIT = 3.4;
+
+/** 引き継ぎの上限を超えた分の速度を減らす、指数の時定数（秒）。移動の距離に対して大きすぎる分は、これより短くする（`flightExcessTimeConstant`）。 */
+export const FLIGHT_EXCESS_TIME_CONSTANT = 0.12;
+
+/**
+ * 上限を超えた分の速度 w が進める距離の上限（移動の距離 L に対する比）。指数の項の変位は `|w|·τ` を超えないので、
+ * `|w|·τ ≤ FLIGHT_EXCESS_LIMIT·k·L` となるように τ を縮める。k は、w が終点へ近づく向き（進む方向となす角 θ が 90° 未満）なら
+ * cos θ、そうでなければ 1。0.4 なら、引き継ぎの項（上限 3.4）と合わせても、進む方向の成分が終点を越えず、
+ * 近づき始めたら離れない（L 0.02〜3、|v0| 0.1〜2、θ 0°〜180° で確かめた）。近づく向きで cos θ を掛けるのは、
+ * 横向きの速さが近づく速さを上回って、近づき始めたあとに離れないようにするため（真横の少し手前では、超えた分はすぐ消える）。
+ * 終点から離れる向き（θ ≥ 90°）では、離れている間は近づき始めていないので、そのまま 0.4·L まで許す。
+ */
+export const FLIGHT_EXCESS_LIMIT = 0.4;
+
+/**
+ * 上限を超えた分の速度の大きさ `excessSpeed` を減らす時定数（秒）。`min(0.12, 0.4·k·L / excessSpeed)`（k は
+ * `FLIGHT_EXCESS_LIMIT` の説明のとおり。`cosAngle` は w と進む方向のなす角の余弦）。減らす分がない、または L が 0 なら 0
+ * （その分は引き継がない）。
+ */
+export function flightExcessTimeConstant(excessSpeed: number, travel: number, cosAngle: number): number {
+  if (!(excessSpeed > 0) || !(travel > 0) || !Number.isFinite(excessSpeed + travel + cosAngle)) return 0;
+  const k = cosAngle > 0 ? Math.min(1, cosAngle) : 1;
+  return Math.min(FLIGHT_EXCESS_TIME_CONSTANT, (FLIGHT_EXCESS_LIMIT * k * travel) / excessSpeed);
+}
+
+/**
+ * 上限を超えた分の速度 w の項の形。位置へ `w·h` として足す（秒の単位。`h = τ·(1 − e^(−s/τ))·(1 − f(t))`、
+ * s = t·T は経過秒、f は `flightEase`）。h(0) = 0、dh/ds(0) = 1（飛び始めの速度が w のぶん v0 に一致する）、
+ * h(1) = 0 と dh/ds(1) = 0（終わりの位置と速度に寄与しない）。0 ≤ h ≤ τ。範囲外と τ ≤ 0 は 0。
+ */
+export function flightExcess(t: number, durationSeconds: number, tau: number): number {
+  if (!(t > 0 && t < 1) || !(tau > 0) || !(durationSeconds > 0)) return 0;
+  return tau * -Math.expm1((-t * durationSeconds) / tau) * (1 - flightEase(t));
+}
+
+/** `flightExcess` の経過秒 s についての導関数 `e^(−s/τ)·(1 − f(t)) − τ·(1 − e^(−s/τ))·f′(t) / T`（t ≤ 0 は 1、t ≥ 1 は 0）。 */
+export function flightExcessDerivative(t: number, durationSeconds: number, tau: number): number {
+  if (!(tau > 0) || !(durationSeconds > 0) || !(t < 1)) return 0;
+  if (!(t > 0)) return 1;
+  const x = (-t * durationSeconds) / tau;
+  return Math.exp(x) * (1 - flightEase(t)) + tau * Math.expm1(x) * (flightEaseDerivative(t) / durationSeconds);
+}
 
 /**
  * 引き継ぎの形 `g(t) = t(1−t)⁴`。位置へ `T·v0·g(t)` として足す。g(0)=g(1)=0、g′(0)=1（t=0 で速度が v0）、g′(1)=0。

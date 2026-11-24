@@ -7,7 +7,7 @@
  *
  * - パラメータなしで開くとホームの視点から始まり、全点が画面内に投影される（横長・縦長の両方）
  * - 飛行モード・俯瞰モードのどちらでも、H でモードを変えずにホームの視点へ滑らかに戻る
- * - 移動中の W で中断する
+ * - 移動中の W で中断し、中断の前後のフレームで速さが連続している（その瞬間の移動の速度を、飛行の速度へ引き継ぐ）
  * - 真下を向く視点（?pos=0,2,0&look=0,0,0）で、O キーでモードを往復しても向きが跳ばない
  * ソフトウェア描画では 1 フレームが約 200 ミリ秒かかるので、待ち時間はフレーム数と状態の変化で決める。
  * 失敗があれば終了コード 1 で終わる。
@@ -18,6 +18,7 @@ const path = require('node:path');
 const { chromium } = require('playwright');
 const {
   loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, len, norm, waitReorient, expectedFlightDuration, flightEase,
+  waitSim, waitCameraIdle,
 } = require('./lib.cjs');
 
 const root = path.resolve(__dirname, '../..');
@@ -276,13 +277,36 @@ async function testHomeOverviewInterrupt(page, views) {
   await waitForMode(page, 'fly');
 }
 
+/** 描画ループの毎フレームの位置と状態を、ページの中で記録する（描画ループの更新のあとに読む）。 */
+async function startFrameLog(page) {
+  await page.evaluate(() => {
+    const log = (window.__frameLog = []);
+    window.__frameLogOn = true;
+    const tick = (ts) => {
+      if (!window.__frameLogOn) return;
+      const s = window.__explorer.getState();
+      log.push({ p: s.position, homing: s.homing, mode: s.mode, ts, effectiveSpeed: s.effectiveSpeed });
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
+}
+const stopFrameLog = (page) => page.evaluate(() => { window.__frameLogOn = false; return window.__frameLog; });
+/** 各フレームの平均の速さ（描画ループと同じく、1 フレームの時間は 0.1 秒までに丸める）。 */
+const frameSpeeds = (log) => log.map((x, i) => {
+  if (i === 0) return null;
+  const dt = Math.min(0.1, (x.ts - log[i - 1].ts) / 1000);
+  return dt > 0 ? len(sub(x.p, log[i - 1].p)) / dt : null;
+});
+
 async function testInterrupt(page, views) {
   console.log('\n[移動中に W で中断]');
   const inside = views[2];
   await setView(page, inside.pos, inside.look);
-  await frames(page, 3);
+  await waitSim(page, 0.3);
   const home = await homeView(page);
   const s0 = await state(page);
+  await startFrameLog(page);
   await page.keyboard.press('KeyH');
   await frames(page, 2);
   const mid = await state(page);
@@ -299,6 +323,18 @@ async function testInterrupt(page, views) {
   check('中断後はホームへ向かわず、W で前進する（ホームへ着いていない）', len(sub(end.position, home.pos)) > 0.1 && len(sub(end.position, cut.position)) > 0.01,
     `中断位置から ${len(sub(end.position, cut.position)).toFixed(3)} 進み、ホームまで ${len(sub(end.position, home.pos)).toFixed(3)}`);
   check('中断後も飛行モード', end.mode === 'fly' && !end.homing);
+  // 中断の前後: log[k] はホームへの移動の最後のフレーム、log[k + 1] は中断のあとの最初のフレーム（W で加速しはじめる）。
+  // 移動の速度を引き継ぐので、中断のあとのフレームの速さは、前のフレームから急に落ちない（その場で止めていたときは、ほぼ 0 から加速した）。
+  await waitCameraIdle(page);
+  const log = await stopFrameLog(page);
+  const k = log.map((x) => x.homing).lastIndexOf(true);
+  const speeds = frameSpeeds(log);
+  if (k < 1 || k + 1 >= log.length) { check('中断の前後のフレームが記録できる', false, `${log.length} フレーム、最後の移動 ${k}`); return; }
+  const before = speeds[k], after = speeds[k + 1];
+  console.log(`  [実測] 中断の前後の速さ ${speeds.slice(Math.max(1, k - 2), k + 4).map((v) => (v === null ? '-' : v.toFixed(3))).join(' → ')}` +
+    `（中断の前 ${before.toFixed(3)}、後 ${after.toFixed(3)}、W の目標速度 ${log[k + 1].effectiveSpeed.toFixed(3)}）`);
+  check('中断の前後で速さが連続している（中断の後のフレームの速さが、前のフレームの 0.5 倍以上・1.2 倍以下）',
+    before > 0 && after >= before * 0.5 && after <= before * 1.2, `前 ${before.toFixed(3)}、後 ${after.toFixed(3)}（比 ${(after / before).toFixed(2)}）`);
 }
 
 async function testStraightDown(browser, base) {

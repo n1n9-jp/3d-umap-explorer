@@ -7,6 +7,9 @@ import {
   flightCarryDerivative,
   flightEase,
   flightEaseDerivative,
+  flightExcess,
+  flightExcessDerivative,
+  flightExcessTimeConstant,
   reducedFlightDuration,
   scaledFlightDuration,
 } from './easing';
@@ -75,7 +78,7 @@ export interface FlightInfo {
   elapsedMs: number;
   /** 進み（0〜1。経過時間 / 所要時間）。緩急の前の値。 */
   progress: number;
-  /** 始めたときのカメラの速度の大きさ（単位/秒）。引き継いだ速度。 */
+  /** 飛び始めの速さ（単位/秒）。引き継いだ速度の大きさで、ふつうは始めたときのカメラの速さと一致する。 */
   carriedSpeed: number;
 }
 
@@ -127,8 +130,12 @@ interface FlightState {
   yawDelta: number;
   startPitch: number;
   endPitch: number;
-  /** 始めたときのカメラの速度（単位/秒。`T·|v0| ≤ FLIGHT_CARRY_LIMIT·L` に抑えたもの）。位置へ `T·v0·t·(1−t)⁴` として足す。 */
+  /** 始めたときのカメラの速度のうち、`T·|v| ≤ FLIGHT_CARRY_LIMIT·L` までの分（単位/秒）。位置へ `T·v·t·(1−t)⁴` として足す。 */
   startVelocity: Vector3;
+  /** 上限を超えた分の速度（単位/秒）。位置へ `w·flightExcess(t)`（時定数 `excessTau` の指数で減る）として足す。 */
+  excessVelocity: Vector3;
+  /** `excessVelocity` を減らす時定数（秒）。0 なら、その分はない。 */
+  excessTau: number;
   /** 動きを減らす設定で始めたか。操作で中断したとき、移動の速度を引き継がずに止める。 */
   reducedMotion: boolean;
   durationMs: number;
@@ -285,10 +292,22 @@ export class FlyMotion {
 
     const travel = this.position.distanceTo(end);
     const durationMs = reducedFlightDuration(scaledFlightDuration(baseMs, travel, options.cloudRadius), reduced);
-    // 引き継ぐ速さを、移動の距離に応じて抑える（T·|v0| ≤ c·L）。速い滑走から近い点へ飛んでも、経路が膨らみすぎない。
-    const carryLength = (durationMs / 1000) * startVelocity.length();
+    // 引き継ぎの項で引き継ぐ速さを、移動の距離に応じて抑える（T·|v| ≤ c·L）。速い滑走から近い点へ飛んでも、経路が膨らみすぎない。
+    // 上限を超えた分 w は、一瞬で切らずに、短い時定数の指数で減らす項として引き継ぐ（飛び始めの速さが v0 のまま連続する）。
+    // その項が進める距離は |w|·τ ≤ 0.4·cos θ·L（θ は v0 と進む方向のなす角。90° 以上なら 0.4·L）に抑える（終点を越えず、近づき始めたら離れない）。
+    const excessVelocity = new Vector3();
+    let excessTau = 0;
+    const speed0 = startVelocity.length();
+    const carryLength = (durationMs / 1000) * speed0;
     const carryMax = FLIGHT_CARRY_LIMIT * travel;
-    if (carryLength > carryMax) startVelocity.multiplyScalar(carryMax / carryLength);
+    if (carryLength > carryMax) {
+      excessVelocity.copy(startVelocity);
+      startVelocity.multiplyScalar(carryMax / carryLength);
+      excessVelocity.sub(startVelocity);
+      const cos = travel > 0 && speed0 > 0 ? end.clone().sub(this.position).dot(excessVelocity) / (travel * excessVelocity.length()) : 0;
+      excessTau = flightExcessTimeConstant(excessVelocity.length(), travel, cos);
+      if (!(excessTau > 0)) excessVelocity.set(0, 0, 0);
+    }
 
     this.velocity.set(0, 0, 0);
     this._gliding = false;
@@ -300,6 +319,8 @@ export class FlyMotion {
       startPitch: this.pitch,
       endPitch,
       startVelocity,
+      excessVelocity,
+      excessTau,
       reducedMotion: reduced,
       durationMs,
       elapsedMs: 0,
@@ -312,7 +333,8 @@ export class FlyMotion {
     const fl = this.flight;
     if (!fl) return null;
     const progress = fl.durationMs <= 0 ? 1 : Math.min(1, fl.elapsedMs / fl.durationMs);
-    return { durationMs: fl.durationMs, elapsedMs: fl.elapsedMs, progress, carriedSpeed: fl.startVelocity.length() };
+    const carriedSpeed = fl.startVelocity.clone().add(fl.excessVelocity).length();
+    return { durationMs: fl.durationMs, elapsedMs: fl.elapsedMs, progress, carriedSpeed };
   }
 
   cancelFlyTo(): void {
@@ -456,12 +478,14 @@ export class FlyMotion {
       this.pitch = fl.endPitch;
       this.flight = null;
     } else {
-      // 位置: 緩急 f(t) での補間に、始めの速度の引き継ぎ T·v0·t(1−t)⁴（t=0 で速度 v0、t=1 で位置・速度への寄与 0）を足す。
+      // 位置: 緩急 f(t) での補間に、始めの速度の引き継ぎ T·v·t(1−t)⁴（t=0 で速度 v、t=1 で位置・速度への寄与 0）と、
+      // 上限を超えた分 w の指数で減る項 w·τ(1−e^(−s/τ))(1−f(t))（t=0 で速度 w、t=1 で寄与 0）を足す。
       // 引き継ぎは終わりで (1−t)⁴ と、緩急の残り 1−f(t) ≈ 4(1−t)³ より速く消えるので、終点を越えて戻らない。
+      const T = fl.durationMs / 1000;
       const e = flightEase(t);
       this.position.lerpVectors(fl.startPosition, fl.endPosition, e);
-      const carry = (fl.durationMs / 1000) * flightCarry(t);
-      this.position.addScaledVector(fl.startVelocity, carry);
+      this.position.addScaledVector(fl.startVelocity, T * flightCarry(t));
+      if (fl.excessTau > 0) this.position.addScaledVector(fl.excessVelocity, flightExcess(t, T, fl.excessTau));
       // 向き: 進みの 70% で合い終える（着く前に対象を捉え終える）。
       const o = flightEase(t / FLIGHT_ORIENT_END);
       this.yaw = wrapAngle(fl.startYaw + fl.yawDelta * o);
@@ -483,14 +507,16 @@ export class FlyMotion {
     else this.flightVelocity(fl, this.velocity);
   }
 
-  /** 飛行の現在の速度（単位/秒）を `out` に書く。位置の式 `S + (E−S)·f(t) + T·v0·t(1−t)⁴` の時間微分。 */
+  /** 飛行の現在の速度（単位/秒）を `out` に書く。位置の式 `S + (E−S)·f(t) + T·v·t(1−t)⁴ + w·τ(1−e^(−s/τ))(1−f(t))` の時間微分。 */
   private flightVelocity(fl: FlightState, out: Vector3): Vector3 {
     const t = fl.durationMs <= 0 ? 1 : Math.min(1, fl.elapsedMs / fl.durationMs);
     if (t >= 1 || fl.durationMs <= 0) return out.set(0, 0, 0);
     const T = fl.durationMs / 1000;
     out.subVectors(fl.endPosition, fl.startPosition).multiplyScalar(flightEaseDerivative(t) / T);
-    // T·v0·g(t) の時間微分は v0·g′(t)（T で割るので、v0 に掛かる係数は g′ のまま）
-    return out.addScaledVector(fl.startVelocity, flightCarryDerivative(t));
+    // T·v·g(t) の時間微分は v·g′(t)（T で割るので、v に掛かる係数は g′ のまま）
+    out.addScaledVector(fl.startVelocity, flightCarryDerivative(t));
+    if (fl.excessTau > 0) out.addScaledVector(fl.excessVelocity, flightExcessDerivative(t, T, fl.excessTau));
+    return out;
   }
 
   private lookTowards(x: number, y: number, z: number): void {

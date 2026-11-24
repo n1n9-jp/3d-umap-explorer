@@ -3,10 +3,15 @@ import {
   FLIGHT_CARRY_LIMIT,
   FLIGHT_DURATION_MAX_FACTOR,
   FLIGHT_DURATION_MIN_FACTOR,
+  FLIGHT_EXCESS_LIMIT,
+  FLIGHT_EXCESS_TIME_CONSTANT,
   flightCarry,
   flightCarryDerivative,
   flightEase,
   flightEaseDerivative,
+  flightExcess,
+  flightExcessDerivative,
+  flightExcessTimeConstant,
   reducedFlightDuration,
   scaledFlightDuration,
 } from './easing';
@@ -125,5 +130,48 @@ describe('flightCarry: g(t) = t(1−t)⁴（始めの速度の引き継ぎの形
       const t = i / 10000;
       expect(FLIGHT_CARRY_LIMIT * flightCarry(t)).toBeLessThanOrEqual(1 - flightEase(t) + 1e-15);
     }
+  });
+});
+
+describe('flightExcess: 上限を超えた分の速度の項 h = τ(1−e^(−s/τ))(1−f(t))', () => {
+  const T = 0.6;
+  it('h(0)=h(1)=0、dh/ds(0)=1、dh/ds(1)=0、0 ≤ h ≤ τ', () => {
+    for (const tau of [0.12, 0.01, 1e-4]) {
+      expect(flightExcess(0, T, tau)).toBe(0);
+      expect(flightExcess(1, T, tau)).toBe(0);
+      expect(flightExcessDerivative(0, T, tau)).toBe(1);
+      expect(flightExcessDerivative(1, T, tau)).toBe(0);
+      expect(flightExcessDerivative(1 - 1e-9, T, tau)).toBeLessThan(1e-6);
+      for (let i = 0; i <= 1000; i++) {
+        const h = flightExcess(i / 1000, T, tau);
+        expect(h).toBeGreaterThanOrEqual(0);
+        expect(h).toBeLessThanOrEqual(tau);
+      }
+    }
+    expect(flightExcess(0.5, T, 0)).toBe(0);
+    expect(flightExcessDerivative(0, T, 0)).toBe(0);
+  });
+
+  it('導関数が、経過秒についての差分の傾きと一致する', () => {
+    const h = 1e-7;
+    for (const tau of [0.12, 0.03]) {
+      for (const t of [0.01, 0.1, 0.3, 0.6, 0.95]) {
+        const s = t * T;
+        const num = (flightExcess((s + h) / T, T, tau) - flightExcess((s - h) / T, T, tau)) / (2 * h);
+        expect(flightExcessDerivative(t, T, tau)).toBeCloseTo(num, 6);
+      }
+    }
+  });
+
+  it('時定数は min(0.12, 0.4·k·L / |w|)。近づく向きでは k = cos θ、離れる向き・真横では k = 1。L が 0 なら 0', () => {
+    expect(FLIGHT_EXCESS_TIME_CONSTANT).toBe(0.12);
+    expect(flightExcessTimeConstant(0.1, 1, 1)).toBe(0.12);
+    expect(flightExcessTimeConstant(2, 0.05, 1)).toBeCloseTo((FLIGHT_EXCESS_LIMIT * 0.05) / 2, 15);
+    expect(flightExcessTimeConstant(2, 0.05, 0.5)).toBeCloseTo((FLIGHT_EXCESS_LIMIT * 0.5 * 0.05) / 2, 15);
+    expect(flightExcessTimeConstant(2, 0.05, 0)).toBeCloseTo((FLIGHT_EXCESS_LIMIT * 0.05) / 2, 15);
+    expect(flightExcessTimeConstant(2, 0.05, -0.7)).toBeCloseTo((FLIGHT_EXCESS_LIMIT * 0.05) / 2, 15);
+    expect(flightExcessTimeConstant(2, 0, 1)).toBe(0);
+    expect(flightExcessTimeConstant(0, 1, 1)).toBe(0);
+    expect(flightExcessTimeConstant(Number.NaN, 1, 1)).toBe(0);
   });
 });

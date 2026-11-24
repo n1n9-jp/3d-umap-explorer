@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { FLIGHT_ORIENT_END, flightEase } from '../controls/easing';
+import { FLIGHT_ORIENT_END, flightEase, flightEaseDerivative } from '../controls/easing';
 import { HomeFlight, homeFlightDuration, interpolatePose, poseLookAt, type FlightPose } from './homeFlight';
 
 const A: FlightPose = { position: [1, 0, 0], yaw: 0.2, pitch: 0.1 };
@@ -152,5 +152,28 @@ describe('homeFlightDuration', () => {
     const pb = b.advance(0.3 * 1.7);
     expect(pb.position[0]).toBeCloseTo(pa.position[0], 12);
     expect(pb.yaw).toBeCloseTo(pa.yaw, 12);
+  });
+});
+
+describe('HomeFlight.velocity', () => {
+  it('位置の式の時間微分 (to − from)·f′(t)/T と一致し、差分の傾きとも一致する。始まりと着いたあとは 0', () => {
+    const T = 1.3;
+    const f = new HomeFlight(A, B, T);
+    expect(Math.hypot(...f.velocity())).toBe(0);
+    const h = 1e-6;
+    for (const s of [0.1, 0.4, 0.9, 1.2]) {
+      const a = new HomeFlight(A, B, T);
+      const p0 = a.advance(s).position;
+      const v = a.velocity();
+      const p1 = a.advance(h).position;
+      for (let k = 0; k < 3; k++) {
+        const want = ((B.position[k] as number) - (A.position[k] as number)) * flightEaseDerivative(s / T) / T;
+        expect(v[k]).toBeCloseTo(want, 12);
+        expect(v[k]).toBeCloseTo(((p1[k] as number) - (p0[k] as number)) / h, 4);
+      }
+    }
+    f.advance(T);
+    expect(f.velocity()).toEqual([0, 0, 0]);
+    expect(new HomeFlight(A, B, 0).velocity()).toEqual([0, 0, 0]);
   });
 });

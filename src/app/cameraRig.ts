@@ -144,6 +144,8 @@ export class CameraRig {
   private readonly reducedMotion: ReducedMotionQuery;
   /** ホームの視点へ移動中なら、その移動。 */
   private flight: HomeFlight | null = null;
+  /** ホームへの移動を「動きを減らす」設定で始めたか。操作で中断したとき、移動の速度を引き継がずに止める。 */
+  private flightReduced = false;
   /** flyTo による自動移動の最中（速度の自動調整を止めている） */
   private flying = false;
   /** 飛行 → 俯瞰の切り替えで、点群の中心へ向き直している最中なら、その動き。 */
@@ -305,7 +307,9 @@ export class CameraRig {
    * 位置と向きの両方を補間し、始まりと終わりを緩やかにする。所要時間は、基準 `durationSeconds`（既定 1 秒。
    * ミニマップのクリックは 0.6 秒）を、移動の距離に応じて 0.8〜1.8 倍に伸縮する（点群の半径 `cloudRadius` との比。
    * 「動きを減らす」設定なら、さらに 0.5 倍）。移動中に操作（飛行モードでは移動キーとドラッグ、
-   * 俯瞰モードではドラッグとホイール・ピンチ）をするか、`setView` を呼ぶと中断してその場に留まる。
+   * 俯瞰モードではドラッグとホイール・ピンチ）をすると中断し、その瞬間の移動の速度を引き継ぐ（`interruptHome`。
+   * 飛行モードでは飛行の速度として加速・滑走へつなぎ、俯瞰モードでは残った動きとして時定数 0.15 秒で消す。
+   * 「動きを減らす」設定では、その場で止まる）。`setView`・`flyTo` を呼ぶと、中断してその場に留まる。
    * 移動の間は、速度の自動調整は働かない（終わったあと、着いた位置から調整し直す）。
    */
   goHome(view: ViewSpec, durationSeconds: number = HOME_DURATION_SECONDS): void {
@@ -320,6 +324,34 @@ export class CameraRig {
     const to: FlightPose = { position: [...view.pos], ...viewAngles(view, from) };
     const seconds = homeFlightDuration(from, to, durationSeconds, this.cloudRadius, this.reducedMotion.reduced);
     this.flight = new HomeFlight(from, to, seconds);
+    this.flightReduced = this.reducedMotion.reduced;
+    this.notify();
+  }
+
+  /**
+   * ホームの視点への移動を、操作で中断する。その瞬間の移動の速度（位置の式の時間微分）を引き継ぐので、カメラはその場で急に止まらない。
+   * 飛行モードでは飛行の速度へ渡し、移動キーの入力があれば加速へ、なければ滑走へつなぐ（速度の自動調整は、いまの係数から平滑化を続ける）。
+   * 俯瞰モードでは残った動き（時定数 0.15 秒）へ渡して消す。中断した操作（ドラッグ・ホイール・ピンチ）は、そのまま回転や寄りとして働く。
+   * 「動きを減らす」設定（で始めた移動、またはいま有効）なら、その場で止まる（`cancelHome`）。移動中でなければ何もしない。
+   */
+  private interruptHome(): void {
+    const flight = this.flight;
+    if (!flight) return;
+    if (this.flightReduced || this.reducedMotion.reduced) {
+      this.cancelHome();
+      return;
+    }
+    const velocity = new Vector3(...flight.velocity());
+    this.flight = null;
+    if (this._mode === 'fly') {
+      this.fly.setVelocity(velocity);
+      // 速度を引き継いで動き続けるので、いまの係数から平滑化を続ける（点へ飛ぶ移動を操作で中断したときと同じ）
+      if (velocity.lengthSq() > 0) this.autoSpeed?.continueFrom(this.fly.speedScale);
+      else this.autoSpeed?.reset();
+    } else {
+      this.residual.addVelocity(velocity);
+      this.autoSpeed?.reset();
+    }
     this.notify();
   }
 
@@ -614,11 +646,11 @@ export class CameraRig {
   private readonly onKeyDown = (e: KeyboardEvent): void => {
     if (!this.flight || this._mode !== 'fly' || !FLY_MOVE_CODES.has(e.code)) return;
     if (e.ctrlKey || e.metaKey || e.altKey || isFromEditable(e)) return;
-    this.cancelHome();
+    this.interruptHome();
   };
 
   private readonly onPointerDown = (e: PointerEvent): void => {
-    if (this.flight && e.button === 0) this.cancelHome();
+    if (this.flight && e.button === 0) this.interruptHome();
   };
 
   /**
@@ -626,7 +658,7 @@ export class CameraRig {
    * 飛行モードのホイールは速度を変えるだけなので、移動は続ける。
    */
   private readonly onWheel = (e: WheelEvent): void => {
-    if (this.flight && this._mode === 'overview' && e.deltaY !== 0) this.cancelHome();
+    if (this.flight && this._mode === 'overview' && e.deltaY !== 0) this.interruptHome();
   };
 
   /**

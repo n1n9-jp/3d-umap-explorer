@@ -1,4 +1,4 @@
-import { FLIGHT_ORIENT_END, flightEase, reducedFlightDuration, scaledFlightDuration } from '../controls/easing';
+import { FLIGHT_ORIENT_END, flightEase, flightEaseDerivative, reducedFlightDuration, scaledFlightDuration } from '../controls/easing';
 import { directionFromAngles, type Vec3, type ViewAngles } from '../render/view';
 
 /**
@@ -79,6 +79,20 @@ export class HomeFlight {
   /** 進み具合（0〜1、イージング前）。 */
   get progress(): number {
     return this.durationSeconds > 0 ? Math.min(1, this.elapsed / this.durationSeconds) : 1;
+  }
+
+  /**
+   * いまの移動の速度（単位/秒。位置の式 `from + (to − from)·f(t)` の時間微分 `(to − from)·f′(t) / T`）。
+   * 着いたあと（所要時間 0 を含む）は 0。操作で中断したとき、その瞬間の速度を引き継ぐために使う。
+   */
+  velocity(): Vec3 {
+    if (this.done) return [0, 0, 0];
+    const k = flightEaseDerivative(this.progress) / this.durationSeconds;
+    return [
+      (this.to.position[0] - this.from.position[0]) * k,
+      (this.to.position[1] - this.from.position[1]) * k,
+      (this.to.position[2] - this.from.position[2]) * k,
+    ];
   }
 
   /** `dt` 秒進めて、そのときの姿勢を返す。`dt` が負・非有限なら進めない。終点では `to` をそのまま返す。 */

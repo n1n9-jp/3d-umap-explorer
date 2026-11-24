@@ -330,6 +330,17 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
     this.motion.setDirection(this.camera.getWorldDirection(this.dirTmp));
   }
 
+  /**
+   * 移動の速度（ワールド座標、単位/秒）を `velocity` にする。位置・向き・キーの入力・回転の慣性は保つ。
+   * 外部が動かしていたカメラ（ホームへの移動など）を操作で中断したとき、その瞬間の速度から、
+   * キーの入力があれば加速へ、なければ滑走へ滑らかにつなげるために使う。自動移動（`flyTo`）の最中なら、それは中断する。
+   */
+  setVelocity(velocity: Vector3): void {
+    if (!this._enabled || this.disposed) return;
+    this.motion.cancelFlyTo();
+    if (Number.isFinite(velocity.x + velocity.y + velocity.z)) this.motion.velocity.copy(velocity);
+  }
+
   /** 自動移動の最中なら true。 */
   get isFlying(): boolean {
     return this.motion.isFlying;
@@ -358,7 +369,7 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
    * 緩急は始めと終わりが緩やかで、速さの山が手前（`flightEase`）。基準の所要時間（既定 600 ミリ秒）は、移動の距離と
    * `cloudRadius` に応じて 0.8〜1.8 倍に伸縮する。動いていたカメラ（キーを離したあとの滑走中など）の速度は引き継ぐ。
    * 「動きを減らす」設定（`prefers-reduced-motion: reduce`）なら、所要時間は 0.5 倍で、速度は引き継がない。
-   * 引き継ぐ速さは、`T·|v0| ≤ 2.5 × 移動の距離` に抑える（近い点へ速く滑り込んでも、通り越して戻らない）。
+   * 引き継ぎの項で引き継ぐ速さは `T·|v0| ≤ 3.4 × 移動の距離` までで、超えた分は短い時定数の指数で減らす（飛び始めの速さが連続し、近い点へ速く滑り込んでも、通り越して戻らない）。
    * 移動中にキー移動やドラッグ回転をすると中断し、その瞬間の移動の速度を引き継いで、加速（キーの入力があるとき）や
    * 滑走（ないとき）へ滑らかにつなげる（動きを減らす設定では、その場で止まる）。ホイールは中断しない。
    */

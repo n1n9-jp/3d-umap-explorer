@@ -1688,3 +1688,35 @@ describe('FlyCameraControls: 「動きを減らす」設定の問い合わせと
     expect(numeric.distanceTo(v)).toBeLessThan(v.length() * 1e-2);
   });
 });
+
+describe('FlyCameraControls.setVelocity', () => {
+  it('移動の速度を与えると、キーの入力がなければ滑走し、あれば目標速度へ加速する。位置と向きは変えない', () => {
+    const r = createRig();
+    const dir0 = viewDirection(r.camera);
+    r.controls.setVelocity(new Vector3(0.8, 0, 0));
+    expect(r.camera.position.length()).toBe(0);
+    expect(r.controls.getResidualMotion().velocity.x).toBeCloseTo(0.8, 12);
+    r.controls.update(1 / 60);
+    expect(r.camera.position.x).toBeGreaterThan(0.8 / 60 * 0.95);
+    expect(r.controls.isGliding).toBe(true);
+    expect(viewDirection(r.camera).distanceTo(dir0)).toBeLessThan(1e-12);
+
+    const k = createRig();
+    k.controls.setVelocity(new Vector3(0.8, 0, 0));
+    keydown(k, 'KeyW');
+    frames(k.controls, 1);
+    const v = k.controls.getResidualMotion().velocity;
+    expect(Math.abs(v.x)).toBeLessThan(0.01); // 横の速さは消え、前進の目標速度へ
+    expect(-v.z).toBeCloseTo(k.controls.speed, 2);
+  });
+
+  it('無効なとき・有限でない速度は無視する', () => {
+    const r = createRig();
+    r.controls.setVelocity(new Vector3(Number.NaN, 0, 0));
+    expect(r.controls.getResidualMotion().velocity.length()).toBe(0);
+    r.controls.enabled = false;
+    r.controls.setVelocity(new Vector3(1, 0, 0));
+    r.controls.enabled = true;
+    expect(r.controls.getResidualMotion().velocity.length()).toBe(0);
+  });
+});
