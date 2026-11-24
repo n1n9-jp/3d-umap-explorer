@@ -10,7 +10,11 @@
  * 飛行でクラスタの内部へ進んだ位置と、俯瞰モードのスクリーンショットも保存する。
  * 移動量は速度の係数 1 を前提にするので、始めに T キーで速度の自動調整を無効にする。
  *
- * ドラッグを離したあとの回転の慣性（時定数 0.3 秒）は、離す直前の速さで決まる。ソフトウェア描画ではマウス
+ * モードの切り替え（O）は、飛行 → 俯瞰で、位置を保ったまま 0.5 秒で点群の中心へ向き直し（`getState().reorienting`。向きのずれが
+ * 3° 未満なら何もしない）、切り替えた瞬間に残っている移動の速度と回転の慣性を、時定数 0.15 秒で減らして消す。O のあとに向きや位置を
+ * 比べる検証は、`sampleUntil` で向き直しの完了を（模擬の時間で）待ち、残った動きが消えるまで `waitSim` で待ってから比べる。
+ *
+ * ドラッグを離したあとの回転の慣性（時定数は飛行モード 0.35 秒・俯瞰モード 0.45 秒）は、離す直前の速さで決まる。ソフトウェア描画ではマウス
  * イベントが 1 つずつ数百ミリ秒かかって届くので、Playwright の `mouse.move(steps)` では速さが出ない。そこで、
  * 回転量を厳密に測る既存の検証は「止めてから離す」（離す前に 250 ミリ秒待つ）形にし、慣性の検証は CDP の
  * `Input.dispatchMouseEvent` へ、押す・動かす・離すの時刻（`timestamp`）を指定して一気に送る（ブラウザの入力の
@@ -21,7 +25,7 @@ const { execSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require('playwright');
-const { loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, len, norm, pointerGesture, flickPoints } = require('./lib.cjs');
+const { loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, add, len, norm, pointerGesture, flickPoints } = require('./lib.cjs');
 
 const root = path.resolve(__dirname, '../..');
 const args = process.argv.slice(2);
@@ -172,6 +176,17 @@ async function waitSim(page, seconds) {
   while (sim < seconds) sim += simSecondsOf(await frames(page, 1));
 }
 
+/** 2 つの標本で、位置と向きが同じか。 */
+const sameView = (a, b) => angleBetween(a.direction, b.direction) < 1e-9 && len(sub(a.position, b.position)) < 1e-9;
+
+/**
+ * モードを切り替えたあと、向き直しと、残った動きの減衰がすべて終わる（連続した 2 標本で位置と向きが同じになる）まで待つ。
+ * 残った移動の速度は時定数 0.15 秒で減り、1e-5 単位/秒を下回ると止まる（基準速度 0.45 で約 1.6 秒）。
+ */
+async function sampleUntilStill(page, maxSimSeconds = 4) {
+  return sampleUntil(page, (s, all) => all.length >= 2 && !s.reorienting && !s.rotating && sameView(all[all.length - 2], s), maxSimSeconds);
+}
+
 // ---------- 検証本体 ----------
 
 async function testMovement(page, view) {
@@ -276,10 +291,15 @@ async function testModes(page, view, centerOf) {
 
   await page.keyboard.press('KeyO');
   await page.waitForFunction(() => window.__explorer.getState().mode === 'overview');
-  await frames(page, 3);
-  const o0 = await state(page);
-  check('O で俯瞰モードへ。位置と向きが変わらない', maxAbsDiff(f0.position, o0.position) < 1e-6 && maxAbsDiff(f0.direction, o0.direction) < 1e-6,
-    `位置の差 ${maxAbsDiff(f0.position, o0.position).toExponential(1)}, 向きの差 ${maxAbsDiff(f0.direction, o0.direction).toExponential(1)}`);
+  const oq = await sampleUntil(page, (s) => !s.reorienting);
+  const o0 = oq[oq.length - 1];
+  // 位置は保たれ、向きは点群の中心へ向く（中心とのずれが 3° 未満なら向きも変わらない）
+  const toCenter0 = norm(sub(centerOf, f0.position));
+  const gap0 = angleBetween(f0.direction, toCenter0);
+  const aimed = gap0 < (3 * Math.PI) / 180 ? angleBetween(o0.direction, f0.direction) < 1e-6 : angleBetween(o0.direction, toCenter0) < 1e-6;
+  check('O で俯瞰モードへ。位置が変わらず、向きは点群の中心へ向く（ずれが 3° 未満なら変わらない）',
+    !oq.timedOut && maxAbsDiff(f0.position, o0.position) < 1e-6 && aimed,
+    `中心とのずれ ${(gap0 * 180 / Math.PI).toFixed(1)}°、位置の差 ${maxAbsDiff(f0.position, o0.position).toExponential(1)}、向きの差（中心の向きとの角度）${(angleBetween(o0.direction, toCenter0) * 180 / Math.PI).toExponential(1)}°`);
   check('俯瞰モードの回転の中心は点群の中心', o0.pivot && maxAbsDiff(o0.pivot, centerOf) < 1e-6, `pivot ${o0.pivot && fmt(o0.pivot)}`);
   const hudO = await hudText(page);
   check('HUD が俯瞰モードの表示になる', hudO.includes('モード 俯瞰') && hudO.includes('O 飛行モードへ'));
@@ -330,16 +350,134 @@ async function testModes(page, view, centerOf) {
 
   // 切り替えの瞬間に W を押し続けていても、あとで動き続けない
   await page.keyboard.down('KeyW');
-  await frames(page, 3);
+  await waitSim(page, 1); // 基準速度に達するまで押し続ける
   await page.keyboard.press('KeyO');
-  await frames(page, 2);
+  await waitSim(page, 0.3);
   await page.keyboard.up('KeyW');
   await page.keyboard.press('KeyO');
-  await frames(page, 5);
+  await waitSim(page, 2.5); // 残った移動の速度が消えるまで待つ
   const k0 = await state(page);
   await frames(page, 5);
   const k1 = await state(page);
   check('W を押したままモードを切り替えても、キーが押しっぱなし扱いにならない', k0.mode === 'fly' && maxAbsDiff(k0.position, k1.position) < 1e-9);
+}
+
+/**
+ * W で基準速度に達してから O を押すと、移動の速度は急に止まらず、時定数 0.15 秒で減りながら進み、やがて止まる
+ * （総距離は 速度 × 0.15 秒）。進む向きは、押していた向き（視線）。
+ */
+async function testResidualMovement(page) {
+  console.log('\n[切り替えた瞬間に残っている移動の速度]');
+  const base = await state(page);
+  await setView(page, base.position, add(base.position, [0, 0, -1])); // 水平に -Z を向く
+  await waitSim(page, 0.5);
+  await page.keyboard.down('KeyW');
+  await waitSim(page, 1.2); // 時定数 0.12 秒の応答なので、十分に基準速度へ達する
+  // 切り替える直前の状態を、O のキーイベントと同じ同期の処理で読む（W を押している間にも進むので、別々に読むと距離がずれる）
+  const { pre, post } = await page.evaluate(() => {
+    const pre = window.__explorer.getState();
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyO', bubbles: true }));
+    return { pre, post: window.__explorer.getState() };
+  });
+  await page.keyboard.up('KeyW');
+  const q = await sampleUntilStill(page);
+  const last = q[q.length - 1];
+  const moved = sub(last.position, pre.position);
+  const total = pre.effectiveSpeed * 0.15; // 基準速度 × 時定数
+  check('飛行 → 俯瞰: 切り替えの瞬間は跳ばず、そのあと移動の速度は急に止まらず、減りながら進んで止まる（総距離は 速度 × 0.15 秒）',
+    post.mode === 'overview' && len(sub(post.position, pre.position)) < 1e-9 && !q.timedOut &&
+    len(sub(q[0].position, pre.position)) > 1e-4 && len(moved) > total * 0.95 && len(moved) < total * 1.001 && cos(moved, pre.direction) > 0.999,
+    `実速度 ${pre.effectiveSpeed.toFixed(3)} → 総距離 ${len(moved).toFixed(4)}（見込み ${total.toFixed(4)}）、最初の標本までの移動 ${len(sub(q[0].position, pre.position)).toFixed(4)}、進んだ向きと視線の cos ${cos(moved, pre.direction).toFixed(4)}`);
+  check('残った動きが消えたあと、位置も向きも変わらない（rotating も reorienting も false）', (await staysStill(page, 4)) && !last.reorienting);
+  await page.keyboard.press('KeyO');
+  await page.waitForFunction(() => window.__explorer.getState().mode === 'fly');
+  await sampleUntilStill(page);
+}
+
+/**
+ * 中心が視野の外（背後）にある姿勢から O を押すと、位置を保ったまま視線が点群の中心へ向き、そのあとのドラッグで、
+ * 中心が画面の中央付近に留まったまま回る。向き直しの最中の状態、ドラッグ・ホイール・O による中断も確かめる。
+ */
+async function testReorient(page, center) {
+  console.log('\n[飛行 → 俯瞰: 点群の中心へ向き直す]');
+  const cx = width / 2, cy = height / 2;
+  const away = add(center, [1.4, 0.4, 1.5]);
+  const behind = sub(away, center);
+  const lookAway = add(away, [-behind[0], behind[1], behind[2]]); // 中心から外れた向き（中心は視野の外）
+  const place = async () => {
+    await page.evaluate(() => { const s = window.__explorer.getState(); if (s.mode !== 'fly') window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyO', bubbles: true })); });
+    await page.waitForFunction(() => window.__explorer.getState().mode === 'fly');
+    await setView(page, away, lookAway);
+    await sampleUntilStill(page);
+  };
+  const gapOf = (s) => angleBetween(s.direction, norm(sub(center, s.position))); // 視線と、中心の向きのなす角
+  const pressO = () => page.evaluate(() => { window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyO', bubbles: true })); return window.__explorer.getState(); });
+  const canvasEvent = (kind) => page.evaluate((k) => {
+    const el = [...document.querySelectorAll('canvas')].filter((c) => c.id !== 'info-image').sort((a, b) => b.clientWidth - a.clientWidth)[0];
+    if (k === 'down') el.dispatchEvent(new PointerEvent('pointerdown', { button: 0, pointerId: 41, clientX: 400, clientY: 300, bubbles: true }));
+    else if (k === 'up') el.dispatchEvent(new PointerEvent('pointerup', { button: 0, pointerId: 41, clientX: 400, clientY: 300, bubbles: true }));
+    else el.dispatchEvent(new WheelEvent('wheel', { deltaY: 100, deltaMode: 0, bubbles: true, cancelable: true }));
+    return window.__explorer.getState();
+  }, kind);
+
+  // 向き直し: 位置を保ち、視線が中心を向く
+  await place();
+  const f0 = await state(page);
+  check('（前提）中心が視野の外（背後）にある', gapOf(f0) > 1.2, `視線と中心の向きのなす角 ${(gapOf(f0) * 180 / Math.PI).toFixed(1)}°`);
+  const first = await pressO();
+  check('O の直後は、俯瞰モードで向き直しの最中（reorienting）。homing ではなく、位置も向きもまだ動いていない',
+    first.mode === 'overview' && first.reorienting && !first.homing && maxAbsDiff(first.position, f0.position) < 1e-9 && angleBetween(first.direction, f0.direction) < 1e-9, JSON.stringify({ mode: first.mode, reorienting: first.reorienting, homing: first.homing }));
+  const q = await sampleUntil(page, (s) => !s.reorienting);
+  const last = q[q.length - 1];
+  const gaps = [gapOf(f0), ...q.map(gapOf)];
+  check('向き直しの最中は位置が変わらず、視線は中心へ近づき続ける（戻らない）', q.every((s) => len(sub(s.position, f0.position)) < 1e-9) && gaps.slice(1).every((g, i) => g <= gaps[i] + 1e-9),
+    `視線と中心のなす角 ${gaps.map((g) => (g * 180 / Math.PI).toFixed(0)).join('° → ')}°`);
+  check('向き直しが終わると（reorienting が false）、視線が中心を向き、回転の中心は点群の中心', !q.timedOut && !last.reorienting && gapOf(last) < 1e-6 && last.pivot && maxAbsDiff(last.pivot, center) < 1e-6,
+    `視線と中心のなす角 ${(gapOf(last) * 180 / Math.PI).toExponential(1)}°、${q.length} 標本、模擬の時間 ${last.simSeconds.toFixed(2)} 秒以上`);
+
+  // そのあとのドラッグで、中心が画面の中央付近に留まったまま回る
+  const dists = [len(sub(last.position, center))];
+  let maxGap = 0;
+  let moved = 0;
+  for (const [dx, dy] of [[150, -60], [-250, 0], [0, 120]]) {
+    const before = await state(page);
+    await drag(page, cx, cy, cx + dx, cy + dy);
+    const after = await state(page);
+    moved += len(sub(after.position, before.position));
+    dists.push(len(sub(after.position, center)));
+    maxGap = Math.max(maxGap, gapOf(after));
+  }
+  const fovTan = Math.tan((30 * Math.PI) / 180); // 縦の視野角 60°
+  const offPx = (Math.tan(maxGap) / fovTan) * (height / 2);
+  check('そのあとのドラッグで、中心が画面の中央付近に留まったまま回る（中心の向きと視線のずれが 0.5° 未満）', moved > 0.1 && maxGap < (0.5 * Math.PI) / 180 && dists.every((d) => Math.abs(d - dists[0]) < 1e-4),
+    `位置の移動 ${moved.toFixed(3)}、最大のずれ ${(maxGap * 180 / Math.PI).toExponential(1)}°（画面で約 ${offPx.toFixed(2)} px）、中心までの距離 ${dists.map((d) => d.toFixed(4)).join(' → ')}`);
+
+  // 中断: ドラッグ（左ボタンの押下）・ホイール・O のどれでも、向き直しをやめる。回転の中心は点群の中心のまま
+  for (const how of ['ドラッグ', 'ホイール']) {
+    await place();
+    await pressO();
+    const cut = await canvasEvent(how === 'ドラッグ' ? 'down' : 'wheel');
+    if (how === 'ドラッグ') await canvasEvent('up');
+    const c1 = await state(page);
+    await frames(page, 3);
+    const c2 = await state(page);
+    check(`向き直しの最中に${how}で中断すると、その場の向きに留まる。回転の中心は点群の中心のまま`,
+      cut.mode === 'overview' && !cut.reorienting && !c2.reorienting && c2.pivot && maxAbsDiff(c2.pivot, center) < 1e-6 && gapOf(c2) > 1,
+      `中断のあと視線と中心のなす角 ${(gapOf(c2) * 180 / Math.PI).toFixed(0)}°`);
+    check(`中断のあと、向きは動かない（${how}）`, angleBetween(c1.direction, c2.direction) < 1e-9 && angleBetween(cut.direction, c2.direction) < 1e-9);
+  }
+  await place();
+  await pressO();
+  await frames(page, 1);
+  const mid = await state(page);
+  const back = await pressO();
+  const b1 = await state(page);
+  await frames(page, 3);
+  const b2 = await state(page);
+  check('向き直しの最中に O で飛行モードへ戻すと、向き直しをやめ、その時点の姿勢から飛行を続ける',
+    mid.reorienting && back.mode === 'fly' && !back.reorienting && sameView(b1, b2) && len(sub(b1.position, mid.position)) < 1e-9 && (await state(page)).pivot === null,
+    `戻したときの視線と中心のなす角 ${(gapOf(b1) * 180 / Math.PI).toFixed(0)}°`);
+  await place();
 }
 
 
@@ -518,9 +656,11 @@ async function testInertiaFly(page, inside) {
   await page.waitForFunction(() => window.__explorer.getState().mode === 'overview');
   await frames(page, 1);
   const m0 = await state(page);
-  await frames(page, 3);
-  const m1 = await state(page);
-  check('慣性の間に O でモードを切り替えると、慣性は止まる（切り替えのあとに回らない）', m0.mode === 'overview' && !m0.rotating && !m1.rotating && angleBetween(m0.direction, m1.direction) < 1e-9 && len(sub(m0.position, m1.position)) < 1e-9);
+  const mq = await sampleUntilStill(page);
+  const m1 = mq[mq.length - 1];
+  check('慣性の間に O でモードを切り替えると、操作の慣性は止まり、残った回転は短い時間で消えて、そのあとは回らない',
+    m0.mode === 'overview' && !m0.rotating && !mq.timedOut && !m1.rotating && !m1.reorienting && len(sub(m0.position, m1.position)) < 1e-9 && (await staysStill(page)),
+    `位置の差 ${len(sub(m0.position, m1.position)).toExponential(1)}、模擬の時間 ${m1.simSeconds.toFixed(2)} 秒以上`);
   await page.keyboard.press('KeyO');
   await page.waitForFunction(() => window.__explorer.getState().mode === 'fly');
   await frames(page, 2);
@@ -652,16 +792,21 @@ async function testInertiaOverview(page, center) {
   await place();
   await pointerGesture(page, flickPoints(cx, cy, 120, 0), 1);
   await sampleFrames(page, (x) => x.rotating, 3);
+  const pre = await state(page);
   await page.keyboard.press('KeyO');
   await page.waitForFunction(() => window.__explorer.getState().mode === 'fly');
   await frames(page, 1);
   const r0 = await state(page);
-  await frames(page, 3);
-  const r1 = await state(page);
-  check('俯瞰モードの慣性の間に O で飛行モードへ切り替えると、慣性は止まる', !r0.rotating && !r1.rotating && angleBetween(r0.direction, r1.direction) < 1e-9 && len(sub(r0.position, r1.position)) < 1e-9);
+  const rq = await sampleUntilStill(page);
+  const r1 = rq[rq.length - 1];
+  // 残った周回は、点群の中心のまわりで短い時間（時定数 0.15 秒）だけ続いて止まる。中心までの距離は保たれる
+  const d0 = len(sub(pre.position, center));
+  check('俯瞰モードの慣性の間に O で飛行モードへ切り替えると、操作の慣性は止まり、残った周回は中心のまわりで短い時間で消える',
+    !r0.rotating && !rq.timedOut && !r1.rotating && [r0, ...rq].every((s) => Math.abs(len(sub(s.position, center)) - d0) < 1e-4) && (await staysStill(page)),
+    `中心までの距離 ${d0.toFixed(4)} → ${len(sub(r1.position, center)).toFixed(4)}、模擬の時間 ${r1.simSeconds.toFixed(2)} 秒以上`);
 }
 
-async function testInertiaReducedMotion(browser, base) {
+async function testInertiaReducedMotion(browser, base, center) {
   console.log('\n[「視差効果を減らす」設定]');
   const page = await openPage(browser, base, '', { reducedMotion: true });
   await frames(page, 2);
@@ -682,6 +827,19 @@ async function testInertiaReducedMotion(browser, base) {
     check(`「視差効果を減らす」では、${mode === 'fly' ? '飛行' : '俯瞰'}モードでも既定で慣性が付かない（ドラッグの回転だけで、離したあとに回らない）`,
       a.every((s) => !s.rotating) && moved > 0.1 && angleBetween(a[0].direction, a[a.length - 1].direction) < 1e-9, `ドラッグでの回転 ${moved.toFixed(3)} rad`);
   }
+  // 向き直しは 1 度に行い（動きを作らない）、残った動きはすぐに捨てる
+  await page.keyboard.press('KeyO');
+  await page.waitForFunction(() => window.__explorer.getState().mode === 'fly');
+  const away = add(center, [1.4, 0.4, 1.5]);
+  await setView(page, away, add(away, sub(away, center)));
+  await frames(page, 2);
+  const r0 = await state(page);
+  await page.keyboard.press('KeyO');
+  await page.waitForFunction(() => window.__explorer.getState().mode === 'overview');
+  const r1 = await state(page); // 切り替えの直後（模擬の時間は進んでいてもよい）
+  check('「視差効果を減らす」では、向き直しが 1 度で終わる（reorienting にならず、位置は同じで、視線が中心を向く）',
+    !r1.reorienting && len(sub(r1.position, r0.position)) < 1e-9 && angleBetween(r1.direction, norm(sub(center, r1.position))) < 1e-6,
+    `視線と中心のなす角 ${(angleBetween(r1.direction, norm(sub(center, r1.position))) * 180 / Math.PI).toExponential(1)}°`);
   await page.close();
 }
 
@@ -746,6 +904,8 @@ async function main() {
     await testDrag(page);
     await testWheel(page);
     await testModes(page, edge, center);
+    await testResidualMovement(page);
+    await testReorient(page, center);
     await testInertiaFly(page, inside);
     await testInertiaOverview(page, center);
 
@@ -769,7 +929,7 @@ async function main() {
     console.log('俯瞰モードのスクリーンショット → artifacts/controls-overview.png');
     await page.close();
 
-    await testInertiaReducedMotion(browser, base);
+    await testInertiaReducedMotion(browser, base, center);
     await testUrl(browser, base);
 
     check('コンソールエラーがない', consoleErrors.length === 0, consoleErrors.join(' | '));

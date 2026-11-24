@@ -33,7 +33,7 @@ const { execSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require('playwright');
-const { loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, len, sendPointer, pointerGesture, flickPoints } = require('./lib.cjs');
+const { loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, len, sendPointer, pointerGesture, flickPoints, waitReorient } = require('./lib.cjs');
 
 const root = path.resolve(__dirname, '../..');
 const args = process.argv.slice(2);
@@ -548,6 +548,7 @@ async function testOverviewDoubleClick(page, view) {
   await page.keyboard.press('Escape');
   await page.keyboard.press('KeyO');
   await page.waitForFunction(() => window.__explorer.getState().mode === 'overview');
+  await waitReorient(page); // 点群の中心への向き直し（0.5 秒）が終わってから、視点を決める
   await setView(page, view.pos, view.look);
   await waitStill(page);
   const p = await findVisiblePoint(page, { minPx: 3 });
@@ -593,6 +594,7 @@ async function testStopPress(page, mode, view, emptyView, emptyCandidates, point
   if (mode === 'overview') {
     await page.keyboard.press('KeyO');
     await page.waitForFunction(() => window.__explorer.getState().mode === 'overview');
+    await waitReorient(page); // 点群の中心への向き直し（0.5 秒）が終わってから、視点を決める
   }
   const flick = mode === 'fly' ? 150 : 120;
   const begin = async (v) => { await setView(page, v.pos, v.look); await waitStill(page); };

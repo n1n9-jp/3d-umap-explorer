@@ -16,7 +16,7 @@ const { execSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require('playwright');
-const { loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, len, norm } = require('./lib.cjs');
+const { loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, len, norm, waitReorient } = require('./lib.cjs');
 
 const root = path.resolve(__dirname, '../..');
 const args = process.argv.slice(2);
@@ -230,16 +230,20 @@ async function testStraightDown(browser, base) {
     `位置 ${fmt(f0.position)}, 仰角 ${(pitchOf(f0.direction) * 180 / Math.PI).toFixed(3)}°`);
   await page.keyboard.press('KeyO');
   await waitForMode(page, 'overview');
+  const reo = await waitReorient(page); // 点群の中心へ向き直す動き（0.5 秒。ずれが 3° 未満なら始まらない）が終わるまで待つ
   await frames(page, 2);
   const o0 = await state(page);
-  check('O で俯瞰へ: 位置と向きが跳ばない', maxAbsDiff(o0.position, f0.position) < 1e-6 && maxAbsDiff(o0.direction, f0.direction) < 1e-6,
-    `向きの差 ${maxAbsDiff(o0.direction, f0.direction).toExponential(1)}`);
+  const toCenter = norm(sub(o0.pivot, o0.position));
+  const gap0 = angleBetween(f0.direction, toCenter);
+  check('O で俯瞰へ: 位置が跳ばず、向きは点群の中心へ向く（ずれが 3° 未満なら向きも変わらない）',
+    reo.ok && maxAbsDiff(o0.position, f0.position) < 1e-6 && (gap0 < (3 * Math.PI) / 180 ? maxAbsDiff(o0.direction, f0.direction) < 1e-6 : angleBetween(o0.direction, toCenter) < 1e-4) && Math.abs(pitchOf(o0.direction)) <= MAX_PITCH + 1e-9,
+    `中心とのずれ ${(gap0 * 180 / Math.PI).toFixed(1)}°、向き直したあとの中心とのずれ ${(angleBetween(o0.direction, toCenter) * 180 / Math.PI).toExponential(1)}°`);
   await page.keyboard.press('KeyO');
   await waitForMode(page, 'fly');
   await frames(page, 2);
   const f1 = await state(page);
-  check('O で飛行へ戻る: 位置と向きが跳ばない', maxAbsDiff(f1.position, f0.position) < 1e-6 && maxAbsDiff(f1.direction, f0.direction) < 1e-6,
-    `向きの差 ${maxAbsDiff(f1.direction, f0.direction).toExponential(1)}`);
+  check('O で飛行へ戻る: 位置と向きが跳ばない', maxAbsDiff(f1.position, o0.position) < 1e-6 && maxAbsDiff(f1.direction, o0.direction) < 1e-6,
+    `向きの差 ${maxAbsDiff(f1.direction, o0.direction).toExponential(1)}`);
 
   // 俯瞰モードの setView（camera.lookAt なら ±90° になる）で真上・真下を向かせる
   await page.keyboard.press('KeyO');

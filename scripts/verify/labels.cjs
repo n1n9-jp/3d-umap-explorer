@@ -41,7 +41,7 @@ const { execSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require('playwright');
-const { loadDataset, waitForServer, startPreview, CHROMIUM_ARGS, sub, add, mul, len, norm } = require('./lib.cjs');
+const { loadDataset, waitForServer, startPreview, CHROMIUM_ARGS, sub, add, mul, len, norm, waitReorient } = require('./lib.cjs');
 
 const root = path.resolve(__dirname, '../..');
 const args = process.argv.slice(2);
@@ -380,6 +380,7 @@ async function testClickToFly(page, ds, clusters, coarse, size) {
   await goTo(page, home.pos, home.look);
   await page.keyboard.press('KeyO');
   await page.waitForFunction(() => window.__explorer.getState().mode === 'overview');
+  await waitReorient(page); // 点群の中心への向き直し（0.5 秒。ずれが 3° 未満なら始まらない）が終わるまで待つ
   await frames(page, 3);
   const so = await state(page);
   const stO = await labelState(page);
@@ -573,6 +574,7 @@ async function testPointerOnLabel(page, clusters) {
   await goTo(page, home2.pos, home2.look);
   await page.keyboard.press('KeyO');
   await page.waitForFunction(() => window.__explorer.getState().mode === 'overview');
+  await waitReorient(page); // 点群の中心への向き直し（0.5 秒。ずれが 3° 未満なら始まらない）が終わるまで待つ
   await frames(page, 3);
   const so = await state(page);
   const dist = (st) => len(sub(st.position, st.pivot));
