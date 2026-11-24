@@ -181,14 +181,37 @@ function computeViews(ds) {
  * measureFrames の結果から求める。測った 1 フレームのほかに、測る前の 1 フレーム（数えない）も進むので、
  * （数えたフレーム + 1）× min(0.1, 平均の 1 フレームの時間）を下限とする。標本のあいだに挟まる描画は数えないので、実際はこれ以上。
  */
-const simSecondsOf = (stats) => {
-  const sim = (stats.frames + 1) * Math.min(0.1, stats.meanMs / 1000);
-  if (sim > maxSampleSim) maxSampleSim = sim;
-  return sim;
+const simSecondsOf = (stats) => (stats.frames + 1) * Math.min(0.1, stats.meanMs / 1000);
+
+/**
+ * ページの中で、アプリが進めた模擬の時間と、settling（切り替えの残った動き）が続いた時間を、フレームごとに数える（`addInitScript` へ渡す）。
+ * 標本（`simSecondsOf`）は下限の見積もりで、標本のあいだに挟まる描画を数えないので、「止まるまでの時間」の上限の判定には使えない
+ * （実際は 0.69 秒かかっていても、見積もりは 0.4 秒になる）。ここでは、アプリの描画ループと同じ式（1 フレーム min(0.1, 経過秒)）で、
+ * 描画のすべてのフレームを数える。`--fast-clock` の偽の時計（requestAnimationFrame に渡る時刻）を入れたあとに実行する。
+ * `window.__simClock`: total（模擬の時間の累計）、maxDt（1 フレームの最大）、run（いま続いている settling の区間）、
+ * runs（終わった区間の { duration, maxDt }）。区間は、settling が true になる前のフレームの終わりから、false になるフレームの終わりまで。
+ * 終わりは、次のフレームの始めに見つける（`runs` に入るのは、消えた次のフレーム以降）。
+ */
+const SIM_CLOCK_SCRIPT = () => {
+  const clock = { total: 0, maxDt: 0, last: null, seen: null, run: null, runs: [] };
+  window.__simClock = clock;
+  const settling = () => { try { return window.__explorer?.getState().settling === true; } catch { return false; } };
+  const raf = window.requestAnimationFrame.bind(window);
+  window.requestAnimationFrame = (cb) => raf((now) => {
+    if (clock.seen !== now) { // 1 回の描画（同じ時刻の呼び出し）につき 1 度だけ数える
+      clock.seen = now;
+      const s = settling(); // 前のフレームまでの状態（このフレームの更新の前）
+      if (s && !clock.run) clock.run = { start: clock.total, maxDt: 0 };
+      else if (!s && clock.run) { clock.runs.push({ duration: clock.total - clock.run.start, maxDt: clock.run.maxDt }); clock.run = null; }
+      const dt = clock.last === null ? 0 : Math.min(0.1, (now - clock.last) / 1000);
+      clock.last = now;
+      clock.total += dt;
+      if (dt > clock.maxDt) clock.maxDt = dt;
+      if (clock.run && dt > clock.run.maxDt) clock.run.maxDt = dt;
+    }
+    cb(now);
+  });
 };
-/** この実行で見た、1 標本の模擬の時間（`simSecondsOf`）の最大値（秒）。標本の粒度の上限として、判定の上限に足す。 */
-let maxSampleSim = 0;
-const observedMaxSampleSim = () => maxSampleSim;
 
 /** 状態に、ここまでに進めた模擬の時間の下限（simSeconds）を足して返す。`decorate(s)` で値を足せる。 */
 async function sampleOnce(page, simBefore, decorate) {
@@ -335,5 +358,5 @@ async function waitCameraIdle(page, maxSimSeconds = 6) {
 module.exports = {
   readInfoRect, readUiRects, inRects, TOP_UI_IDS,
   loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, add, mul, len, norm, sendPointer, pointerGesture, flickPoints,
-  simSecondsOf, observedMaxSampleSim, sampleOnce, sampleUntil, waitSim, waitReorient, cameraAnimating, waitCameraIdle, flightEase, expectedFlightDuration,
+  simSecondsOf, SIM_CLOCK_SCRIPT, sampleOnce, sampleUntil, waitSim, waitReorient, cameraAnimating, waitCameraIdle, flightEase, expectedFlightDuration,
 };

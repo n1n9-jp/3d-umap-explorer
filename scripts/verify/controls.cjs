@@ -35,7 +35,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require('playwright');
 const {
-  loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, add, len, norm, pointerGesture, flickPoints, sampleOnce: libSampleOnce, sampleUntil: libSampleUntil, observedMaxSampleSim, waitSim, waitCameraIdle,
+  loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, add, len, norm, pointerGesture, flickPoints, sampleOnce: libSampleOnce, sampleUntil: libSampleUntil, SIM_CLOCK_SCRIPT, waitSim, waitCameraIdle,
 } = require('./lib.cjs');
 
 const root = path.resolve(__dirname, '../..');
@@ -77,6 +77,7 @@ const consoleErrors = [];
 async function openPage(browser, base, query = '', { reducedMotion = false } = {}) {
   const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 1 });
   if (FAST_CLOCK) await page.addInitScript(FAST_CLOCK_SCRIPT);
+  await page.addInitScript(SIM_CLOCK_SCRIPT); // 偽の時計を入れたあとに、描画のフレームと settling の継続時間を数える
   if (reducedMotion) await page.emulateMedia({ reducedMotion: 'reduce' });
   page.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(`[error] ${m.text()}`); });
   page.on('pageerror', (e) => consoleErrors.push(`[pageerror] ${e.message}`));
@@ -91,34 +92,31 @@ async function openPage(browser, base, query = '', { reducedMotion = false } = {
 /**
  * 残った動き（settling）が止まる解析的な時刻（秒）。切り替えた瞬間の速さが、時定数 0.15 秒の指数で 3% まで減る時刻
  * `0.15 × ln(1 / 0.03)`（src/app/modeTransition.ts の `RESIDUAL_TIME_CONSTANT`・`RESIDUAL_STOP_RATIO`。検証は、アプリの定数を
- * 使わずに独立に持つ）。刻み幅によらず、止まるのは累計がこの時刻に達したフレーム。
+ * 使わずに独立に持つ）。残った動きは、累計がこの時刻に達したフレームで止まる。
  */
 const SETTLE_ANALYTIC_SIM = 0.15 * Math.log(1 / 0.03);
 /** 0.1 の和などの丸めの誤差（秒）。 */
 const SETTLE_ROUNDING = 1e-9;
 
 /**
- * settling が消えた標本の、模擬の時間（下限の見積もり）の上限（秒）: 解析的な停止の時刻 + この実行で見た 1 標本の模擬の時間の最大値 +
- * 丸め。1 標本は、数えた 1 フレームと数えない 1 フレーム（`simSecondsOf`）で、標本の模擬の時間は 2 フレーム分ずつ増える。
- * 前の標本ではまだ止まっていない（見積もりは実際の下限なので、解析的な停止の時刻より前）から、消えた標本の見積もりは
- * 停止の時刻に 1 標本を足した値を超えない。標本のあいだに挟まる描画は数えないので、見積もりは実際の経過より小さく、この上限で偽の失敗は起きない。
- * 通常の実行（1 フレームが 0.1 秒で頭打ち）で約 0.726、`--fast-clock`（1/60 秒）で約 0.559。
+ * settling が続いた時間（秒）の上限: 解析的な停止の時刻 + その区間で観測した 1 フレームの模擬の時間の最大値 + 丸め。
+ * 止まるフレームの前の累計は、停止の時刻より前なので、続いた時間は停止の時刻に 1 フレームを足した値を超えない。
+ * 時間は標本の見積もり（`simSecondsOf`。標本のあいだの描画を数えない下限）ではなく、ページの中で全フレームを数えた値
+ * （`SIM_CLOCK_SCRIPT`）なので、見積もりの不足で止まるのが遅れても気づけないことも、偽の失敗も起きない。
+ * 通常の実行（1 フレームが 0.1 秒で頭打ち）で約 0.626、`--fast-clock`（1/60 秒）で約 0.543。
  */
-const settleMaxSim = () => SETTLE_ANALYTIC_SIM + observedMaxSampleSim() + SETTLE_ROUNDING;
-const settleLimitText = () => `${settleMaxSim().toFixed(3)} 秒（解析的な停止 ${SETTLE_ANALYTIC_SIM.toFixed(3)} 秒 + 1 標本 ${observedMaxSampleSim().toFixed(3)} 秒）`;
+const settleMaxSim = (run) => SETTLE_ANALYTIC_SIM + run.maxDt + SETTLE_ROUNDING;
+const settleLimitText = (run) => (run
+  ? `${settleMaxSim(run).toFixed(3)} 秒（解析的な停止 ${SETTLE_ANALYTIC_SIM.toFixed(3)} 秒 + 1 フレーム ${run.maxDt.toFixed(3)} 秒）`
+  : '解析的な停止の時刻 + 1 フレーム');
 
-/**
- * 標本の列 `q` で、settling が時間内に消えたか。消えた標本 `cleared` の模擬の時間が上限以内で、その前の標本（まだ true）の
- * 見積もり（実際の下限）が、解析的な停止の時刻より前であること（消えるのが遅れていれば、前の標本が停止の時刻を過ぎても true になる）。
- */
-function settledInTime(q, cleared) {
-  if (cleared === undefined) return false;
-  const prev = q[q.indexOf(cleared) - 1];
-  return cleared.simSeconds <= settleMaxSim() && (prev === undefined || prev.simSeconds < SETTLE_ANALYTIC_SIM + SETTLE_ROUNDING);
+/** 直近に終わった settling の区間（`SIM_CLOCK_SCRIPT` の runs の最後）。終わりは次のフレームで見つかるので、2 フレーム進めてから読む。なければ null。 */
+async function settleRun(page) {
+  await frames(page, 2);
+  return page.evaluate(() => { const c = window.__simClock; return c && !c.run && c.runs.length > 0 ? c.runs[c.runs.length - 1] : null; });
 }
-const settleDetail = (q, cleared) => (cleared
-  ? `settling が消えた標本の模擬の時間（下限） ${cleared.simSeconds.toFixed(3)} 秒（その前の標本 ${(q[q.indexOf(cleared) - 1]?.simSeconds ?? 0).toFixed(3)} 秒）`
-  : 'settling が消えない');
+const settledInTime = (run) => run !== null && run.duration <= settleMaxSim(run);
+const settleDetail = (run) => (run ? `settling が続いた模擬の時間 ${run.duration.toFixed(3)} 秒` : 'settling の区間が見つからない');
 
 const state = (page) => page.evaluate(() => window.__explorer.getState());
 const frames = (page, n) => page.evaluate((k) => window.__explorer.measureFrames(k), n);
@@ -482,7 +480,7 @@ async function testModes(page, view, centerOf) {
 
 /**
  * W で基準速度に達してから O を押すと、移動の速度は急に止まらず、時定数 0.15 秒で減りながら進み、やがて止まる
- * （総距離は 速度 × 0.15 秒 × (1 − 0.03)）。約 0.53 秒で止まり、settling は模擬の時間で解析的な停止の時刻 + 1 標本以内に消える（`settleMaxSim`）。進む向きは、押していた向き（視線）。
+ * （総距離は 速度 × 0.15 秒 × (1 − 0.03)）。約 0.53 秒で止まり、settling は模擬の時間で解析的な停止の時刻 + 1 フレーム以内に消える（`settleMaxSim`）。進む向きは、押していた向き（視線）。
  */
 async function testResidualMovement(page) {
   console.log('\n[切り替えた瞬間に残っている移動の速度]');
@@ -507,8 +505,9 @@ async function testResidualMovement(page) {
     len(sub(q[0].position, pre.position)) > 1e-4 && len(moved) > total * 0.95 && len(moved) < total * 1.001 && cos(moved, pre.direction) > 0.999,
     `実速度 ${pre.effectiveSpeed.toFixed(3)} → 総距離 ${len(moved).toFixed(4)}（見込み ${total.toFixed(4)}）、最初の標本までの移動 ${len(sub(q[0].position, pre.position)).toFixed(4)}、進んだ向きと視線の cos ${cos(moved, pre.direction).toFixed(4)}`);
   const cleared = q.find((s) => !s.settling);
-  check(`settling は、模擬の時間で ${settleLimitText()} 以内に消える（切り替えた瞬間の速さの 3% になる約 ${SETTLE_ANALYTIC_SIM.toFixed(2)} 秒で止まる）。それまでは true`,
-    settledInTime(q, cleared) && q.slice(0, q.indexOf(cleared)).every((s) => s.settling), settleDetail(q, cleared));
+  const run = await settleRun(page);
+  check(`settling は、模擬の時間で ${settleLimitText(run)} 以内に消える（切り替えた瞬間の速さの 3% になる約 ${SETTLE_ANALYTIC_SIM.toFixed(2)} 秒で止まる）。それまでは true`,
+    cleared !== undefined && settledInTime(run) && q.slice(0, q.indexOf(cleared)).every((s) => s.settling), settleDetail(run));
   check('残った動きが消えたあと、位置も向きも変わらない（rotating も reorienting も false）', (await staysStill(page, 4)) && !last.reorienting);
   await page.keyboard.press('KeyO');
   await page.waitForFunction(() => window.__explorer.getState().mode === 'fly');
@@ -655,7 +654,8 @@ async function testMotionCombos(page, center) {
     !q.timedOut && moved > v0 * Math.exp(-0.1 / 0.5) * 0.15 * 0.97 * 0.95 && moved < v0 * 0.15 * 0.97 * 1.001,
     `O のあとの距離 ${moved.toFixed(4)}（見込み ${(v0 * Math.exp(-0.1 / 0.5) * 0.15 * 0.97).toFixed(4)}〜${(v0 * 0.15 * 0.97).toFixed(4)}。滑走を引き継げば約 ${(v0 * 0.5).toFixed(4)}）`);
   const clearedG = q.find((s) => !s.settling);
-  check(`滑走中の O のあとも、settling は模擬の時間で ${settleLimitText()} 以内に消える`, settledInTime(q, clearedG), settleDetail(q, clearedG));
+  const runG = await settleRun(page);
+  check(`滑走中の O のあとも、settling は模擬の時間で ${settleLimitText(runG)} 以内に消える`, clearedG !== undefined && settledInTime(runG), settleDetail(runG));
   // 状態が「止まった」と言うまでの標本では、位置が動いていれば settling（または reorienting）が true
   const movingButStill = q.filter((s, i) => i > 0 && len(sub(s.position, q[i - 1].position)) > 0 && !s.settling && !s.reorienting && !q[i - 1].settling && !q[i - 1].reorienting);
   check('残った動きが消えるまでは settling が true で、止まった（settling も reorienting も false）あとは位置も向きも変わらない',
@@ -969,7 +969,8 @@ async function testInertiaFly(page, inside) {
     m0.mode === 'overview' && !m0.rotating && !mq.timedOut && !m1.rotating && !m1.reorienting && len(sub(m0.position, m1.position)) < 1e-9 && (await staysStill(page)),
     `位置の差 ${len(sub(m0.position, m1.position)).toExponential(1)}、模擬の時間 ${m1.simSeconds.toFixed(2)} 秒以上`);
   const mc = mq.find((x) => !x.settling);
-  check(`残った回転の settling は、模擬の時間で ${settleLimitText()} 以内に消える`, settledInTime(mq, mc), settleDetail(mq, mc));
+  const runM = await settleRun(page);
+  check(`残った回転の settling は、模擬の時間で ${settleLimitText(runM)} 以内に消える`, mc !== undefined && settledInTime(runM), settleDetail(runM));
   await page.keyboard.press('KeyO');
   await page.waitForFunction(() => window.__explorer.getState().mode === 'fly');
   await frames(page, 2);
@@ -1149,7 +1150,8 @@ async function testInertiaOverview(page, center) {
     !r0.rotating && !rq.timedOut && !r1.rotating && [r0, ...rq].every((s) => Math.abs(len(sub(s.position, center)) - d0) < 1e-4) && (await staysStill(page)),
     `中心までの距離 ${d0.toFixed(4)} → ${len(sub(r1.position, center)).toFixed(4)}、模擬の時間 ${r1.simSeconds.toFixed(2)} 秒以上`);
   const rc = rq.find((x) => !x.settling);
-  check(`残った周回の settling は、模擬の時間で ${settleLimitText()} 以内に消える`, settledInTime(rq, rc), settleDetail(rq, rc));
+  const runR = await settleRun(page);
+  check(`残った周回の settling は、模擬の時間で ${settleLimitText(runR)} 以内に消える`, rc !== undefined && settledInTime(runR), settleDetail(runR));
 }
 
 async function testInertiaReducedMotion(browser, base, center) {
