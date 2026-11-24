@@ -255,6 +255,7 @@ export class DatasetView {
         index: this.spatialIndex, // 速度の自動調整と共有（上で構築）
         panel: this.infoPanel,
         flyTo: (target, opts) => this.controller.flyTo(target, opts),
+        pressStopsInertia: (e) => this.controller.pressStopsInertia(e),
         bufferHeight: () => renderer.getDrawingBufferSize(new THREE.Vector2()).y,
       });
 

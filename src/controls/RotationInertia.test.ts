@@ -263,6 +263,131 @@ describe('RotationInertia: 積分', () => {
   });
 });
 
+describe('DragVelocityTracker: 離した位置を速さに入れる', () => {
+  /** 1 秒あたり 1000 ピクセルで右へ 300 ミリ秒動かして、最後の pointermove の時刻と位置を返す。 */
+  const flickRight = (tracker: DragVelocityTracker) => {
+    const t = dragAt(tracker, 1000, 300);
+    return { t, x: 100 + (1000 * (t - 1000)) / 1000 };
+  };
+
+  it('位置を渡さなければ、最後の pointermove までの動きだけが数えられる（従来どおり）', () => {
+    const tracker = new DragVelocityTracker();
+    const { t } = flickRight(tracker);
+    const v = tracker.release(t + 16)!;
+    // 最後の移動から 16 ミリ秒たっているので、窓 90 ミリ秒のうち動いたのは 74 ミリ秒分
+    expect(v.vx).toBeCloseTo((1000 * 74) / 90, -1);
+  });
+
+  it('最後の pointermove のあとに動いて離したら、その動きも速さに入る（同じ速さで動き続けた分）', () => {
+    const tracker = new DragVelocityTracker();
+    const { t, x } = flickRight(tracker);
+    const v = tracker.release(t + 16, x + 16, 100)!; // 16 ミリ秒で 16 ピクセル = 1000 px/s の続き
+    expect(v.vx).toBeCloseTo(1000, -1);
+    expect(v.vy).toBeCloseTo(0, 6);
+  });
+
+  it('最後の pointermove から離すまでの動きが、窓の中の速さを変える（止まりかけから、離す直前に払った）', () => {
+    const tracker = new DragVelocityTracker();
+    tracker.begin(0, 0, 0);
+    tracker.move(10, 0, 100); // ゆっくり（100 px/s）
+    const slow = new DragVelocityTracker();
+    slow.begin(0, 0, 0);
+    slow.move(10, 0, 100);
+    const without = slow.release(116)!;
+    const withEnd = tracker.release(116, 90, 0)!; // 最後の 16 ミリ秒で 80 ピクセル動いて離した
+    expect(withEnd.vx).toBeGreaterThan(without.vx * 4);
+  });
+
+  it('位置が変わらないなら、位置を渡しても速さは変わらない', () => {
+    const a = new DragVelocityTracker();
+    const b = new DragVelocityTracker();
+    const { t, x } = flickRight(a);
+    flickRight(b);
+    const va = a.release(t + 5)!;
+    const vb = b.release(t + 5, x, 100)!;
+    expect(vb.vx).toBeCloseTo(va.vx, 6);
+    expect(vb.vy).toBeCloseTo(va.vy, 6);
+  });
+
+  it('離した位置で初めて閾値を超えたなら、ドラッグとして扱う（動かさずに離した位置が遠いとき）', () => {
+    const tracker = new DragVelocityTracker();
+    tracker.begin(100, 100, 0);
+    tracker.move(101, 100, 10);
+    const v = tracker.release(26, 160, 100);
+    expect(v).not.toBeNull();
+    expect(v!.vx).toBeGreaterThan(0);
+  });
+
+  it('動かさずに離したクリックは、位置を渡しても null', () => {
+    const tracker = new DragVelocityTracker();
+    tracker.begin(100, 100, 0);
+    expect(tracker.release(30, 102, 101)).toBeNull();
+  });
+
+  it('押していない状態では、位置を渡しても何も覚えない', () => {
+    const tracker = new DragVelocityTracker();
+    expect(tracker.release(10, 50, 50)).toBeNull();
+    tracker.begin(0, 0, 100);
+    expect(tracker.release(150)).toBeNull(); // 前の release の位置が残っていない
+  });
+});
+
+describe('RotationInertia: 離した位置の動きでも慣性が付く', () => {
+  it('最後の pointermove では止まりかけでも、離した位置が大きく動いていれば慣性が付く', () => {
+    const slow = new RotationInertia();
+    slow.beginDrag(100, 100, 1000);
+    slow.dragMove(110, 100, 1100); // 100 px/s（80 px/s 以上だが小さい）
+    expect(slow.endDrag(1116, 0.0025)).toBe(true);
+    const slowSpeed = (slow.step(1e-9), slow.speed);
+
+    const flung = new RotationInertia();
+    flung.beginDrag(100, 100, 1000);
+    flung.dragMove(110, 100, 1100);
+    expect(flung.endDrag(1116, 0.0025, 190, 100)).toBe(true); // 離す直前の 16 ミリ秒で 80 ピクセル
+    flung.step(1e-9);
+    expect(flung.speed).toBeGreaterThan(slowSpeed * 3);
+  });
+
+  it('離した位置で初めて動いた（move なし）押下も、速ければ慣性が付く', () => {
+    const inertia = new RotationInertia();
+    inertia.beginDrag(100, 100, 1000);
+    expect(inertia.endDrag(1020, 0.0025, 180, 100)).toBe(true); // 20 ミリ秒で 80 ピクセル
+    expect(inertia.active).toBe(true);
+  });
+});
+
+describe('RotationInertia: 押下で止めたことを覚える', () => {
+  const rolling = () => {
+    const inertia = new RotationInertia();
+    expect(inertia.start(2, 0)).toBe(true);
+    return inertia;
+  };
+
+  it('回っているときに止めた押下は、止めた押下として覚える', () => {
+    const inertia = rolling();
+    const press = {};
+    expect(inertia.stopByPress(press)).toBe(true);
+    expect(inertia.active).toBe(false);
+    expect(inertia.isStoppedBy(press)).toBe(true);
+    expect(inertia.isStoppedBy({})).toBe(false);
+  });
+
+  it('止めるより前に聞かれても（まだ回っている）、止めた押下として答える', () => {
+    const inertia = rolling();
+    expect(inertia.isStoppedBy({})).toBe(true);
+  });
+
+  it('回っていなかったときの押下は、止めた押下ではない。次の押下は前の押下を引き継がない', () => {
+    const inertia = rolling();
+    const first = {};
+    inertia.stopByPress(first);
+    const second = {};
+    expect(inertia.stopByPress(second)).toBe(false);
+    expect(inertia.isStoppedBy(second)).toBe(false);
+    expect(inertia.isStoppedBy(first)).toBe(false);
+  });
+});
+
 describe('RotationInertia: ドラッグの離し方', () => {
   /** 1 秒あたり `vx` ピクセルの速さで動かして離す。 */
   const flick = (inertia: RotationInertia, vx: number, ms = 300, pauseMs = 0, vy = 0) => {

@@ -1130,6 +1130,80 @@ describe('FlyCameraControls: 回転の慣性', () => {
     expect(viewDirection(r.camera).distanceTo(dir)).toBe(0);
   });
 
+  it('回っているときの押下は、慣性を止めた押下として答える（押下のリスナーの前でも後でも）', () => {
+    // コントロールより先に登録したリスナー（止める前に聞く）と、後に登録したリスナー（止めたあとに聞く）
+    const seenBefore: boolean[] = [];
+    const camera = new PerspectiveCamera(60, 1, 0.001, 10);
+    const win = new FakeTarget();
+    const el = new FakeTarget();
+    el.ownerDocument = { defaultView: win };
+    let controls!: FlyCameraControls;
+    el.addEventListener('pointerdown', ((e: object) => { seenBefore.push(controls.pressStopsInertia(e as Event)); }) as Handler);
+    controls = new FlyCameraControls(camera, el as unknown as HTMLElement);
+    const seenAfter: boolean[] = [];
+    el.addEventListener('pointerdown', ((e: object) => { seenAfter.push(controls.pressStopsInertia(e as Event)); }) as Handler);
+
+    const flick = () => {
+      let t = 1000;
+      el.emit('pointerdown', { button: 0, pointerId: 1, clientX: 100, clientY: 100, timeStamp: t });
+      for (let i = 1; i <= 12; i++) {
+        t += 16;
+        el.emit('pointermove', { pointerId: 1, clientX: 100 + 16 * i, clientY: 100, timeStamp: t });
+      }
+      el.emit('pointerup', { pointerId: 1, timeStamp: t });
+    };
+    flick();
+    seenBefore.length = 0;
+    seenAfter.length = 0;
+    expect(controls.isRotatingByInertia).toBe(true);
+    const press = { button: 0, pointerId: 2, clientX: 5, clientY: 5, timeStamp: 3000 };
+    const ev = el.emit('pointerdown', press);
+    expect(controls.isRotatingByInertia).toBe(false);
+    expect(seenBefore).toEqual([true]);
+    expect(seenAfter).toEqual([true]);
+    expect(controls.pressStopsInertia(ev as unknown as Event)).toBe(true);
+
+    // 回っていないときの押下は、止めた押下ではない
+    seenBefore.length = 0;
+    seenAfter.length = 0;
+    const ev2 = el.emit('pointerdown', { button: 0, pointerId: 3, clientX: 5, clientY: 5, timeStamp: 3100 });
+    expect(seenBefore).toEqual([false]);
+    expect(seenAfter).toEqual([false]);
+    expect(controls.pressStopsInertia(ev2 as unknown as Event)).toBe(false);
+    expect(controls.pressStopsInertia(ev as unknown as Event)).toBe(false); // 前の押下の記憶は、次の押下で入れ替わる
+  });
+
+  it('無効のときは、押下が来ても止めた押下にならない', () => {
+    drag(16);
+    up();
+    r.controls.enabled = false;
+    const ev = r.el.emit('pointerdown', { button: 0, pointerId: 4, clientX: 0, clientY: 0, timeStamp: clock });
+    expect(r.controls.pressStopsInertia(ev as unknown as Event)).toBe(false);
+  });
+
+  it('離した位置が最後の pointermove と違っても、その動きが慣性の速さに入る', () => {
+    const slowThenFling = () => {
+      const rr = createRig();
+      let t = 1000;
+      rr.el.emit('pointerdown', { button: 0, pointerId: 1, clientX: 100, clientY: 100, timeStamp: t });
+      t += 100;
+      rr.el.emit('pointermove', { pointerId: 1, clientX: 110, clientY: 100, timeStamp: t });
+      return { rr, t };
+    };
+    const a = slowThenFling();
+    a.rr.el.emit('pointerup', { pointerId: 1, clientX: 110, clientY: 100, timeStamp: a.t + 16 });
+    const b = slowThenFling();
+    b.rr.el.emit('pointerup', { pointerId: 1, clientX: 190, clientY: 100, timeStamp: b.t + 16 });
+    expect(a.rr.controls.isRotatingByInertia).toBe(true);
+    expect(b.rr.controls.isRotatingByInertia).toBe(true);
+    const yawAfter = (c: Rig) => {
+      const before = yawOf(c.camera);
+      frames(c.controls, 3);
+      return before - yawOf(c.camera);
+    };
+    expect(yawAfter(b.rr)).toBeGreaterThan(yawAfter(a.rr) * 3);
+  });
+
   it('左以外のボタンの押下でも止まる', () => {
     drag(16);
     up();

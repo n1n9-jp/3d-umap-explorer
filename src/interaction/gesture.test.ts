@@ -160,3 +160,78 @@ describe('PointerGesture: 複数のボタンを重ねた押下', () => {
     expect(g.up(1, 5, 5, 0)?.kind).toBe('click');
   });
 });
+
+describe('PointerGesture: 慣性を止めるための押下', () => {
+  const press = (g: PointerGesture, t: number, x = 100, y = 100, stops = false) => {
+    g.down(1, 0, x, y, 1, stops);
+    return g.up(1, x, y, t);
+  };
+
+  it('慣性を止めた押下は、動かさずに離しても、クリックに数えない', () => {
+    const g = new PointerGesture();
+    expect(press(g, 0, 100, 100, true)).toEqual({ kind: 'stop' });
+    expect(g.pressed).toBe(false);
+  });
+
+  it('慣性が止まったあとの次の押下は、通常どおりクリックとして働く', () => {
+    const g = new PointerGesture();
+    expect(press(g, 0, 100, 100, true)).toEqual({ kind: 'stop' });
+    expect(press(g, 50, 100, 100)).toEqual({ kind: 'click', x: 100, y: 100, double: false });
+  });
+
+  it('慣性を止めた押下は、ダブルクリックの 1 回目に数えない（直後のクリックは 1 回目）', () => {
+    const g = new PointerGesture({ doubleClickMs: 400 });
+    press(g, 0, 100, 100, true);
+    expect(press(g, 100, 100, 100)).toMatchObject({ kind: 'click', double: false });
+    expect(press(g, 200, 100, 100)).toMatchObject({ kind: 'click', double: true }); // その次が 2 回目
+  });
+
+  it('慣性を止めた押下は、その前のクリックの続き（ダブルクリックの 2 回目）にも数えず、前の記憶も捨てる', () => {
+    const g = new PointerGesture({ doubleClickMs: 400 });
+    expect(press(g, 0)).toMatchObject({ kind: 'click', double: false });
+    expect(press(g, 100, 100, 100, true)).toEqual({ kind: 'stop' });
+    expect(press(g, 200)).toMatchObject({ kind: 'click', double: false }); // 最初のクリックと数えない
+  });
+
+  it('慣性を止めた押下からドラッグを始めたら、通常のドラッグ（クリックにならない）', () => {
+    const g = new PointerGesture({ dragThresholdPx: 4 });
+    g.down(1, 0, 100, 100, 1, true);
+    expect(g.move(1, 150, 100)).toBe(true);
+    expect(g.dragging).toBe(true);
+    expect(g.up(1, 150, 100, 0)).toEqual({ kind: 'drag' });
+  });
+
+  it('慣性を止めた押下でも、閾値以内の揺れは動かさない扱い（クリックにはならず、ドラッグでもない）', () => {
+    const g = new PointerGesture({ dragThresholdPx: 4 });
+    g.down(1, 0, 100, 100, 1, true);
+    expect(g.move(1, 102, 101)).toBe(false);
+    expect(g.up(1, 103, 101, 0)).toEqual({ kind: 'stop' });
+  });
+
+  it('止めた押下の記憶は、離したあと・取り消したあとに次の押下へ残らない', () => {
+    const g = new PointerGesture();
+    g.down(1, 0, 0, 0, 1, true);
+    g.cancel(1);
+    expect(press(g, 0)).toMatchObject({ kind: 'click' });
+    g.down(1, 0, 0, 0, 1, true);
+    g.cancel();
+    expect(press(g, 10)).toMatchObject({ kind: 'click' });
+  });
+
+  it('受け付けなかった押下（左以外・押している間の別の押下）の「止めた」は、いまの押下に移らない', () => {
+    const g = new PointerGesture();
+    g.down(1, 2, 0, 0, 2, true); // 右ボタンは受け付けない
+    expect(g.pressed).toBe(false);
+    g.down(1, 0, 0, 0, 1, false);
+    g.down(2, 0, 50, 50, 1, true); // 押している間の別のポインタ
+    expect(g.up(2, 50, 50, 0)).toBeNull();
+    expect(g.up(1, 0, 0, 0)).toMatchObject({ kind: 'click' }); // 左の押下は止めていない
+  });
+
+  it('ボタンが重なった押下は、慣性を止めた押下でも、これまでどおり取り消し扱い', () => {
+    const g = new PointerGesture();
+    g.down(1, 0, 0, 0, 1, true);
+    g.down(1, 2, 0, 0, 3); // 押している最中に右ボタンが重なる
+    expect(g.up(1, 0, 0, 0, 2)).toBeNull();
+  });
+});

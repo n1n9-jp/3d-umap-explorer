@@ -286,6 +286,36 @@ describe('OverviewControls: 回転の慣性', () => {
     expect(a.quaternion.angleTo(b.quaternion)).toBeLessThan(1e-9);
   });
 
+  it('慣性を止めた押下を答える。回っていなければ、止めた押下ではない', () => {
+    const r = createInertiaRig();
+    r.drag(8);
+    r.up();
+    expect(r.controls.isRotatingByInertia).toBe(true);
+    const stopping = r.el.emit('pointerdown', { button: 0, pointerId: 2, clientX: 0, clientY: 0, timeStamp: 5000 });
+    expect(r.controls.isRotatingByInertia).toBe(false);
+    expect(r.controls.pressStopsInertia(stopping as unknown as Event)).toBe(true);
+    const next = r.el.emit('pointerdown', { button: 0, pointerId: 3, clientX: 0, clientY: 0, timeStamp: 5100 });
+    expect(r.controls.pressStopsInertia(next as unknown as Event)).toBe(false);
+    r.controls.enabled = false;
+    expect(r.controls.pressStopsInertia(stopping as unknown as Event)).toBe(false);
+  });
+
+  it('離した位置が最後の pointermove と違っても、その動きが慣性の速さに入る', () => {
+    const run = (releaseX: number) => {
+      const r = createInertiaRig();
+      r.emit('pointerdown', { button: 0, clientX: 100, clientY: 100 });
+      r.advance(100);
+      r.emit('pointermove', { clientX: 110, clientY: 100 });
+      r.advance(16);
+      r.emit('pointerup', { clientX: releaseX, clientY: 100 });
+      expect(r.controls.isRotatingByInertia).toBe(true);
+      const a0 = r.azimuth();
+      for (let i = 0; i < 20; i++) r.controls.update(1 / 60);
+      return Math.abs(r.wrap(r.azimuth() - a0));
+    };
+    expect(run(190)).toBeGreaterThan(run(110) * 3);
+  });
+
   it('ポインタを止めてから離すと、慣性は付かない。クリックでも付かない', () => {
     const r = createInertiaRig();
     r.drag(8);

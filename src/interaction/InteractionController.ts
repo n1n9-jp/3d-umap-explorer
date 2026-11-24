@@ -34,12 +34,19 @@ export interface InteractionDeps {
   flyTo(target: THREE.Vector3, options: FlyToOptions): void;
   /** 描画バッファの高さ（画素） */
   bufferHeight(): number;
+  /**
+   * 押下 `e`（pointerdown）が、視点の回転の慣性を止めた押下か。そうなら、その押下は動かさずに離しても、
+   * クリック（選択・選択の解除・ダブルクリック）に数えない。カメラ操作のリスナーとの登録順によらず答えが変わらない
+   * 関数を渡すこと（`CameraRig.pressStopsInertia`）。
+   */
+  pressStopsInertia(e: PointerEvent): boolean;
 }
 
 /**
  * ホバー・クリックでの選択・ダブルクリックで点へ飛ぶ操作。
  * カメラ操作（FlyCameraControls・OverviewControls）と同じキャンバスのポインタイベントを並行して聞き、
  * 押してから離すまで動かなかった操作だけをクリックとして扱う（ドラッグの終わりはクリックにしない）。
+ * 視点が慣性で回っている最中の押下は、慣性を止める操作なので、動かさずに離してもクリックにしない（`gesture.ts`）。
  * ホバーの特定は 1 フレームに 1 回まで。ドラッグ中とカメラの移動中は止め、表示中のホバーを消す。
  */
 export class InteractionController {
@@ -153,7 +160,7 @@ export class InteractionController {
   }
 
   private readonly onPointerDown = (e: PointerEvent): void => {
-    this.gesture.down(e.pointerId, e.button, e.clientX, e.clientY, e.buttons);
+    this.gesture.down(e.pointerId, e.button, e.clientX, e.clientY, e.buttons, this.deps.pressStopsInertia(e));
   };
 
   private readonly onPointerMove = (e: PointerEvent): void => {

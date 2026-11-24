@@ -152,4 +152,50 @@ function startPreview(root, port) {
   return { base: `http://127.0.0.1:${port}/`, stop: () => server.kill('SIGTERM') };
 }
 
-module.exports = { loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, add, mul, len, norm };
+// ---------- ポインタ操作を時刻つきで送る ----------
+
+/**
+ * CDP の `Input.dispatchMouseEvent` で、ポインタ操作を時刻（`timestamp`）つきで送る。`events` は
+ * [{ type: 'down' | 'move' | 'up', x, y, t }]（t は最初の操作からのミリ秒）。すべて await せずに順に送り、
+ * ブラウザが指定の時刻で届ける（`event.timeStamp`）。ソフトウェア描画ではマウスイベントが 1 つずつ数百ミリ秒かかって届くので、
+ * Playwright の `mouse.move(steps)` では速さが出ず、時刻の指定もできない。このやり方なら、ブラウザの入力の経路はそのままで、
+ * 離す直前の速さ・クリックの間隔（ダブルクリックの判定）を時刻で決められる。
+ */
+async function sendPointer(page, events) {
+  const cdp = await page.context().newCDPSession(page);
+  const base = Date.now() / 1000;
+  const sends = events.map(({ type, x, y, t }) => cdp.send('Input.dispatchMouseEvent', {
+    type: type === 'down' ? 'mousePressed' : type === 'up' ? 'mouseReleased' : 'mouseMoved',
+    x, y,
+    button: type === 'move' ? 'none' : 'left',
+    buttons: type === 'up' ? 0 : 1,
+    clickCount: type === 'move' ? 0 : 1,
+    timestamp: base + t / 1000,
+  }));
+  await Promise.all(sends);
+  await cdp.detach();
+}
+
+/**
+ * 1 回のドラッグを送る。`points` は [{x, y, t}]（t は押した時刻からのミリ秒。先頭は押した位置で t = 0）、
+ * `releaseAfterMs` は最後の点から離すまでのミリ秒（ポインタを止めている時間）、
+ * `releaseAt` は離す位置（省略すると最後の点。最後の移動と違う位置で離す操作を送るときに指定する）。
+ */
+async function pointerGesture(page, points, releaseAfterMs = 1, releaseAt = null) {
+  const last = points[points.length - 1];
+  const rel = releaseAt ?? last;
+  await sendPointer(page, [
+    { type: 'down', x: points[0].x, y: points[0].y, t: points[0].t },
+    ...points.slice(1).map((p) => ({ type: 'move', x: p.x, y: p.y, t: p.t })),
+    { type: 'up', x: rel.x, y: rel.y, t: last.t + releaseAfterMs },
+  ]);
+}
+
+/** 横（dx）・縦（dy）へ `durationMs` かけて一定の速さで払う操作の点列（n + 1 点）。 */
+function flickPoints(x0, y0, dx, dy, durationMs = 160, n = 10) {
+  const pts = [{ x: x0, y: y0, t: 0 }];
+  for (let i = 1; i <= n; i++) pts.push({ x: x0 + (dx * i) / n, y: y0 + (dy * i) / n, t: (durationMs * i) / n });
+  return pts;
+}
+
+module.exports = { loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, add, mul, len, norm, sendPointer, pointerGesture, flickPoints };
