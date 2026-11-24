@@ -207,6 +207,7 @@ export class DatasetView {
         camera,
         clusters: coarseLevel?.clusters ?? [],
         boundsRadius: arrays.bounds.radius,
+        boundsCenter: arrays.bounds.center,
         colorSource: this.coloring.source,
         flyTo: (target, opts) => this.controller.flyTo(target, opts),
         // クラスタの内部では、単語の文字と重なる目印を隠す（this.words はこのあと作る）

@@ -22,3 +22,11 @@ export function defaultPointSize(density?: { knnDistP50: number } | null): numbe
   const raw = (REFERENCE_POINT_SIZE * d) / REFERENCE_KNN_DIST_P50;
   return Math.min(POINT_SIZE_RANGE[1], Math.max(POINT_SIZE_RANGE[0], round3(raw)));
 }
+
+/**
+ * 丸い点の画面上の直径（ピクセル）。点群のシェーダ（shaders.ts の DOTS_ONLY）と同じ式:
+ * 半径 = min(比 × 1 辺の大きさ, 上限) × 倍率。`sizePx` は最小サイズで下支えしたビルボード 1 辺の画面上の大きさ。
+ */
+export function dotDiameterPx(sizePx: number, dotRadius: readonly [number, number], scale = 1): number {
+  return 2 * Math.min(dotRadius[0] * sizePx, dotRadius[1]) * scale;
+}

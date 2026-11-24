@@ -219,8 +219,10 @@ async function analyze(textColors) {
     if (diffEx.length < 6) diffEx.push(`(${k % W},${Math.floor(k / W)}) rgb ${Array.from(frame.rgba.subarray(4 * k, 4 * k + 3))} id ${ids[k]}`);
   }
 
-  // 手前の点に隠れる: 表示中の単語の矩形の中に中心が入る、単語より手前の点（丸い点が見えている）の中心の画素は、その単語の番号にならない
+  // 手前の点に隠れる: 表示中の単語の矩形の中に中心が入る、単語より手前の点（丸い点が見えている）の中心の画素は、その単語の番号にならない。
+  // 単語の矩形の近くの丸い点は小さくしてある（src/text/clearance.ts）ので、倍率を掛けた半径が 1 ピクセル以上の点を見る
   let occluders = 0, occludedWrong = 0;
+  const dotRadius = ex.pointCloud.params.dotRadius;
   const occEx = [];
   const shownSet = new Set(ws.shown.map((w) => w.index));
   const proj = [];
@@ -228,9 +230,10 @@ async function analyze(textColors) {
   for (const w of ws.shown) {
     const r = w.rect;
     for (let i = 0; i < dbg.count; i++) {
-      if (shownSet.has(i) || dotScales[i] < 1) continue;
+      if (shownSet.has(i) || !(dotScales[i] > 0)) continue;
       const p = proj[i];
       if (p.depth <= 0 || p.faded || p.distance >= w.distance * 0.97 || p.sizePx < 4) continue;
+      if (Math.min(dotRadius[0] * p.sizePx, dotRadius[1]) * dotScales[i] < 1) continue;
       if (Math.abs(p.clientX - r.x) > r.width / 2 || Math.abs(p.clientY - r.y) > r.height / 2) continue;
       const px = Math.floor(p.clientX * scale), py = Math.floor(p.clientY * scale);
       if (px < 0 || py < 0 || px >= W || py >= H) continue;
