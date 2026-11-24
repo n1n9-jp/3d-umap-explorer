@@ -22,22 +22,34 @@ export const FLIGHT_EXCESS_TIME_CONSTANT = 0.12;
 
 /**
  * 上限を超えた分の速度 w が進める距離の上限（移動の距離 L に対する比）。指数の項の変位は `|w|·τ` を超えないので、
- * `|w|·τ ≤ FLIGHT_EXCESS_LIMIT·k·L` となるように τ を縮める。k は、w が終点へ近づく向き（進む方向となす角 θ が 90° 未満）なら
- * cos θ、そうでなければ 1。0.4 なら、引き継ぎの項（上限 3.4）と合わせても、進む方向の成分が終点を越えず、
- * 近づき始めたら離れない（L 0.02〜3、|v0| 0.1〜2、θ 0°〜180° で確かめた）。近づく向きで cos θ を掛けるのは、
- * 横向きの速さが近づく速さを上回って、近づき始めたあとに離れないようにするため（真横の少し手前では、超えた分はすぐ消える）。
- * 終点から離れる向き（θ ≥ 90°）では、離れている間は近づき始めていないので、そのまま 0.4·L まで許す。
+ * `|w|·τ ≤ FLIGHT_EXCESS_LIMIT·k(θ)·L` となるように τ を縮める。θ は w と進む方向のなす角で、k(θ) は θ について連続:
+ * - θ < 90°（終点へ近づく向き）: k = cos θ。近づく速さより横向きの速さが大きくなって、近づき始めたあとに離れることがないようにする。
+ * - θ ≥ 90°（離れる向き）: k = min(1, `FLIGHT_EXCESS_BACK_GAIN`·|cos θ|)。真横（90°）で 0 になり、そこから cos θ の 3 倍の傾きで 1 まで上がる
+ *   （約 109.5° 以上は 1 で、0.4·L まで許す）。k が θ について連続なので、ほぼ真横（85°〜95°）の近い点へ飛ぶときも、
+ *   角度のわずかな違いで超えた分の進む距離が跳ばない。
+ * 0.4 なら、引き継ぎの項（上限 3.4）と合わせても、進む方向の成分が終点を越えず、近づき始めたら離れない
+ * （L 0.005〜3、|v0| 0.1〜8、θ 0°〜180° で確かめた。85°〜95° は |v0| 16 まで、0.05° 刻み）。
  */
 export const FLIGHT_EXCESS_LIMIT = 0.4;
+/** 終点から離れる向き（θ ≥ 90°）で、k が cos θ の大きさの何倍で上がるか（`FLIGHT_EXCESS_LIMIT` の説明）。 */
+export const FLIGHT_EXCESS_BACK_GAIN = 3;
+/** k の下限。真横（90°）でも τ を正に保ち、飛び始めの速度が v0 に一致するようにする（このときの τ は 1 フレームよりずっと短い）。 */
+const FLIGHT_EXCESS_MIN_K = 1e-4;
+
+/** 超えた分が進む距離の上限の係数 k(θ)（`cosAngle` は w と進む方向のなす角の余弦）。0 < k ≤ 1。 */
+export function flightExcessReachFactor(cosAngle: number): number {
+  const k = cosAngle > 0 ? Math.min(1, cosAngle) : Math.min(1, -cosAngle * FLIGHT_EXCESS_BACK_GAIN);
+  return Math.max(FLIGHT_EXCESS_MIN_K, k);
+}
 
 /**
- * 上限を超えた分の速度の大きさ `excessSpeed` を減らす時定数（秒）。`min(0.12, 0.4·k·L / excessSpeed)`（k は
- * `FLIGHT_EXCESS_LIMIT` の説明のとおり。`cosAngle` は w と進む方向のなす角の余弦）。減らす分がない、または L が 0 なら 0
- * （その分は引き継がない）。
+ * 上限を超えた分の速度の大きさ `excessSpeed` を減らす時定数（秒）。`min(0.12, 0.4·k(θ)·L / excessSpeed)`（k は
+ * `FLIGHT_EXCESS_LIMIT` の説明のとおり、`flightExcessReachFactor`。`cosAngle` は w と進む方向のなす角の余弦）。
+ * 減らす分がない、または L が 0 なら 0（その分は引き継がない）。
  */
 export function flightExcessTimeConstant(excessSpeed: number, travel: number, cosAngle: number): number {
   if (!(excessSpeed > 0) || !(travel > 0) || !Number.isFinite(excessSpeed + travel + cosAngle)) return 0;
-  const k = cosAngle > 0 ? Math.min(1, cosAngle) : 1;
+  const k = flightExcessReachFactor(cosAngle);
   return Math.min(FLIGHT_EXCESS_TIME_CONSTANT, (FLIGHT_EXCESS_LIMIT * k * travel) / excessSpeed);
 }
 

@@ -599,11 +599,15 @@ describe('FlyMotion: flyTo の速度の引き継ぎ（行き過ぎない・引�
           expect(info.carriedSpeed).toBeCloseTo(speed, 12);
           // 飛び始めの速度: 位置の式の時間微分が v0 に一致し、ごく短い 1 歩の差分も v0 に一致する
           expect(m.currentVelocity(new Vector3()).distanceTo(v0)).toBeLessThan(1e-12);
-          const p0 = m.position.clone();
-          const h = 1e-8;
-          m.step(h, createMoveInput());
-          const vStart = m.position.clone().sub(p0).divideScalar(h);
-          expect(vStart.distanceTo(v0)).toBeLessThan(1e-4 * speed + 1e-5 * (1 + L / T));
+          // 真横（90°）は、超えた分を 1e-8 秒より短い時定数で減らす（k の下限）ので、差分では見えない（上の位置の式の微分で足りる）
+          if (Math.abs(angle - deg(90)) > 1e-12) {
+            const probe = start(L, speed, angle).m;
+            const p0 = probe.position.clone();
+            const h = 1e-8;
+            probe.step(h, createMoveInput());
+            const vStart = probe.position.clone().sub(p0).divideScalar(h);
+            expect(vStart.distanceTo(v0)).toBeLessThan(1e-4 * speed + 1e-5 * (1 + L / T));
+          }
 
           let prevD = m.position.distanceTo(E);
           let approaching = false;
@@ -626,6 +630,30 @@ describe('FlyMotion: flyTo の速度の引き継ぎ（行き過ぎない・引�
           expect(m.pitch).toBeCloseTo(0, 9);
           expect(m.velocity.length()).toBe(0);
           expect(prevSpeed).toBeLessThan(0.02 * (L / T) + 0.01 * speed + 1e-9); // 終わりの直前の速さは 0 へ向かう
+        }
+      }
+    }
+  });
+
+  it('真横に近い 85°〜95°（0.5° 刻み）の v0 でも、飛び始めの速度が v0 に一致し、終点を越えず、引き返さず、終わりは目標で速度 0（k が θ について連続）', () => {
+    for (const L of [0.005, 0.02, 0.05, 0.3, 1]) {
+      for (const speed of [0.3, 2, 8, 16]) {
+        for (let a = 85; a <= 95 + 1e-9; a += 0.5) {
+          const { m, v0, E } = start(L, speed, deg(a));
+          expect(m.flightInfo!.carriedSpeed).toBeCloseTo(speed, 12);
+          expect(m.currentVelocity(new Vector3()).distanceTo(v0)).toBeLessThan(1e-12);
+          let prevD = m.position.distanceTo(E);
+          let approaching = false;
+          while (m.isFlying) {
+            m.step(1 / 240, createMoveInput());
+            expect(m.position.dot(U)).toBeLessThanOrEqual(L + 1e-12);
+            const d = m.position.distanceTo(E);
+            if (approaching) expect(d).toBeLessThanOrEqual(prevD + 1e-12);
+            if (d < prevD - 1e-12) approaching = true;
+            prevD = d;
+          }
+          expect(m.position.distanceTo(E)).toBeLessThan(1e-12);
+          expect(m.velocity.length()).toBe(0);
         }
       }
     }

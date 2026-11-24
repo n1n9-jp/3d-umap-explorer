@@ -11,6 +11,7 @@ import {
   flightEaseDerivative,
   flightExcess,
   flightExcessDerivative,
+  flightExcessReachFactor,
   flightExcessTimeConstant,
   reducedFlightDuration,
   scaledFlightDuration,
@@ -163,15 +164,43 @@ describe('flightExcess: 上限を超えた分の速度の項 h = τ(1−e^(−s/
     }
   });
 
-  it('時定数は min(0.12, 0.4·k·L / |w|)。近づく向きでは k = cos θ、離れる向き・真横では k = 1。L が 0 なら 0', () => {
+  it('時定数は min(0.12, 0.4·k(θ)·L / |w|)。k は近づく向きで cos θ、離れる向きで min(1, 3|cos θ|)。L が 0 なら 0', () => {
     expect(FLIGHT_EXCESS_TIME_CONSTANT).toBe(0.12);
     expect(flightExcessTimeConstant(0.1, 1, 1)).toBe(0.12);
     expect(flightExcessTimeConstant(2, 0.05, 1)).toBeCloseTo((FLIGHT_EXCESS_LIMIT * 0.05) / 2, 15);
     expect(flightExcessTimeConstant(2, 0.05, 0.5)).toBeCloseTo((FLIGHT_EXCESS_LIMIT * 0.5 * 0.05) / 2, 15);
-    expect(flightExcessTimeConstant(2, 0.05, 0)).toBeCloseTo((FLIGHT_EXCESS_LIMIT * 0.05) / 2, 15);
+    expect(flightExcessTimeConstant(2, 0.05, -0.2)).toBeCloseTo((FLIGHT_EXCESS_LIMIT * 0.6 * 0.05) / 2, 15);
     expect(flightExcessTimeConstant(2, 0.05, -0.7)).toBeCloseTo((FLIGHT_EXCESS_LIMIT * 0.05) / 2, 15);
+    expect(flightExcessTimeConstant(2, 0.05, -1)).toBeCloseTo((FLIGHT_EXCESS_LIMIT * 0.05) / 2, 15);
     expect(flightExcessTimeConstant(2, 0, 1)).toBe(0);
     expect(flightExcessTimeConstant(0, 1, 1)).toBe(0);
     expect(flightExcessTimeConstant(Number.NaN, 1, 1)).toBe(0);
+  });
+
+  it('k は θ について連続: 真横（cos θ = 0）でも正（飛び始めの速度を保つ）で、85°〜95° を 0.05° 刻みで振っても、隣の角度との差が小さい', () => {
+    expect(flightExcessReachFactor(0)).toBeGreaterThan(0);
+    expect(flightExcessReachFactor(0)).toBeLessThan(1e-3);
+    expect(flightExcessTimeConstant(2, 0.05, 0)).toBeGreaterThan(0);
+    // 0.4·k·L / |w| の形では、超えた分が進む距離の比 |w|·τ / L = min(0.12·|w|/L, 0.4·k)
+    for (const [w, L] of [[8, 0.005], [2, 0.05], [0.5, 1], [16, 3]] as const) {
+      let prev = -1;
+      let maxStep = 0;
+      for (let i = 0; i <= 200; i++) {
+        const theta = ((85 + i * 0.05) * Math.PI) / 180;
+        const ratio = (w * flightExcessTimeConstant(w, L, Math.cos(theta))) / L;
+        expect(ratio).toBeLessThanOrEqual(0.4 + 1e-12);
+        if (prev >= 0) maxStep = Math.max(maxStep, Math.abs(ratio - prev));
+        prev = ratio;
+      }
+      // 0.05° の差で、cos θ の変化は 8.7e-4。k の傾きは最大 3 なので、0.4 × 3 × 8.7e-4 ≈ 1.1e-3 を超えない（90° を境に 0.4 跳ぶことはない）
+      expect(maxStep).toBeLessThan(1.2e-3);
+    }
+    // 全域でも連続: 0.05° 刻みの 0°〜180° で、隣との差が同じ上限以内
+    let prev = -1;
+    for (let i = 0; i <= 3600; i++) {
+      const k = flightExcessReachFactor(Math.cos((i * 0.05 * Math.PI) / 180));
+      if (prev >= 0) expect(Math.abs(k - prev)).toBeLessThan(3 * 8.73e-4 + 1e-12);
+      prev = k;
+    }
   });
 });

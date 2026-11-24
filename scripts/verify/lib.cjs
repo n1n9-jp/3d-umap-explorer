@@ -181,7 +181,14 @@ function computeViews(ds) {
  * measureFrames の結果から求める。測った 1 フレームのほかに、測る前の 1 フレーム（数えない）も進むので、
  * （数えたフレーム + 1）× min(0.1, 平均の 1 フレームの時間）を下限とする。標本のあいだに挟まる描画は数えないので、実際はこれ以上。
  */
-const simSecondsOf = (stats) => (stats.frames + 1) * Math.min(0.1, stats.meanMs / 1000);
+const simSecondsOf = (stats) => {
+  const sim = (stats.frames + 1) * Math.min(0.1, stats.meanMs / 1000);
+  if (sim > maxSampleSim) maxSampleSim = sim;
+  return sim;
+};
+/** この実行で見た、1 標本の模擬の時間（`simSecondsOf`）の最大値（秒）。標本の粒度の上限として、判定の上限に足す。 */
+let maxSampleSim = 0;
+const observedMaxSampleSim = () => maxSampleSim;
 
 /** 状態に、ここまでに進めた模擬の時間の下限（simSeconds）を足して返す。`decorate(s)` で値を足せる。 */
 async function sampleOnce(page, simBefore, decorate) {
@@ -328,5 +335,5 @@ async function waitCameraIdle(page, maxSimSeconds = 6) {
 module.exports = {
   readInfoRect, readUiRects, inRects, TOP_UI_IDS,
   loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, add, mul, len, norm, sendPointer, pointerGesture, flickPoints,
-  simSecondsOf, sampleOnce, sampleUntil, waitSim, waitReorient, cameraAnimating, waitCameraIdle, flightEase, expectedFlightDuration,
+  simSecondsOf, observedMaxSampleSim, sampleOnce, sampleUntil, waitSim, waitReorient, cameraAnimating, waitCameraIdle, flightEase, expectedFlightDuration,
 };

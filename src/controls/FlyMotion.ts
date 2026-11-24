@@ -294,7 +294,8 @@ export class FlyMotion {
     const durationMs = reducedFlightDuration(scaledFlightDuration(baseMs, travel, options.cloudRadius), reduced);
     // 引き継ぎの項で引き継ぐ速さを、移動の距離に応じて抑える（T·|v| ≤ c·L）。速い滑走から近い点へ飛んでも、経路が膨らみすぎない。
     // 上限を超えた分 w は、一瞬で切らずに、短い時定数の指数で減らす項として引き継ぐ（飛び始めの速さが v0 のまま連続する）。
-    // その項が進める距離は |w|·τ ≤ 0.4·cos θ·L（θ は v0 と進む方向のなす角。90° 以上なら 0.4·L）に抑える（終点を越えず、近づき始めたら離れない）。
+    // その項が進める距離は |w|·τ ≤ 0.4·k(θ)·L に抑える（θ は v0 と進む方向のなす角。k は θ について連続: 90° 未満は cos θ、以上は min(1, 3|cos θ|)。
+    // 終点を越えず、近づき始めたら離れない）。
     const excessVelocity = new Vector3();
     let excessTau = 0;
     const speed0 = startVelocity.length();
