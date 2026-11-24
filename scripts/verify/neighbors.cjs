@@ -16,6 +16,8 @@
  *   - 近傍の表示の有無で、ピッキングの番号の画像が変わらない
  *   - ブラウザで UMAP を計算し直したあと（近傍数 5）、元の空間での近傍の一覧は同じで、「地図でも近い」数が新しい座標から求めたものと一致する。
  *     計算の途中の表示の間も、線の端点が描いている座標と合う
+ *   - kNN グラフの取得口は 1 つ: 点を選択してから UMAP を計算し直しても、逆に計算してから選択しても、kNN グラフのファイル
+ *     （番号と距離）への要求はそれぞれ 1 回だけ（新しいページで数える）。どちらが先でも、もう一方は取得済みのグラフを使う
  *   - データセットを切り替えると、前のデータの近傍の表示が残らず、kNN グラフを捨てる（新しいデータでも選択するまで要求しない）
  *   - MNIST でも近傍の画像の一覧が出て、画像がアトラスのセルと一致する
  *   - コンソールエラーがない
@@ -484,6 +486,49 @@ async function testUmap(page, q, knn) {
   check('事前計算に戻すと、地図でも近い数も戻る', rv && back && back.matches === before.matches && JSON.stringify(back.map) === JSON.stringify(before.map), back ? `${back.matches}` : '');
 }
 
+/**
+ * kNN グラフの取得口が 1 つであること。新しいページを開き、「選択 → UMAP の計算」と「UMAP の計算 → 選択」のそれぞれで、
+ * kNN グラフのファイル（番号と距離）への要求の回数を数える。
+ */
+async function testSharedFetch(browser, base, w2v, knn) {
+  const jan = w2v.text.indexOf('january');
+  for (const order of ['select-first', 'compute-first']) {
+    const label = order === 'select-first' ? '点を選択 → UMAP を計算し直し' : 'UMAP を計算し直し → 点を選択';
+    console.log(`\n[kNN グラフの取得口: ${label}]`);
+    const page = await openPage(browser, base, 'word2vec-10k');
+    const own = [];
+    page.on('request', (r) => { if (knn.files.some((f) => r.url().includes(f))) own.push(r.url()); });
+    await frames(page, 4);
+    check(`${label}: 起動しただけでは kNN グラフを要求しない`, own.length === 0);
+    const select = async () => {
+      await page.evaluate((k) => window.__explorer.interaction.select(k), jan);
+      return waitFor(page, (k) => { const s = window.__explorer.neighbors.getState(); return s.selected === k && s.list.state === 'ready' ? s : null; }, 60, jan);
+    };
+    const compute = async () => {
+      const outcome = await page.evaluate(() => window.__explorer.umap.compute({ nNeighbors: 5, minDist: 0.1, seed: 42 }));
+      return outcome && outcome.ok !== false && (await page.evaluate(() => window.__explorer.umap.getState().current.kind)) === 'computed';
+    };
+    let ready, computed, mid;
+    if (order === 'select-first') {
+      ready = await select();
+      mid = await nb(page);
+      computed = await compute();
+    } else {
+      computed = await compute();
+      mid = await nb(page);
+      ready = await select();
+    }
+    check(`${label}: 選択で一覧が出て、UMAP を計算し直せる`, !!ready && computed);
+    const perFile = knn.files.map((f) => own.filter((u) => u.includes(f)).length);
+    check(`${label}: kNN グラフのファイル（番号と距離）への要求はそれぞれ 1 回だけ`, perFile.every((n) => n === 1), `${knn.files.join(', ')} → ${perFile.join(', ')}`);
+    const st = await nb(page);
+    const um = await page.evaluate(() => window.__explorer.umap.getState());
+    check(`${label}: 近傍の側は 1 回の取得を共有している（取得 1 回・取得済み）`, st.graph === 'ready' && st.graphLoads === 1 && um.graphLoaded === true, `graph=${st.graph} loads=${st.graphLoads} umap.graphLoaded=${um.graphLoaded}`);
+    if (order === 'compute-first') check(`${label}: 計算の時点で取得口は取得済みになり、選択で取得し直さない`, mid.graph === 'ready' && mid.graphLoads === 1, `graph=${mid.graph}`);
+    await page.close();
+  }
+}
+
 async function testSwitch(page, mnist, mknn) {
   console.log('\n[データセットの切り替え]');
   const reqBefore = knnRequests(mknn.files).length;
@@ -576,6 +621,7 @@ async function main() {
     const page = await openPage(browser, base, 'word2vec-10k');
     await testWord2vec(page, base, w2v, wknn);
     await testSwitch(page, mnist, mknn);
+    await testSharedFetch(browser, base, w2v, wknn);
     await testMnist(page, mnist, mknn);
     await page.close();
     check('コンソールエラーがない', consoleErrors.length === 0, consoleErrors.join(' | '));

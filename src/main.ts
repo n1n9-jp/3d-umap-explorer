@@ -291,6 +291,7 @@ async function start(): Promise<void> {
     view: () => view,
     baseData: () => baseData,
     generation: () => state.generation,
+    knnGraph: () => neighbors.knnGraph(),
     replaceView,
     setUrlParams: (p) => {
       const url = `${window.location.pathname}${searchWithParams(window.location.search, p)}${window.location.hash}`;

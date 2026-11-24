@@ -25,9 +25,6 @@ vi.mock('../app/umapPanel', () => ({
     dispose() {}
   },
 }));
-vi.mock('../data/knn', () => ({
-  loadKnnGraph: async () => ({ count: 50, k: 20, indices: new Uint16Array(50 * 20), distances: new Float32Array(50 * 20) }),
-}));
 vi.mock('./structureClient', async () => {
   const actual = await vi.importActual<typeof import('./structureClient')>('./structureClient');
   return {
@@ -52,6 +49,7 @@ vi.mock('./structureClient', async () => {
 
 import { UmapFeature, MORPH_SECONDS } from './umapFeature';
 import type { EmbeddingHost } from './host';
+import type { KnnGraph } from '../data/knn';
 
 class FakeWorker {
   static instances: FakeWorker[] = [];
@@ -86,6 +84,10 @@ function makeHost() {
     replaced: 0,
     replaceError: null as Error | null,
     viewPresent: true,
+    /** `host.knnGraph()` を呼んだ回数 */
+    graphCalls: 0,
+    graphError: null as Error | null,
+    graph: { count: N, k: 20, metric: 'euclidean', indices: new Uint16Array(N * 20), distances: new Float32Array(N * 20) } as KnnGraph,
   };
   const view = {
     arrays: { positions: base, manifest: { count: N } },
@@ -105,6 +107,11 @@ function makeHost() {
     view: () => (state.viewPresent ? (view as never) : null),
     baseData: () => baseData as never,
     generation: () => state.generation,
+    knnGraph: async () => {
+      state.graphCalls++;
+      if (state.graphError) throw state.graphError;
+      return state.graph;
+    },
     replaceView: (...args) => {
       if (state.replaceError) throw state.replaceError;
       state.replaced++;
@@ -373,6 +380,68 @@ describe('構造の計算（Worker）と表示の作り直し', () => {
     w.emit({ type: 'cancelled', id, epoch: 6 });
     expect(await promise).toMatchObject({ ok: false, cancelled: true });
     expect(state.computing).toBe(false);
+  });
+});
+
+describe('kNN グラフの取得口（host.knnGraph）', () => {
+  it('取得口から受け取ったグラフを、コピーで（転送せずに）Worker へ送る。計算を重ねても取得口へは 1 回だけ要求する', async () => {
+    const { host, state } = makeHost();
+    const f = new UmapFeature(host);
+    expect(f.getState().graphLoaded).toBe(false);
+    const { promise, w, id } = await startCompute(f);
+    const g = w.posted.find((m) => m.type === 'graph') as Extract<ToWorker, { type: 'graph' }>;
+    expect(g.indices).toBe(state.graph.indices); // 同じ配列（コピーは postMessage が行う。第 2 引数の転送リストは渡さない）
+    expect(state.graph.indices.byteLength).toBe(N * 20 * 2);
+    expect(f.getState().graphLoaded).toBe(true);
+    w.emit({ type: 'cancelled', id, epoch: 1 });
+    await promise;
+    const second = await startCompute(f);
+    expect(second.w).toBe(w);
+    expect(state.graphCalls).toBe(1);
+  });
+
+  it('取得に失敗したら、エラーとして報告し、次の計算で取得し直せる（失敗を保持しない）', async () => {
+    const { host, state } = makeHost();
+    state.graphError = new Error('HTTP 500');
+    const f = new UmapFeature(host);
+    const failed = await f.compute(P);
+    expect(failed).toMatchObject({ ok: false, error: 'HTTP 500' });
+    expect(FakeWorker.instances).toHaveLength(0);
+    expect(f.getState().graphLoaded).toBe(false);
+    state.graphError = null;
+    await startCompute(f);
+    expect(state.graphCalls).toBe(2);
+    expect(f.getState().graphLoaded).toBe(true);
+  });
+
+  it('取得を待つ間にデータセットが切り替わったら、古いグラフを Worker へ送らず、中断として解決する', async () => {
+    const { host, state } = makeHost();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const original = host.knnGraph;
+    host.knnGraph = async () => { await gate; return original(); };
+    const f = new UmapFeature(host);
+    const promise = f.compute(P);
+    await flush();
+    state.generation++;
+    f.datasetChanged();
+    release();
+    const r = await promise;
+    expect(r.ok).toBe(false);
+    expect(FakeWorker.instances.filter((w) => w.posted.some((m) => m.type === 'graph'))).toHaveLength(0);
+    expect(f.getState().graphLoaded).toBe(false);
+  });
+
+  it('データセットを切り替えたあとは、新しいデータセットのグラフを取得口へ要求し直す（Worker も作り直す）', async () => {
+    const { host, state } = makeHost();
+    const f = new UmapFeature(host);
+    const a = await startCompute(f);
+    state.generation++;
+    f.datasetChanged();
+    expect(f.getState().graphLoaded).toBe(false);
+    const b = await startCompute(f);
+    expect(b.w).not.toBe(a.w);
+    expect(state.graphCalls).toBe(2);
   });
 });
 

@@ -92,3 +92,106 @@ describe('NeighborsShared', () => {
     expect(shared.count).toBe(10);
   });
 });
+
+describe('NeighborsShared.knnGraph（kNN グラフの唯一の取得口）', () => {
+  const other = { count: 2, knn: { k: 1 } } as unknown as DatasetManifest;
+
+  it('近傍の機能（source.load）と UMAP の機能（knnGraph）の同時の要求が、1 回の取得にまとまり、同じ 1 部を共有する', async () => {
+    const d = deferred<KnnGraph>();
+    let calls = 0;
+    const shared = new NeighborsShared({ loader: () => { calls++; return d.promise; } });
+    shared.setDataset({ dir: 'a', manifest: withKnn });
+    const a = shared.source!.load(), b = shared.knnGraph(), c = shared.knnGraph();
+    d.resolve(g);
+    const [ga, gb, gc] = await Promise.all([a, b, c]);
+    expect(ga).toBe(g);
+    expect(gb).toBe(g);
+    expect(gc).toBe(g);
+    expect(shared.source!.graph).toBe(g);
+    expect(await shared.knnGraph()).toBe(g);
+    expect(calls).toBe(1);
+    expect(shared.source!.loads).toBe(1);
+  });
+
+  it('UMAP が先に取得しても、近傍の機能は読み込み直さない', async () => {
+    let calls = 0;
+    const shared = new NeighborsShared({ loader: async () => { calls++; return g; } });
+    shared.setDataset({ dir: 'a', manifest: withKnn });
+    await shared.knnGraph();
+    expect(await shared.source!.load()).toBe(g);
+    expect(shared.source!.status).toBe('ready');
+    expect(calls).toBe(1);
+  });
+
+  it('読み込み中に切り替えると、どちらの機能にも古い結果を渡さない。切り替え後の取得は新しいデータセットのもの', async () => {
+    const old = deferred<KnnGraph>();
+    const fresh: KnnGraph = { ...g, indices: new Uint16Array([1, 0]) };
+    const loads: string[] = [];
+    const shared = new NeighborsShared({
+      loader: (dir) => { loads.push(dir); return dir === 'a' ? old.promise : Promise.resolve(fresh); },
+    });
+    shared.setDataset({ dir: 'a', manifest: withKnn });
+    const oldSource = shared.source!;
+    const viaSource = oldSource.load();
+    const viaHost = shared.knnGraph();
+    shared.setDataset({ dir: 'b', manifest: other });
+    old.resolve(g);
+    await expect(viaSource).rejects.toThrow();
+    await expect(viaHost).rejects.toThrow();
+    expect(oldSource.graph).toBeNull();
+    expect(shared.source!.graph).toBeNull();
+    expect(await shared.knnGraph()).toBe(fresh);
+    expect(shared.source!.graph).toBe(fresh);
+    expect(loads).toEqual(['a', 'b']);
+  });
+
+  it('失敗したら、どちらの機能からの次の要求でも読み込み直す（失敗を保持しない）', async () => {
+    let calls = 0;
+    const shared = new NeighborsShared({ loader: async () => { calls++; if (calls <= 2) throw new Error(`HTTP 50${calls}`); return g; } });
+    shared.setDataset({ dir: 'a', manifest: withKnn });
+    await expect(shared.knnGraph()).rejects.toThrow('HTTP 501');
+    expect(shared.source!.status).toBe('error');
+    await expect(shared.source!.load()).rejects.toThrow('HTTP 502');
+    expect(await shared.knnGraph()).toBe(g);
+    expect(shared.source!.graph).toBe(g);
+    expect(calls).toBe(3);
+  });
+
+  it('同時の要求が失敗したら、すべて同じ失敗で終わり、そのあとの要求は読み込み直す', async () => {
+    const d = deferred<KnnGraph>();
+    let calls = 0;
+    const shared = new NeighborsShared({ loader: () => { calls++; return calls === 1 ? d.promise : Promise.resolve(g); } });
+    shared.setDataset({ dir: 'a', manifest: withKnn });
+    const a = shared.source!.load(), b = shared.knnGraph();
+    d.reject(new Error('HTTP 500'));
+    await expect(a).rejects.toThrow('HTTP 500');
+    await expect(b).rejects.toThrow('HTTP 500');
+    expect(calls).toBe(1);
+    expect(await shared.knnGraph()).toBe(g);
+    expect(calls).toBe(2);
+  });
+
+  it('データセットがない・kNN グラフがないデータセットでは、読み込まずに拒否する', async () => {
+    let calls = 0;
+    const shared = new NeighborsShared({ loader: async () => { calls++; return g; } });
+    await expect(shared.knnGraph()).rejects.toThrow();
+    shared.setDataset({ dir: 'a', manifest: withoutKnn });
+    await expect(shared.knnGraph()).rejects.toThrow();
+    shared.setDataset(null);
+    await expect(shared.knnGraph()).rejects.toThrow();
+    expect(calls).toBe(0);
+  });
+
+  it('同じデータセットの setDataset（表示の作り直し）では、読み込み中のものも捨てない', async () => {
+    const d = deferred<KnnGraph>();
+    let calls = 0;
+    const shared = new NeighborsShared({ loader: () => { calls++; return d.promise; } });
+    shared.setDataset({ dir: 'a', manifest: withKnn });
+    const p = shared.knnGraph();
+    shared.setDataset({ dir: 'a', manifest: withKnn });
+    d.resolve(g);
+    expect(await p).toBe(g);
+    expect(await shared.knnGraph()).toBe(g);
+    expect(calls).toBe(1);
+  });
+});

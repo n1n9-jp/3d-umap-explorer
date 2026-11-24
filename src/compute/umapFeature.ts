@@ -11,7 +11,6 @@
  *      を作り直す（`host.replaceView`）。選択中の点は番号で引き継ぐ。カメラはその場に留める（理由は README の「使い方」）。
  *   5. 結果は、パラメータと種を鍵に、セッションの間（データセットを切り替えるまで）保持する（上限 `MAX_CACHED`）。
  */
-import { loadKnnGraph, type KnnGraph } from '../data/knn';
 import { UmapPanel } from '../app/umapPanel';
 import { applyTransform, meanDisplacement, normalizePositions, procrustes } from './align';
 import { takeFault } from '../app/faults';
@@ -102,8 +101,8 @@ export class UmapFeature {
   private available = false;
   private maxNeighbors: number = UMAP_LIMITS.nNeighbors.max;
   private defaults: UmapParams = { nNeighbors: 15, minDist: 0.1, seed: 42 };
-  private graph: KnnGraph | null = null;
-  private graphPromise: Promise<KnnGraph> | null = null;
+  /** 表示中のデータセットの kNN グラフを、取得口（`host.knnGraph()`）から受け取ったか（グラフ自体は保持しない） */
+  private graphReceived = false;
   private worker: Worker | null = null;
   private nextId = 1;
   private loading: RunningJob | null = null;
@@ -177,7 +176,7 @@ export class UmapFeature {
       lastCancel: this.lastCancel ? { ...this.lastCancel } : null,
       lastOutcome: this.lastOutcome,
       error: this.error,
-      graphLoaded: this.graph !== null,
+      graphLoaded: this.graphReceived,
       workerStarted: this.worker !== null,
     };
   }
@@ -220,8 +219,7 @@ export class UmapFeature {
     this.morph = null;
     this.baseSpatialIndex = null;
     this.cache.clear();
-    this.graph = null;
-    this.graphPromise = null;
+    this.graphReceived = false;
     this.current = { kind: 'precomputed' };
     this.lastAlignment = null;
     this.previewShown = false;
@@ -378,16 +376,11 @@ export class UmapFeature {
   private async ensureWorker(): Promise<void> {
     const base = this.host.baseData();
     if (!base) throw new Error('表示中のデータセットがありません');
-    if (!this.graph) {
-      this.graphPromise ??= loadKnnGraph(base.dir, base.arrays.manifest);
-      const gen = this.gen;
-      const g = await this.graphPromise.catch((e: unknown) => {
-        this.graphPromise = null;
-        throw e;
-      });
-      if (gen !== this.host.generation()) throw new Error('データセットが切り替わりました');
-      this.graph = g;
-    }
+    if (this.worker) return; // グラフは Worker を作ったときに送ってある
+    const gen = this.gen;
+    const graph = await this.host.knnGraph();
+    if (gen !== this.host.generation()) throw new Error('データセットが切り替わりました');
+    this.graphReceived = true;
     if (!this.worker) {
       const w = takeFault('worker')
         ? new Worker(FAILING_WORKER_URL, { name: 'umap' })
@@ -406,9 +399,8 @@ export class UmapFeature {
         else console.warn('UMAP の Worker でエラーが起きました:', message);
       };
       this.worker = w;
-      const g = this.graph;
-      // グラフはメインスレッドにも残す（Worker を作り直すときに使う）ので、コピーで送る
-      this.post({ type: 'graph', count: g.count, k: g.k, indices: g.indices, distances: g.distances });
+      // グラフは取得口が持ち続ける（「元のデータで近い点」も使う）ので、転送せずコピーで送る
+      this.post({ type: 'graph', count: graph.count, k: graph.k, indices: graph.indices, distances: graph.distances });
     }
   }
 

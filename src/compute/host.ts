@@ -3,6 +3,7 @@
  * 型だけを置き、main.ts から import しても計算の部分はバンドルに入らない。
  */
 import type { DatasetView, LoadedDataset } from '../app/datasetView';
+import type { KnnGraph } from '../data/knn';
 import type { PointColoring } from '../render/colorScheme';
 import type { SpatialIndex } from '../spatial/SpatialIndex';
 import type { UmapParams } from './params';
@@ -15,6 +16,12 @@ export interface EmbeddingHost {
   baseData(): LoadedDataset | null;
   /** データセットの切り替えの回数。切り替わったら、それまでの計算と結果を捨てる */
   generation(): number;
+  /**
+   * 表示中のデータセットの kNN グラフ。取得と保持は「元のデータで近い点」と共通の 1 か所（`NeighborsShared`）で行い、
+   * 同時の要求は 1 回の取得にまとまる。読み込み中にデータセットが切り替わると拒否される。失敗したら、次の要求で読み込み直す。
+   * 返したグラフは共有なので、書き換えない。
+   */
+  knnGraph(): Promise<KnnGraph>;
   /**
    * 表示を `data` で作り直す（点の大きさ・カメラの位置と向き・モード・速度・自動調整・目印とミニマップの表示・選択を引き継ぐ）。
    * `spatialIndex` は `data.arrays.positions` から構築済みの空間索引（渡すと作り直さない）。

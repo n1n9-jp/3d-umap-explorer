@@ -1,11 +1,12 @@
 /**
  * 「元の空間で近い点」の、データセットの表示（DatasetView）をまたいで保つ状態。アプリ全体（src/main.ts）で 1 つだけ持つ。
  *
- * - kNN グラフ（`KnnSource`）と選択の履歴は、データセットごとに持つ。データセットを切り替えたら捨てる
- *   （`setDataset`）。ブラウザで計算した埋め込みへ表示を作り直すときは、同じデータセットなので保つ
+ * - kNN グラフ（`KnnSource`。取得口は `knnGraph()`）と選択の履歴は、データセットごとに持つ。データセットを切り替えたら
+ *   （読み込み中のものも含めて）捨てる。捨てるのは `setDataset` の 1 か所。ブラウザで計算した埋め込みへ表示を作り直すときは、同じデータセットなので保つ
  *   （元の空間での近傍は、埋め込みによらず同じ）。
  * - 地図の上の表示（強調と線）の有効・無効（N キー）は、データセットを切り替えても保つ。
  */
+import type { KnnGraph } from '../data/knn';
 import type { DatasetManifest } from '../data/manifest';
 import { SelectionHistory } from './history';
 import { KnnSource, type KnnLoader } from './source';
@@ -28,6 +29,17 @@ export class NeighborsShared {
   /** 表示中のデータセットの kNN グラフ（データセットがなければ null） */
   get source(): KnnSource | null {
     return this._source;
+  }
+
+  /**
+   * 表示中のデータセットの kNN グラフ。アプリ内の kNN グラフの取得口はここだけ（近傍の一覧と、ブラウザでの UMAP の再計算の両方が使う）。
+   * 同時の要求は 1 回の取得にまとまり、読み込んだ 1 部を共有する。読み込み中にデータセットが切り替わると拒否される。
+   * 失敗したら、次の要求で読み込み直す。
+   */
+  knnGraph(): Promise<KnnGraph> {
+    const source = this._source;
+    if (!source) return Promise.reject(new Error('表示中のデータセットがありません'));
+    return source.load();
   }
 
   /**
