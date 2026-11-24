@@ -34,7 +34,7 @@ const { execSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require('playwright');
-const { loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, add, mul, len, norm } = require('./lib.cjs');
+const { loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, add, mul, len, norm, readInfoRect } = require('./lib.cjs');
 
 const root = path.resolve(__dirname, '../..');
 const args = process.argv.slice(2);
@@ -425,12 +425,14 @@ async function testHoverSelect(page) {
   await setView(page, VIEWS.inside);
   const s = await waitWords(page);
   // 文字の高さが大きく、パネル・HUD・ミニマップ・目印にかからない単語の、基準点から離れた文字の画素
+  const info = await readInfoRect(page); // 情報パネルは実際の矩形で避ける
   const target = await page.evaluate(async (wh) => {
+    const inInfo = (x, y) => wh.info && x > wh.info.left - 12 && x < wh.info.right + 12 && y > wh.info.top - 12 && y < wh.info.bottom + 12;
     const ex = window.__explorer, dbg = ex.picking;
     const ws = ex.words.getState();
     const img = await dbg.readIdImage();
     const scale = dbg.bufferScale();
-    const ok = (x, y) => x > 40 && y > 60 && x < wh.w - 40 && y < wh.h - 40 && !(x > wh.w - 380 && y < 240) && !(x < 680 && y > wh.h - 220) && !(x > wh.w - 260 && y > wh.h - 240);
+    const ok = (x, y) => x > 40 && y > 60 && x < wh.w - 40 && y < wh.h - 40 && !inInfo(x, y) && !(x < 680 && y > wh.h - 220) && !(x > wh.w - 260 && y > wh.h - 240);
     const canvas = document.querySelector('#app canvas');
     const cands = ws.shown.filter((w) => w.textPx >= 14 && ok(w.rect.x, w.rect.y)).sort((a, b) => b.textPx - a.textPx);
     for (const w of cands) {
@@ -447,7 +449,7 @@ async function testHoverSelect(page) {
       }
     }
     return null;
-  }, { w: width, h: height });
+  }, { w: width, h: height, info });
   if (!target) { check('ホバーの検証に使う単語が見つかる', false, `表示中 ${s.shown.length} 語`); return; }
   console.log(`  単語 "${target.text}"（#${target.index}）の文字の上 (${target.x.toFixed(1)}, ${target.y.toFixed(1)})、基準点から ${Math.hypot(target.x - target.anchorX, target.y - target.anchorY).toFixed(1)}px`);
   await page.mouse.move(target.x, target.y);

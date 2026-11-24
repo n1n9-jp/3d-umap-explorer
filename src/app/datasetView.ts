@@ -287,17 +287,9 @@ export class DatasetView {
             this.interaction.select(i);
             this.interaction.flyToPoint(i);
           },
-          // 単語の文字を出している近傍は、文字を囲む矩形で示す（文字の位置は最後に選び直したときのもの。点からのずれとして使う）
-          wordBoxes: () => {
-            const out = new Map<number, { dx: number; dy: number; hw: number; hh: number }>();
-            const w = this.words;
-            if (!w || !w.isEnabled() || this.wordsSuspended) return out;
-            for (const s of w.getState().shown) {
-              if (s.opacity < 0.5) continue;
-              out.set(s.index, { dx: s.rect.x - s.anchorX, dy: s.rect.y - s.anchorY, hw: s.rect.width / 2, hh: s.rect.height / 2 });
-            }
-            return out;
-          },
+          // 単語の文字を出している近傍は、文字を囲む矩形で示す（そのフレームに描かれている文字の矩形と基準点。WordLabels.currentBox）。
+          // 点が新旧の座標の間を動く間は文字を止めている（wordsSuspended）ので、null になる
+          wordBox: (i) => this.words?.currentBox(i) ?? null,
         });
         (this as { neighbors: NeighborView | null }).neighbors = neighbors;
         this.root.add(neighbors.overlay.group);
@@ -377,6 +369,7 @@ export class DatasetView {
   setComputingDisplay(on: boolean): void {
     if (this.disposed || on === this.computingDisplay) return;
     this.computingDisplay = on;
+    this.neighbors?.setComputingDisplay(on); // 「地図で近い」の判定は計算の前の座標のもの（要約に添える）
     if (on) {
       this.labelsBeforeComputing = this.clusterLabels.enabled;
       this.clusterLabels.setEnabled(false);
@@ -491,12 +484,14 @@ export class DatasetView {
   update(dt: number, width: number, height: number): void {
     this.controller.update(dt);
     this.updateCameraDependent();
+    // 画面の端の UI の矩形は、毎フレーム 1 回だけ読む（単語の文字と、近傍の画面の端の印の両方が、これを避ける）
+    const ui = this.uiObstacles();
     if (this.words) {
-      this.words.setObstacles(this.wordObstacles());
+      this.words.setObstacles(this.wordObstacles(ui));
       this.words.update(dt, width, height);
     }
     this.clusterLabels.update(width, height);
-    this.neighbors?.update(width, height);
+    this.neighbors?.update(width, height, ui);
     this.layoutComputingBadge();
   }
 
@@ -529,7 +524,15 @@ export class DatasetView {
    * 内部では単語を優先する（目印のほうを隠す。ClusterLabels）。内部でも、キーボードのフォーカスがある目印とは重ねない。
    * 目印は前のフレームの位置（単語の選び直しは、位置が変われば次のフレームで追いつく）。
    */
-  private wordObstacles(): ScreenRect[] {
+  private wordObstacles(ui: readonly ScreenRect[]): ScreenRect[] {
+    const out: ScreenRect[] = [...ui];
+    const labels = this.clusterLabels;
+    out.push(...labels.visibleRects(labels.insideCluster));
+    return out;
+  }
+
+  /** 画面の端の UI（`WORD_OBSTACLE_IDS`）の、いまの実際の矩形（x・y は中心）。表示されていないものは含まない。 */
+  private uiObstacles(): ScreenRect[] {
     const out: ScreenRect[] = [];
     const doc = this.ctx.doc;
     for (const id of WORD_OBSTACLE_IDS) {
@@ -539,8 +542,6 @@ export class DatasetView {
       if (r.width <= 0 || r.height <= 0) continue;
       out.push({ x: r.left + r.width / 2, y: r.top + r.height / 2, width: r.width, height: r.height });
     }
-    const labels = this.clusterLabels;
-    out.push(...labels.visibleRects(labels.insideCluster));
     return out;
   }
 

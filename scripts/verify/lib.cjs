@@ -42,6 +42,26 @@ const mul = (a, s) => [a[0] * s, a[1] * s, a[2] * s];
 const len = (a) => Math.hypot(a[0], a[1], a[2]);
 const norm = (a) => { const l = len(a) || 1; return mul(a, 1 / l); };
 
+/**
+ * 情報パネル（#info）の、いまの実際の矩形（CSS ピクセル。left・top・right・bottom）。点を探す範囲から外すのに使う。
+ * パネルは一覧が加わって大きさが変わるので、固定の範囲ではなく、要素の矩形（getBoundingClientRect）を読む。
+ * パネルが閉じているときは、選択すると右上に開く場所を空けておく（選んだ点がパネルの下に隠れないように）:
+ * 同じ大きさの画面で最後に見えていたときの矩形があればそれを、なければ、右上に開くパネルの最大の大きさの予約領域
+ * （幅 400・高さ 360。これまでに見た最大は 346×323。画面の高さを超えない）。
+ */
+const lastInfoRects = new WeakMap();
+async function readInfoRect(page) {
+  const r = await page.evaluate(() => {
+    const el = document.getElementById('info');
+    const b = el && !el.hidden ? el.getBoundingClientRect() : null;
+    return { vw: window.innerWidth, vh: window.innerHeight, rect: b && b.width > 0 && b.height > 0 ? { left: b.left, top: b.top, right: b.right, bottom: b.bottom } : null };
+  });
+  if (r.rect) { lastInfoRects.set(page, { vw: r.vw, vh: r.vh, rect: r.rect }); return r.rect; }
+  const last = lastInfoRects.get(page);
+  if (last && last.vw === r.vw && last.vh === r.vh) return last.rect;
+  return { left: r.vw - 12 - 400, top: 12, right: r.vw - 12, bottom: Math.min(r.vh - 12, 12 + 360) };
+}
+
 /** 半径 r 以内の近傍数を格子ハッシュで数え、最も密な点を返す。 */
 function densestPoint({ positions, count }, r) {
   const cell = r, key = (x, y, z) => `${x},${y},${z}`;
@@ -198,4 +218,4 @@ function flickPoints(x0, y0, dx, dy, durationMs = 160, n = 10) {
   return pts;
 }
 
-module.exports = { loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, add, mul, len, norm, sendPointer, pointerGesture, flickPoints };
+module.exports = { readInfoRect, loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, add, mul, len, norm, sendPointer, pointerGesture, flickPoints };

@@ -10,6 +10,7 @@
  *   表示中の単語が画面上で大きく動いたときは、33 ミリ秒（選び直しが重いときはその 6 倍）まで間隔を縮め、障害物との間隔も広げる（motion.ts）。
  *   新しく入る単語と抜ける単語は、`fadeSeconds` 秒で不透明度を変える。
  * - 表示中の単語の矩形（`shownRects`）は、毎フレーム、いまの視点で求め直す（描かれている文字の位置と合う）。
+ *   点の番号で引く読み取り口（`currentBox`）も、同じ矩形と基準点を返す（配列やオブジェクトを作らない）。
  * - 文字を出している点の丸い点は縮めて消し（不透明度に合わせる）、ホバー・選択の強調は単語を囲む矩形にする。
  *   表示中の単語の矩形の近くの丸い点は小さくして（clearance.ts）、同じ色の点の塊が文字を読みにくくしないようにする。
  * - ピッキング（src/picking/GpuPicker.ts）の層として、文字の本体の画素をその点の番号で描く。
@@ -20,7 +21,7 @@ import type { GpuPicker } from '../picking/GpuPicker';
 import { buildGlyphAtlas, type GlyphAtlas } from './glyphAtlas';
 import { collectChars, layoutWord, MAX_WORD_CHARS, type WordLayout } from './layout';
 import {
-  DEFAULT_SELECT_PARAMS, placeWordRect, selectWords, stepOpacities, textSizePx, type PlacedWord, type ScreenRect, type SelectView, type WordBox, type WordSelectParams,
+  DEFAULT_SELECT_PARAMS, placeWordRect, selectWords, stepOpacities, textSizePx, type PlacedRect, type PlacedWord, type ScreenRect, type SelectView, type WordBox, type WordSelectParams,
 } from './selection';
 import { wordFragmentShader, wordVertexShader } from './shaders';
 import { DOT_CLEARANCE_MARGIN_PX, DOT_CLEARANCE_SCALE, pointsNearRects, pointsNearRectsIndexed, type BoxQueryIndex } from './clearance';
@@ -71,6 +72,8 @@ export interface WordLabelsState {
   shown: { index: number; text: string; rect: PlacedWord['rect']; anchorX: number; anchorY: number; textPx: number; naturalPx: number; distance: number; opacity: number }[];
   /** 表示中の単語の、いまの視点での画面上の矩形（`shownRects()` と同じ。カメラの後ろへ回った単語は含まない） */
   currentRects: ScreenRect[];
+  /** `currentBox(index)` が返す矩形と基準点を持つ単語（不透明度が十分高いもの。検証用） */
+  currentBoxes: { index: number; rect: ScreenRect; anchorX: number; anchorY: number }[];
   /** 単語を重ねない領域（UI の要素・目印。CSS ピクセル） */
   obstacles: ScreenRect[];
   /** 単語の矩形の近くにあって、丸い点を小さくしている点の数（clearance.ts） */
@@ -129,6 +132,8 @@ export class WordLabels {
   private motionAtSelectPx = 0;
   /** いまの視点での、表示中の単語の矩形（`shown` と同じ順） */
   private currentRects: ScreenRect[] = [];
+  /** `currentRects` と同じ矩形・基準点を、点の番号で引けるようにしたもの（毎フレーム `trackMotion` で作り直す。値は作った `PlacedRect` そのもの） */
+  private readonly currentById = new Map<number, PlacedRect>();
   private dirtyLayout = true;
   private drawnWords = 0;
   private drawnGlyphs = 0;
@@ -244,6 +249,7 @@ export class WordLabels {
     this.clearTargets = new Set();
     this.clearance.clear();
     this.currentRects = [];
+    this.currentById.clear();
     this.motionPx = 0;
     this.viewDirty = true;
     this.sinceSelectMs = Infinity;
@@ -269,6 +275,18 @@ export class WordLabels {
    */
   shownRects(): readonly ScreenRect[] {
     return this.currentRects;
+  }
+
+  /**
+   * 点 `index` の単語を囲む矩形と基準点（点の中心の画面上の位置。CSS ピクセル）を、いまの視点で返す（直近の `update` で求めた、
+   * 描かれている文字の位置と大きさ）。毎フレーム求めている値を返すだけで、配列やオブジェクトを作らない（戻り値は読むだけ。書き換えない）。
+   * 単語として表示されていない・薄れかけている（不透明度が半分未満。強調表示が単語を囲む矩形に切り替わる境と同じ）・
+   * カメラの後ろにあるときは null。
+   */
+  currentBox(index: number): Readonly<PlacedRect> | null {
+    const b = this.currentById.get(index);
+    if (!b) return null;
+    return (this.opacity.get(index) ?? 0) >= BOX_HIGHLIGHT_OPACITY ? b : null;
   }
 
   /** 毎フレーム（描画の前）。width・height は画面の大きさ（CSS ピクセル）。 */
@@ -319,6 +337,10 @@ export class WordLabels {
         textPx: w.textPx, naturalPx: w.naturalPx, distance: w.distance, opacity: this.opacity.get(w.index) ?? 0,
       })),
       currentRects: this.currentRects.map((r) => ({ ...r })),
+      currentBoxes: this.shown.flatMap((w) => {
+        const b = this.currentBox(w.index);
+        return b ? [{ index: w.index, rect: { ...b.rect }, anchorX: b.anchorX, anchorY: b.anchorY }] : [];
+      }),
       obstacles: this.obstacles.map((r) => ({ ...r })),
       cleared: this.clearTargets.size,
       drawnWords: this.drawnWords,
@@ -415,11 +437,12 @@ export class WordLabels {
     const emWorld = this.textScale * this.deps.cloud.params.pointSize;
     const rects: ScreenRect[] = [];
     const anchors: ({ x: number; y: number } | null)[] = [];
+    this.currentById.clear();
     for (const w of this.shown) {
       const b = this.box(w.index);
       const placed = b ? placeWordRect(view, pos[3 * w.index]!, pos[3 * w.index + 1]!, pos[3 * w.index + 2]!, b, emWorld, this.params.size) : null;
       anchors.push(placed ? { x: placed.anchorX, y: placed.anchorY } : null);
-      if (placed) rects.push(placed.rect);
+      if (placed) { rects.push(placed.rect); this.currentById.set(w.index, placed); }
     }
     this.currentRects = rects;
     this.motionPx = maxAnchorDisplacement(this.shown.map((w) => ({ x: w.anchorX, y: w.anchorY })), anchors);

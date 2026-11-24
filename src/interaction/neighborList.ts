@@ -1,15 +1,16 @@
 /**
  * 情報パネルの「元のデータで近い点」の一覧（src/neighbors/）。要素は index.html の #info-neighbors にある。
  *
- * - 一覧の上に要約（「元のデータで近い 10 点のうち、地図でも近くにあるのは N 点」と、この辺りの地図がどの程度当てになるか）。
+ * - 一覧の上に要約（「元のデータで近い10点のうち、地図で近い10点にも入っているのは N 点」と、この点の周りで地図がどの程度当てになるか）。
+ *   計算の途中の表示の間は、要約に「（計算前の地図での判定）」を添える（`setBeforeCompute`）。
  * - 画像のデータセットでは近傍の画像の小さな一覧（下の縁にラベルの色）、単語のデータセットでは単語の一覧（クラスタの色の印）。近い順。
- * - それぞれに、地図でも近傍にあるかの印（● 地図でも近い／○ 地図では離れている）。
+ * - それぞれに、地図での近傍に入っているかの印（● 地図で近い点にも入っている／○ 入っていない）。
  * - 項目はボタン。カーソルを重ねる・フォーカスすると `onFocus(順位)`、押すと `onPick(点の番号)`。矢印キーで項目の間を移れる。
- * - 読み上げ: 一覧は見出しつきのリスト、各項目の名前は「N 番目に近い: 単語（番号）、地図でも近い」。要約は、パネルの外の
+ * - 読み上げ: 一覧は見出しつきのリスト、各項目の名前は「N 番目に近い: 単語（番号）、地図で近い10点にも入っている」。要約は、パネルの外の
  *   #info-neighbors-live（role=status）へも入れる（選択の読み上げ #info-live とは別）。
  */
 import type { PointInfoSource } from './infoPanel';
-import { neighborItemLabel, summaryCountText, summaryHintText, summaryText } from '../neighbors/neighbors';
+import { inMapPhrase, neighborItemLabel, summaryHintText, summaryLeadText, summaryText } from '../neighbors/neighbors';
 
 /** 一覧の 1 項目。 */
 export interface NeighborListItem {
@@ -40,6 +41,8 @@ export class NeighborList {
   private readonly onBack: () => void;
   private state: NeighborListState = { kind: 'hidden' };
   private focusedRank = -1;
+  /** 計算の途中の表示の間（要約に「計算前の地図での判定」を添える） */
+  private beforeCompute = false;
 
   constructor(doc: Document, src: PointInfoSource, handlers: { onFocus(rank: number): void; onPick(index: number): void; onBack(): void }) {
     this.doc = doc;
@@ -95,14 +98,26 @@ export class NeighborList {
       this.liveEl.textContent = '';
       return;
     }
-    const total = state.items.length;
-    this.summaryEl.textContent = `${summaryCountText(state.matches, total)}。`;
-    this.hintEl.textContent = summaryHintText(state.matches, total);
+    this.renderSummary(state);
     // 一覧の項目を押して選び直したとき、フォーカスを新しい一覧の先頭へ移す（キーボードで近傍をたどり続けられるように）
     const hadFocus = this.listEl.contains(this.doc.activeElement);
-    this.listEl.replaceChildren(...state.items.map((it, k) => this.item(it, k)));
+    this.listEl.replaceChildren(...state.items.map((it, k) => this.item(it, k, state.items.length)));
     if (hadFocus) this.listEl.querySelector<HTMLButtonElement>('button.nb-item')?.focus({ preventScroll: true });
-    this.liveEl.textContent = summaryText(state.matches, total);
+  }
+
+  /** 計算の途中の表示の間、要約に「計算前の地図での判定」を添える。一覧の項目（フォーカス）は作り直さない。 */
+  setBeforeCompute(on: boolean): void {
+    if (this.beforeCompute === on) return;
+    this.beforeCompute = on;
+    if (this.state.kind === 'ready') this.renderSummary(this.state);
+  }
+
+  private renderSummary(state: Extract<NeighborListState, { kind: 'ready' }>): void {
+    const total = state.items.length;
+    this.summaryEl.textContent = summaryLeadText(state.matches, total, this.beforeCompute);
+    this.hintEl.textContent = summaryHintText(state.matches, total);
+    this.liveEl.textContent = summaryText(state.matches, total, this.beforeCompute);
+    this.root.dataset.beforeCompute = this.beforeCompute ? '1' : '0';
   }
 
   /** 戻る操作を出すか。 */
@@ -122,7 +137,7 @@ export class NeighborList {
     this.backEl.removeEventListener('click', this.onBackClick);
   }
 
-  private item(it: NeighborListItem, rank: number): HTMLElement {
+  private item(it: NeighborListItem, rank: number, total: number): HTMLElement {
     const doc = this.doc;
     const li = doc.createElement('li');
     const b = doc.createElement('button');
@@ -133,8 +148,8 @@ export class NeighborList {
     b.dataset.inMap = it.inMap ? '1' : '0';
     const title = this.src.title(it.index);
     const name = this.src.kind === 'text' ? title : `${title}（番号 ${it.index}）`;
-    b.setAttribute('aria-label', neighborItemLabel(rank + 1, name, it.inMap));
-    b.title = `${rank + 1}. ${name}（${it.inMap ? '地図でも近い' : '地図では離れている'}）`;
+    b.setAttribute('aria-label', neighborItemLabel(rank + 1, name, it.inMap, total));
+    b.title = `${rank + 1}. ${name}（${inMapPhrase(it.inMap, total)}）`;
     const mark = doc.createElement('span');
     mark.className = 'nb-mark';
     mark.setAttribute('aria-hidden', 'true');
@@ -199,6 +214,9 @@ export class NeighborList {
     if (next < 0) return;
     e.preventDefault();
     e.stopPropagation(); // 矢印キーをカメラの操作へ渡さない
-    buttons[next]!.focus();
+    // フォーカスした項目を、一覧のスクロールの中で見える位置へ（一覧がパネルの高さに収まらないとき）
+    const target = buttons[next]!;
+    target.focus();
+    target.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
   };
 }

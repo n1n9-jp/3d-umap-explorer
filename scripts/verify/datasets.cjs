@@ -26,7 +26,7 @@ const { execSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require('playwright');
-const { loadDataset, waitForServer, startPreview, CHROMIUM_ARGS, sub, add, mul, len, norm } = require('./lib.cjs');
+const { loadDataset, waitForServer, startPreview, CHROMIUM_ARGS, sub, add, mul, len, norm, readInfoRect } = require('./lib.cjs');
 const { pageChecks } = require('./picking.cjs');
 
 const root = path.resolve(__dirname, '../..');
@@ -117,14 +117,13 @@ async function waitSwitched(page, prevGeneration) {
   return ds(page);
 }
 
-/** パネル・HUD・選択欄・ミニマップに重ならない位置か。 */
-const usable = (x, y) => x > 40 && y > 60 && x < width - 40 && y < height - 40 && !(x > width - 380 && y < 240) && !(x < 680 && y > height - 220) && !(x > width - 260 && y > height - 240);
-
 /** 画面に見えていて、投影した中心で pick するとその点が真下に返る点を探す（大きく見えるものから）。 */
 async function findVisiblePoint(page, { minPx = 6, exclude = [], filter = null } = {}) {
-  return page.evaluate(async ({ minPx, exclude, w, h, filter }) => {
+  const info = await readInfoRect(page); // 情報パネルは実際の矩形で避ける（一覧が加わって大きさが変わる）
+  return page.evaluate(async ({ minPx, exclude, w, h, filter, info }) => {
     const ex = window.__explorer;
-    const ok = (x, y) => x > 40 && y > 60 && x < w - 40 && y < h - 40 && !(x > w - 380 && y < 240) && !(x < 680 && y > h - 220) && !(x > w - 260 && y > h - 240);
+    const inInfo = (x, y) => info && x > info.left - 12 && x < info.right + 12 && y > info.top - 12 && y < info.bottom + 12;
+    const ok = (x, y) => x > 40 && y > 60 && x < w - 40 && y < h - 40 && !inInfo(x, y) && !(x < 680 && y > h - 220) && !(x > w - 260 && y > h - 240);
     const allow = filter ? new Set(filter) : null;
     const cands = [];
     for (let i = 0; i < ex.picking.count; i++) {
@@ -143,7 +142,7 @@ async function findVisiblePoint(page, { minPx = 6, exclude = [], filter = null }
       if (r && r.index === c.i && r.pixelDistance === 0) return c;
     }
     return null;
-  }, { minPx, exclude, w: width, h: height, filter });
+  }, { minPx, exclude, w: width, h: height, filter, info });
 }
 
 /** クラスタの内側を見る視点（中心から外向きに半径の半分の位置から、中心を見る）。 */

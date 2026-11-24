@@ -28,7 +28,7 @@ const { execSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require('playwright');
-const { loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, add, mul, len, norm } = require('./lib.cjs');
+const { loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, add, mul, len, norm, readInfoRect } = require('./lib.cjs');
 
 const root = path.resolve(__dirname, '../..');
 const args = process.argv.slice(2);
@@ -235,13 +235,15 @@ async function compareIdImages(page) {
 
 /** 画面に見えていて、投影した中心で pick するとその点が返る点（地図・HUD・パネルを避ける）。 */
 async function findVisiblePoint(page, inRect = null) {
-  return page.evaluate(async ({ inRect, w, h }) => {
+  const info = await readInfoRect(page); // 情報パネルは実際の矩形で避ける
+  return page.evaluate(async ({ inRect, w, h, info }) => {
     const ex = window.__explorer;
+    const inInfo = (x, y) => info && x > info.left - 12 && x < info.right + 12 && y > info.top - 12 && y < info.bottom + 12;
     const m = ex.minimap.getState();
     const inMap = (x, y) => x >= m.gauge.left - 8 && y >= m.map.top - 8;
     const ok = inRect
       ? (x, y) => x > inRect.left + 6 && y > inRect.top + 6 && x < inRect.left + inRect.width - 6 && y < inRect.top + inRect.height - 6
-      : (x, y) => x > 40 && y > 40 && x < w - 40 && y < h - 40 && !(x > w - 360 && y < 220) && !(x < 640 && y > h - 200) && !inMap(x, y);
+      : (x, y) => x > 40 && y > 40 && x < w - 40 && y < h - 40 && !inInfo(x, y) && !(x < 640 && y > h - 200) && !inMap(x, y);
     const cands = [];
     for (let i = 0; i < ex.picking.count; i++) {
       const p = ex.picking.project(i);
@@ -256,7 +258,7 @@ async function findVisiblePoint(page, inRect = null) {
       if (r && r.index === c.i && r.pixelDistance === 0) return c;
     }
     return null;
-  }, { inRect, w: width, h: height });
+  }, { inRect, w: width, h: height, info });
 }
 
 const near = (a, b, tol) => Math.abs(a - b) <= tol;
