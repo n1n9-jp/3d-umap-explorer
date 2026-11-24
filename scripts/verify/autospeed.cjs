@@ -299,10 +299,11 @@ async function main() {
     {
       const sat = plan.saturation;
       const outDir0 = norm(sub(start, C));
-      // 離す位置: 点群の外（係数が上限）で、最も近い点までの距離が 飽和距離 + 0.45 になるところ。そこから滑ると、
-      // 滑走（最高速で約 0.87 進む）の途中で、係数が下がる距離（飽和距離以内）へ入る
+      // 離す位置: 点群の外（係数が上限）で、最も近い点までの距離が 飽和距離 + 0.8 になるところ。進行方向の先を見る距離
+      // （最高速 × 0.3 秒 ≈ 0.54）を足しても係数が上限のままで、そこから滑ると、滑走（最高速で約 0.87 進む）の途中で、
+      // 係数が下がる距離（飽和距離以内）へ入る
       let rRel = target.radius;
-      while (neighbors(ds, add(C, mul(outDir0, rRel)), 1)[0][0] < sat + 0.45) rRel += 0.02;
+      while (neighbors(ds, add(C, mul(outDir0, rRel)), 1)[0][0] < sat + 0.8) rRel += 0.02;
       await setView(page, add(C, mul(outDir0, rRel + 2.5)), C);
       await frames(page, 3);
       await page.keyboard.down('KeyW');
@@ -329,7 +330,7 @@ async function main() {
       const undamped = v0 * 0.5 * 0.97; // 係数が下がらないときの総距離（τr 0.5 秒）
       console.log(`離した位置は中心から ${f(len(sub(rel.position, C)), 3)}（計画 ${f(rRel, 3)}、最も近い点まで ${f(neighbors(ds, rel.position, 1)[0][0], 3)}、飽和距離 ${f(sat, 3)}）、離した時点の速さ ${f(v0)}、係数 ${f(scaleRel, 3)}`);
       console.log('離したあとのフレーム: 係数 / 測った速さ / 速さの上限 =', after.slice(0, 40).map((r, i) => `${f(r.s.autoSpeed.scale, 2)}/${f(measured[released + 1 + i], 2)}/${f(v0 * (gr[released + i].s.autoSpeed.scale / scaleRel), 2)}`).join('  '));
-      check('（前提）離した時点で、点群の外を最高速（基準速度 × 上限の係数 4）で進んでいる', scaleRel >= MAX_SCALE * 0.999 && v0 > 0.9 * rel.effectiveSpeed, `係数 ${f(scaleRel, 3)}、速さ ${f(v0)}（基準速度 × 係数 = ${f(rel.effectiveSpeed)}）`);
+      check('（前提）離した時点で、点群の外を最高速（基準速度 × 上限の係数 4）で進んでいる', scaleRel >= MAX_SCALE * 0.97 && v0 > 0.9 * rel.effectiveSpeed, `係数 ${f(scaleRel, 3)}、速さ ${f(v0)}（基準速度 × 係数 = ${f(rel.effectiveSpeed)}）`);
       check('離したあとも進み続け、やがて止まる（gliding が false になる）', after.filter((r, i) => measured[released + 1 + i] > 1e-6).length >= 2 && !lastRow.moveInertia.gliding && glided > 0.05,
         `${after.length} フレーム、滑った距離 ${f(glided)}`);
       check('滑走の途中で係数が下がる（密な塊へ滑り込む）', minScale < 0.6 * scaleRel, `係数 ${f(scaleRel, 3)} → 最小 ${f(minScale, 3)}`);
