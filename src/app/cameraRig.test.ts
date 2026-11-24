@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { PerspectiveCamera, Vector3 } from 'three';
 import { CameraRig } from './cameraRig';
 import { MAX_VIEW_PITCH, viewAngles } from '../render/view';
+import { PointerGesture } from '../interaction/gesture';
 
 type Handler = (e: never) => void;
 
@@ -404,3 +405,118 @@ describe('CameraRig: 回転の慣性', () => {
     expect(rig.getState().speedScale).toBe(1);
   });
 });
+
+/**
+ * 点のクリックの判定（`InteractionController` の pointerdown / pointerup）と同じ配線を、DOM なしで再現する。
+ * カメラ操作より先に登録した場合（`before`）と、後に登録した場合（`after`）の両方で、同じ結果になることを確かめる。
+ */
+describe('CameraRig: 慣性を止めた押下はクリックに数えない', () => {
+  type Order = 'before' | 'after';
+
+  function createWired(order: Order, mode: 'fly' | 'overview') {
+    const camera = new PerspectiveCamera(60, 1.6, 0.0005, 12);
+    const win = new FakeTarget();
+    const el = new FakeTarget();
+    el.ownerDocument = { defaultView: win };
+    const gesture = new PointerGesture();
+    const releases: unknown[] = [];
+    let rig!: CameraRig;
+    const wire = () => {
+      el.addEventListener('pointerdown', ((e: { pointerId: number; button: number; clientX: number; clientY: number; buttons?: number }) => {
+        gesture.down(e.pointerId, e.button, e.clientX, e.clientY, e.buttons ?? 1, rig.pressStopsInertia(e as unknown as PointerEvent));
+      }) as never);
+      el.addEventListener('pointerup', ((e: { pointerId: number; clientX: number; clientY: number; timeStamp: number; button?: number }) => {
+        releases.push(gesture.up(e.pointerId, e.clientX, e.clientY, e.timeStamp, e.button ?? 0));
+      }) as never);
+    };
+    if (order === 'before') wire();
+    rig = new CameraRig(camera, el as unknown as HTMLElement, new Vector3(), {});
+    if (order === 'after') wire();
+    rig.setMode(mode);
+    rig.setView({ pos: [0, 0.2, 2], look: [0, 0, 0] });
+    return { camera, el, rig, releases };
+  }
+
+  /** 右へ速く払って離す（慣性が付く）。 */
+  function flick(el: FakeTarget, startT = 1000) {
+    let t = startT;
+    el.emit('pointerdown', { button: 0, pointerId: 1, clientX: 100, clientY: 100, timeStamp: t });
+    for (let i = 1; i <= 12; i++) {
+      t += 16;
+      el.emit('pointermove', { pointerId: 1, clientX: 100 + 16 * i, clientY: 100, timeStamp: t });
+    }
+    el.emit('pointerup', { pointerId: 1, clientX: 292, clientY: 100, timeStamp: t });
+    return t;
+  }
+
+  for (const mode of ['fly', 'overview'] as const) {
+    for (const order of ['before', 'after'] as const) {
+      describe(`${mode}モード・クリックの判定のリスナーがカメラ操作の${order === 'before' ? '前' : '後'}`, () => {
+        it('回っている最中に押して動かさずに離すと、慣性は止まり、クリックに数えない。次の押下は通常どおりクリック', () => {
+          const { el, rig, releases } = createWired(order, mode);
+          flick(el);
+          releases.length = 0;
+          rig.update(1 / 60);
+          expect(rig.isRotatingByInertia).toBe(true);
+
+          el.emit('pointerdown', { button: 0, pointerId: 2, clientX: 400, clientY: 300, timeStamp: 3000 });
+          expect(rig.isRotatingByInertia).toBe(false);
+          el.emit('pointerup', { pointerId: 2, clientX: 400, clientY: 300, timeStamp: 3040 });
+          expect(releases).toEqual([{ kind: 'stop' }]);
+
+          // 慣性が止まったあとの押下は、通常どおりクリック（ダブルクリックの 1 回目）
+          el.emit('pointerdown', { button: 0, pointerId: 3, clientX: 400, clientY: 300, timeStamp: 3100 });
+          el.emit('pointerup', { pointerId: 3, clientX: 400, clientY: 300, timeStamp: 3140 });
+          expect(releases[1]).toEqual({ kind: 'click', x: 400, y: 300, double: false });
+        });
+
+        it('慣性を止めた押下の直後のクリックは、ダブルクリックにならない', () => {
+          const { el, rig, releases } = createWired(order, mode);
+          flick(el);
+          rig.update(1 / 60);
+          releases.length = 0;
+          el.emit('pointerdown', { button: 0, pointerId: 2, clientX: 400, clientY: 300, timeStamp: 3000 });
+          el.emit('pointerup', { pointerId: 2, clientX: 400, clientY: 300, timeStamp: 3030 });
+          el.emit('pointerdown', { button: 0, pointerId: 3, clientX: 400, clientY: 300, timeStamp: 3100 });
+          el.emit('pointerup', { pointerId: 3, clientX: 400, clientY: 300, timeStamp: 3130 });
+          expect(releases).toEqual([{ kind: 'stop' }, { kind: 'click', x: 400, y: 300, double: false }]);
+        });
+
+        it('慣性を止めた押下からドラッグを始めたら、視点を回せて、クリックには数えない', () => {
+          const { camera, el, rig, releases } = createWired(order, mode);
+          flick(el);
+          rig.update(1 / 60);
+          releases.length = 0;
+          el.emit('pointerdown', { button: 0, pointerId: 2, clientX: 400, clientY: 300, timeStamp: 3000 });
+          expect(rig.isRotatingByInertia).toBe(false);
+          const before = forward(camera).clone();
+          el.emit('pointermove', { pointerId: 2, clientX: 460, clientY: 300, timeStamp: 3200 });
+          el.emit('pointerup', { pointerId: 2, clientX: 460, clientY: 300, timeStamp: 3400 });
+          rig.update(1 / 60); // 飛行モードは、ドラッグの回転をフレームの更新でカメラへ反映する
+          expect(forward(camera).distanceTo(before)).toBeGreaterThan(0.01);
+          expect(releases).toEqual([{ kind: 'drag' }]);
+        });
+
+        it('回っていないときの押下は、通常どおりクリック', () => {
+          const { el, rig, releases } = createWired(order, mode);
+          el.emit('pointerdown', { button: 0, pointerId: 2, clientX: 50, clientY: 50, timeStamp: 100 });
+          el.emit('pointerup', { pointerId: 2, clientX: 50, clientY: 50, timeStamp: 130 });
+          expect(rig.isRotatingByInertia).toBe(false);
+          expect(releases).toEqual([{ kind: 'click', x: 50, y: 50, double: false }]);
+        });
+
+        it('慣性がもう止まっている（自然に止まったあと）の押下は、通常どおりクリック', () => {
+          const { el, rig, releases } = createWired(order, mode);
+          flick(el);
+          for (let i = 0; i < 300; i++) rig.update(1 / 60);
+          expect(rig.isRotatingByInertia).toBe(false);
+          releases.length = 0;
+          el.emit('pointerdown', { button: 0, pointerId: 2, clientX: 50, clientY: 50, timeStamp: 9000 });
+          el.emit('pointerup', { pointerId: 2, clientX: 50, clientY: 50, timeStamp: 9030 });
+          expect(releases).toEqual([{ kind: 'click', x: 50, y: 50, double: false }]);
+        });
+      });
+    }
+  }
+});
+

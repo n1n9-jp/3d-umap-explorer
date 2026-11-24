@@ -19,6 +19,10 @@
  *   - ダブルクリックと選択（仕様）: 点 B を選択中に点 A をダブルクリックすると選択が A に移って A へ飛ぶ。
  *     点のない場所のダブルクリックは選択を解除して、飛ばない
  *   - 強調表示: 有無でピッキングの結果（番号の画像）が変わらない。通常の描画には輪が出る
+ *   - 慣性を止めるための押下: 点を選択した状態で、慣性を付けて視点を回し、回っている最中に、点のない場所で押して離すと、
+ *     慣性が止まり、選択は変わらない。別の点の上で押して離しても、選択は変わらない。慣性が止まったあと、同じ場所でもう一度
+ *     クリックすると、通常どおり選択が変わる。慣性を止めた押下の直後のクリックは、ダブルクリックとして扱われない（点へ飛ばない）。
+ *     飛行・俯瞰の両方。目印の上で始まって、目印が canvas へ合成したポインタイベントで慣性を止めた押下も、点のクリックにならない
  *   - ダブルクリック: その点へ移動し、止まった位置がその点から決めた距離で、点が画面の中央に十分な大きさで見える
  *   - 俯瞰モードでのダブルクリック: 飛行モードへ切り替わって移動する
  *   - コンソールエラーがない
@@ -29,7 +33,7 @@ const { execSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require('playwright');
-const { loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, len } = require('./lib.cjs');
+const { loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, len, sendPointer, pointerGesture, flickPoints } = require('./lib.cjs');
 
 const root = path.resolve(__dirname, '../..');
 const args = process.argv.slice(2);
@@ -553,11 +557,207 @@ async function testOverviewDoubleClick(page, view) {
   await page.screenshot({ path: path.join(outDir, '4-flyto-from-overview.png') });
 }
 
+// ---------- 慣性を止めるための押下 ----------
+
+const cx = width / 2, cy = height / 2;
+const angleBetween = (a, b) => {
+  const c = [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  return Math.atan2(Math.hypot(...c), a[0] * b[0] + a[1] * b[1] + a[2] * b[2]);
+};
+
+/** 横へ払って離し、慣性で回り始めたこと（getState().rotating）を確かめる。回り始めたら true。 */
+async function flickUntilRotating(page, dx = 150) {
+  await pointerGesture(page, flickPoints(cx, cy, dx, 0), 1);
+  for (let k = 0; k < 6; k++) {
+    if ((await state(page)).rotating) return true;
+    await frames(page, 1);
+  }
+  return false;
+}
+
+/** 点 p をクリックして選択し、選択されるまで待つ。 */
+async function selectByClick(page, p) {
+  await page.mouse.click(p.x, p.y);
+  return (await waitFrames(page, async (pg) => ({ ok: (await ix(pg)).selected === p.i }), 10)).ok;
+}
+
+/**
+ * 慣性を止めるための押下を、飛行・俯瞰のどちらかで確かめる。`view` はそのモードで点が見える視点、`emptyView` は点が見えない視点。
+ * - 点のない場所: 慣性が止まり、選択は変わらない。止まったあとの同じ場所のクリックは、通常どおり選択を解除する
+ * - 別の点の上: 慣性が止まり、選択は変わらない。止まったあとの同じ場所のクリックは、その点を選択する
+ * - 直後のクリック（150 ミリ秒後）はダブルクリックにならず、点へ飛ばない
+ */
+async function testStopPress(page, mode, view, emptyView, emptyCandidates, pointCandidates) {
+  const name = mode === 'fly' ? '飛行モード' : '俯瞰モード';
+  console.log(`\n[慣性を止めるための押下（${name}）]`);
+  if (mode === 'overview') {
+    await page.keyboard.press('KeyO');
+    await page.waitForFunction(() => window.__explorer.getState().mode === 'overview');
+  }
+  const flick = mode === 'fly' ? 150 : 120;
+  const begin = async (v) => { await setView(page, v.pos, v.look); await waitStill(page); };
+  await begin(view);
+  const A = await findVisiblePoint(page, { minPx: mode === 'fly' ? 6 : 3 });
+  if (!A) { check(`${name}: 慣性を止める押下の検証に使う点が見つかる`, false); return; }
+  // 選択して視点を戻す（選択は視点を変えても残る）
+  const prepare = async (v) => {
+    await begin(view);
+    if (!(await selectByClick(page, A))) return false;
+    if (v !== view) await begin(v);
+    return flickUntilRotating(page, flick);
+  };
+
+  // ---- 点のない場所 ----
+  let done = false;
+  const emptyTried = [];
+  for (const [px, py] of emptyCandidates) {
+    if (!(await prepare(emptyView))) { check(`${name}: （前提）点を選択して、払って、慣性で回り始める`, false); return; }
+    await sendPointer(page, [{ type: 'down', x: px, y: py, t: 0 }, { type: 'up', x: px, y: py, t: 40 }]);
+    await frames(page, 4);
+    const under = await pickAt(page, px, py);
+    const st = await state(page);
+    const sel = await ix(page);
+    if (under !== null) { emptyTried.push(`(${px},${py})→点${under}`); continue; }
+    const st2 = (await frames(page, 3), await state(page));
+    check(`${name}: 回っている最中に、点のない場所で押して離すと、慣性が止まり、選択は変わらない`,
+      !st.rotating && !st2.rotating && sel.selected === A.i && angleBetween(st.direction, st2.direction) < 1e-9,
+      `rotating ${st.rotating}、選択 ${sel.selected}（元 ${A.i}）、押した位置 (${px},${py})`);
+    await page.mouse.click(px, py);
+    const r = await waitFrames(page, async (pg) => ({ ok: (await ix(pg)).selected === null }), 10);
+    check(`${name}: 慣性が止まったあと、同じ場所をもう一度クリックすると、通常どおり選択が解除される`, r.ok, `選択 ${(await ix(page)).selected}`);
+    done = true;
+    break;
+  }
+  if (!done) check(`${name}: 点のない場所で押す検証ができる位置が見つかる`, false, emptyTried.join(' '));
+
+  // ---- 別の点の上 ----
+  done = false;
+  const pointTried = [];
+  for (const [px, py] of pointCandidates) {
+    if (!(await prepare(view))) { check(`${name}: （前提）点を選択して、払って、慣性で回り始める`, false); return; }
+    await sendPointer(page, [{ type: 'down', x: px, y: py, t: 0 }, { type: 'up', x: px, y: py, t: 40 }]);
+    await frames(page, 4);
+    const want = await pickAt(page, px, py); // 止まった視点で、押した位置にある点
+    const st = await state(page);
+    const sel = await ix(page);
+    if (want === null || want === A.i) { pointTried.push(`(${px},${py})→${want}`); continue; }
+    const st2 = (await frames(page, 3), await state(page));
+    check(`${name}: 回っている最中に、別の点の上で押して離すと、慣性が止まり、選択は変わらない`,
+      !st.rotating && !st2.rotating && sel.selected === A.i && angleBetween(st.direction, st2.direction) < 1e-9,
+      `rotating ${st.rotating}、選択 ${sel.selected}（元 ${A.i}、押した位置の点 ${want}）`);
+    await page.mouse.click(px, py);
+    const r = await waitFrames(page, async (pg) => ({ ok: (await ix(pg)).selected === want }), 10);
+    check(`${name}: 慣性が止まったあと、同じ場所をもう一度クリックすると、通常どおりその点が選択される`, r.ok, `選択 ${(await ix(page)).selected}（期待 ${want}）`);
+    done = true;
+    break;
+  }
+  if (!done) check(`${name}: 別の点の上で押す検証ができる位置が見つかる`, false, pointTried.join(' '));
+
+  // ---- 直後のクリックは、ダブルクリックにならない ----
+  done = false;
+  for (const [px, py] of pointCandidates) {
+    if (!(await prepare(view))) { check(`${name}: （前提）点を選択して、払って、慣性で回り始める`, false); return; }
+    // 慣性を止める押下と、その 150 ミリ秒後・同じ位置のクリック（ダブルクリックの間隔・位置の内）
+    await sendPointer(page, [
+      { type: 'down', x: px, y: py, t: 0 }, { type: 'up', x: px, y: py, t: 40 },
+      { type: 'down', x: px, y: py, t: 150 }, { type: 'up', x: px, y: py, t: 190 },
+    ]);
+    await frames(page, 3);
+    const want = await pickAt(page, px, py);
+    if (want === null || want === A.i) continue;
+    const r = await waitFrames(page, async (pg) => ({ ok: (await ix(pg)).selected === want }), 10);
+    const s0 = await state(page);
+    await frames(page, 6); // 飛ぶなら、ここで動き出す（点へ飛ぶと 0.8 秒、飛行モードへの切り替えもある）
+    const s1 = await state(page);
+    const moved = len(sub(s1.position, s0.position)) + angleBetween(s0.direction, s1.direction);
+    check(`${name}: 慣性を止めた押下の直後のクリックは、ダブルクリックにならず、点へ飛ばない（普通のクリックとしてその点を選択する）`,
+      r.ok && s1.mode === mode && moved < 1e-9 && !s1.rotating, `選択 ${(await ix(page)).selected}（期待 ${want}）、モード ${s1.mode}、カメラの変化 ${moved.toExponential(2)}`);
+    done = true;
+    break;
+  }
+  if (!done) check(`${name}: ダブルクリックの検証ができる位置が見つかる`, false);
+
+  // ---- 慣性が回っていないときは、同じ 2 回のクリックがダブルクリックになる（対照） ----
+  await begin(view);
+  const q = await findVisiblePoint(page, { minPx: mode === 'fly' ? 6 : 3 });
+  if (q) {
+    await sendPointer(page, [
+      { type: 'down', x: q.x, y: q.y, t: 0 }, { type: 'up', x: q.x, y: q.y, t: 40 },
+      { type: 'down', x: q.x, y: q.y, t: 150 }, { type: 'up', x: q.x, y: q.y, t: 190 },
+    ]);
+    const s0 = await state(page);
+    const r = await waitFrames(page, async (pg) => { const s = await state(pg); return { ok: len(sub(s.position, s0.position)) > 1e-6 || s.mode !== mode }; }, 12);
+    check(`${name}: （対照）慣性が回っていないときの同じ 2 回のクリックは、ダブルクリックとして点へ飛ぶ`, r.ok && (await ix(page)).selected === q.i, `選択 ${(await ix(page)).selected}（期待 ${q.i}）`);
+    await waitStill(page);
+  } else {
+    check(`${name}: （対照）ダブルクリックに使う点が見つかる`, false);
+  }
+  await page.keyboard.press('Escape');
+  if (mode === 'overview' && (await state(page)).mode === 'overview') {
+    await page.keyboard.press('KeyO');
+    await page.waitForFunction(() => window.__explorer.getState().mode === 'fly');
+  }
+  await frames(page, 2);
+}
+
+/**
+ * 目印の上で始まった押下が慣性を止める経路。目印は、押したまま 4 ピクセルを超えて動かすと、押した位置からの pointerdown と
+ * 現在位置の pointermove を canvas へ合成して渡す（その時点で慣性が回っていれば、この合成した押下が慣性を止める）。
+ * 合成した押下は、点のクリックにならない。ソフトウェア描画では目印が毎フレーム大きく動くので、目印の位置を測ってから本物の
+ * マウスで押すと外れる。そこで、1 回の評価の中で、目印の要素へポインタイベントを送る（目印のコードの経路は同じ）。
+ */
+async function testStopPressOnLabel(page, view) {
+  console.log('\n[慣性を止めるための押下（目印の上から始まる経路）]');
+  await setView(page, view.pos, view.look);
+  await waitStill(page);
+  const A = await findVisiblePoint(page, { minPx: 2 });
+  if (!A) { check('目印の上の押下の検証に使う点が見つかる', false); return; }
+  const selected = await selectByClick(page, A);
+  const rotating = selected && await flickUntilRotating(page, 60);
+  check('（前提）点を選択して、払って、慣性で回り始める', selected && rotating, `選択 ${(await ix(page)).selected}（期待 ${A.i}）`);
+  if (!rotating) return;
+  const r = await page.evaluate(() => {
+    const ex = window.__explorer;
+    const canvas = document.querySelector('#app canvas');
+    const chip = [...document.querySelectorAll('.cluster-label')].find((el) => {
+      const b = el.getBoundingClientRect();
+      const x = b.x + b.width / 2, y = b.y + b.height / 2;
+      return b.width > 0 && x > 40 && x < innerWidth - 80 && y > 40 && y < innerHeight - 40 &&
+        document.elementFromPoint(x, y)?.closest('.cluster-label') === el;
+    });
+    if (!chip) return { error: '最前面に出ている目印がない' };
+    const b = chip.getBoundingClientRect();
+    const x = b.x + b.width / 2, y = b.y + b.height / 2;
+    const init = { pointerId: 7, pointerType: 'mouse', isPrimary: true, bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y };
+    const before = ex.getState().rotating;
+    chip.dispatchEvent(new PointerEvent('pointerdown', { ...init, button: 0, buttons: 1 }));
+    const afterDown = ex.getState().rotating; // 目印の押下は、動かすまで canvas へ渡らない
+    chip.dispatchEvent(new PointerEvent('pointermove', { ...init, clientX: x + 12, button: -1, buttons: 1 })); // 閾値（4 ピクセル）を超える
+    const afterMove = ex.getState().rotating; // 合成した押下が慣性を止める
+    canvas.dispatchEvent(new PointerEvent('pointerup', { ...init, clientX: x + 12, button: 0, buttons: 0 }));
+    return { before, afterDown, afterMove, cluster: chip.dataset.clusterId };
+  });
+  if (r.error) { check('目印の上から始まる押下を送れる', false, r.error); return; }
+  check('目印から canvas へ合成された押下が、慣性を止める', r.before && !r.afterMove, `押す前 ${r.before}、目印の押下の直後 ${r.afterDown}、動かして合成したあと ${r.afterMove}（目印 ${r.cluster}）`);
+  await waitFrames(page, async (pg) => ({ ok: !(await state(pg)).rotating }), 30); // 離したときの速さで、新しく慣性が付くことがある
+  await frames(page, 4);
+  const sel = await ix(page);
+  check('その押下は、点のクリックにならない（選択は変わらない）・目印のクリックにもならない（飛ばない）', sel.selected === A.i && (await state(page)).mode === 'fly',
+    `選択 ${sel.selected}（元 ${A.i}）`);
+  await page.keyboard.press('Escape');
+  await frames(page, 2);
+}
+
 async function main() {
   const dataDir = path.join(root, 'public', dataPath);
   const ds = loadDataset(dataDir);
   const { views } = computeViews(ds);
   const [overview, edge, inside] = views;
+  const mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < ds.count; i++) for (let k = 0; k < 3; k++) {
+    mn[k] = Math.min(mn[k], ds.positions[3 * i + k]); mx[k] = Math.max(mx[k], ds.positions[3 * i + k]);
+  }
+  const center = mn.map((v, k) => (v + mx[k]) / 2);
 
   // クラスタ名の期待値はデータのファイルから直接求める
   const level = ds.manifest.clusters.levels[0];
@@ -587,6 +787,15 @@ async function main() {
     await testLostPointerCapture(page, edge);
     await testHighlightDoesNotChangePicking(page, inside);
     await testDoubleClickSelectionSpec(page, edge);
+    // 慣性を止めるための押下（飛行モードは視点を点のない外向きに置いて、点のない場所を作る）
+    const outward = { pos: [0, 0, 3], look: [0, 0, 6] };
+    await testStopPress(page, 'fly', inside, outward,
+      [[cx + 60, cy + 40], [cx - 200, cy + 120], [cx + 250, cy - 100]],
+      [[cx + 60, cy + 40], [cx - 120, cy + 60], [cx + 200, cy - 80], [cx - 60, cy - 100], [cx, cy + 120], [cx + 100, cy + 140]]);
+    await testStopPress(page, 'overview', { pos: [1.4, 0.4, 1.5], look: center }, { pos: [1.4, 0.4, 1.5], look: center },
+      [[100, 430], [1180, 430], [100, 330], [1180, 330], [100, 520]],
+      [[cx + 60, cy + 40], [cx - 120, cy + 60], [cx + 100, cy - 80], [cx - 60, cy - 100], [cx, cy + 120]]);
+    await testStopPressOnLabel(page, overview);
     await testDoubleClick(page, edge);
     await testOverviewDoubleClick(page, overview);
     await page.close();

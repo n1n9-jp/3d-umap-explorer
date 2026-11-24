@@ -120,9 +120,12 @@ export class DragVelocityTracker {
 
   /**
    * 離したときのポインタの速さ（CSS ピクセル/秒）。ドラッグと判定されなかった押下（クリック）なら null。
+   * 離した位置 `x`・`y` を渡すと、最後の移動イベントのあとに位置が変わって離した分の動き（最後の移動から離すまで）も、
+   * 速さに入れる（pointerup の位置は、最後の pointermove と違うことがある）。
    * 呼んだあとは、次の `begin` まで何も覚えていない状態になる。
    */
-  release(timeMs: number): { vx: number; vy: number } | null {
+  release(timeMs: number, x?: number, y?: number): { vx: number; vy: number } | null {
+    if (x !== undefined && y !== undefined) this.move(x, y, timeMs);
     const { active, dragged } = this;
     this.active = false;
     const samples = this.samples;
@@ -172,6 +175,7 @@ export class RotationInertia {
   private vYaw = 0;
   private vPitch = 0;
   private _active = false;
+  private stoppedBy: object | null = null;
 
   constructor(options: RotationInertiaOptions = {}, win: Pick<Window, 'matchMedia'> | null = null) {
     this.explicitTimeConstant = options.timeConstant ?? null;
@@ -217,6 +221,25 @@ export class RotationInertia {
     this.tracker.begin(x, y, timeMs);
   }
 
+  /**
+   * 押下 `press`（pointerdown のイベントなど）で慣性を止める。慣性で回っていて止めたなら true で、
+   * その押下を覚える（`isStoppedBy`）。回っていなければ何も覚えない。
+   */
+  stopByPress(press: object): boolean {
+    const wasActive = this._active;
+    this.stop();
+    this.stoppedBy = wasActive ? press : null;
+    return wasActive;
+  }
+
+  /**
+   * 押下 `press` が、慣性を止めた押下か。`stopByPress` が止めたあとなら、止めたのがこの押下かどうか。
+   * まだ回っているなら、この押下がこれから止めるので true（ほかのリスナーが先に呼ばれても、あとに呼ばれても同じ答えになる）。
+   */
+  isStoppedBy(press: object): boolean {
+    return this._active || this.stoppedBy === press;
+  }
+
   dragMove(x: number, y: number, timeMs: number): void {
     this.tracker.move(x, y, timeMs);
   }
@@ -225,9 +248,10 @@ export class RotationInertia {
    * 離した。離す直前の動きから角速度を求めて、慣性を始める。始まったら true。
    * `radiansPerPixel` は、ドラッグ 1 ピクセルあたりの回転量。ドラッグと同じく、右へ動かすと負のヨー、
    * 下へ動かすと負のピッチ（右・下を向く）になる。
+   * 離した位置 `x`・`y` を渡すと、最後の移動イベントのあとの動きも速さに入れる。
    */
-  endDrag(timeMs: number, radiansPerPixel: number): boolean {
-    const v = this.tracker.release(timeMs);
+  endDrag(timeMs: number, radiansPerPixel: number, x?: number, y?: number): boolean {
+    const v = this.tracker.release(timeMs, x, y);
     if (!v || !this.enabled) return false;
     if (Math.hypot(v.vx, v.vy) < this.minReleaseSpeedPx) return false;
     return this.start(-v.vx * radiansPerPixel, -v.vy * radiansPerPixel);

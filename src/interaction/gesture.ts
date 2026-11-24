@@ -5,6 +5,10 @@
  *   途中で閾値を超えたら、その押下はドラッグ（視点の回転）で、元の位置へ戻して離してもクリックにしない。
  *   押している間にほかのボタン（右・中）が重なった押下は、クリックにしない（左を先に離しても、
  *   ブラウザは最後のボタンを離したときにだけ pointerup を出し、その button はほかのボタンになる）。
+ * - 慣性を止める押下: 視点が慣性で回っている最中に始まって、その慣性を止めた押下（`down` の `stopsInertia`）は、
+ *   動かさずに離しても、クリックにも、ダブルクリックの 1 回目にも数えない（その前のクリックの記憶も捨てる）。
+ *   利用者は回転を止めたいだけで、カーソルの下の点を選ぶつもりはないため。閾値を超えて動かしたら、
+ *   通常のドラッグ（視点を回す操作）。次の押下からは、通常どおりクリックとして働く。
  * - ダブルクリック: クリックが `doubleClickMs` 以内・`doubleClickPx` 以内に続いたとき、2 回目のクリック。
  *   3 回目は新しい 1 回目として数える（三連打で 2 回飛ばない）。
  */
@@ -21,6 +25,8 @@ export interface GestureOptions {
 export type PointerRelease =
   | { kind: 'click'; x: number; y: number; double: boolean }
   | { kind: 'drag' }
+  /** 回転の慣性を止めるための押下を、動かさずに離した。クリックにも、ダブルクリックの 1 回目にも数えない。 */
+  | { kind: 'stop' }
   | null;
 
 export class PointerGesture {
@@ -33,6 +39,8 @@ export class PointerGesture {
   private _dragging = false;
   /** 押している間に、左以外のボタンが重なったか */
   private chorded = false;
+  /** この押下が、回転の慣性を止めた押下か */
+  private stopsInertia = false;
   private lastClick: { x: number; y: number; t: number } | null = null;
 
   constructor(options: GestureOptions = {}) {
@@ -55,8 +63,9 @@ export class PointerGesture {
    * 左ボタン（button 0）の押下で始める。押している間の別のポインタの押下は無視する。
    * 押している最中の同じポインタの別のボタンの押下は、そのボタンが重なったことを覚える。
    * `buttons` は押しているボタンの集合（PointerEvent.buttons。左は 1）。左以外が含まれていれば重なりとみなす。
+   * `stopsInertia` は、この押下が回転の慣性を止めたか。受け付けた押下（左ボタンの最初の押下）にだけ効く。
    */
-  down(pointerId: number, button: number, x: number, y: number, buttons = 1): void {
+  down(pointerId: number, button: number, x: number, y: number, buttons = 1, stopsInertia = false): void {
     if (this.pointerId !== null) {
       if (pointerId === this.pointerId) this.chorded = true;
       return;
@@ -67,6 +76,7 @@ export class PointerGesture {
     this.downY = y;
     this._dragging = false;
     this.chorded = (buttons & ~1) !== 0;
+    this.stopsInertia = stopsInertia;
   }
 
   /**
@@ -102,6 +112,7 @@ export class PointerGesture {
     this.move(pointerId, x, y);
     const dragged = this._dragging;
     const chorded = this.chorded || button !== 0;
+    const stopped = this.stopsInertia;
     this.cancel();
     if (chorded) {
       this.lastClick = null;
@@ -110,6 +121,10 @@ export class PointerGesture {
     if (dragged) {
       this.lastClick = null;
       return { kind: 'drag' };
+    }
+    if (stopped) {
+      this.lastClick = null; // 回転を止めた操作は、ダブルクリックの 1 回目にも、前のクリックの続きにも数えない
+      return { kind: 'stop' };
     }
     const prev = this.lastClick;
     const double = prev !== null && timeMs - prev.t <= this.doubleMs && timeMs >= prev.t &&
@@ -127,5 +142,6 @@ export class PointerGesture {
     this.pointerId = null;
     this._dragging = false;
     this.chorded = false;
+    this.stopsInertia = false;
   }
 }

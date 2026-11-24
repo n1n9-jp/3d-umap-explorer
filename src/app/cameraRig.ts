@@ -229,6 +229,15 @@ export class CameraRig {
     this.flying = this.fly.isFlying;
   }
 
+  /**
+   * 押下 `e`（pointerdown）が、回転の慣性を止めた押下か（現在のモードの操作）。点のクリックの判定が、
+   * 慣性を止めるための押下を、選択・選択の解除・ダブルクリックのどれにも数えないために使う。
+   * 飛行・俯瞰のカメラ操作と、このメソッドを呼ぶリスナーの登録順によらず、同じ答えになる。
+   */
+  pressStopsInertia(e: Event): boolean {
+    return this.fly.pressStopsInertia(e) || this.overview.pressStopsInertia(e);
+  }
+
   /** 回転の慣性を止める（飛行・俯瞰の両方。位置と向きはそのまま）。 */
   stopRotationInertia(): void {
     this.fly.stopRotationInertia();

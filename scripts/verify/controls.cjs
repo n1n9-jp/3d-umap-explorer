@@ -21,7 +21,7 @@ const { execSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require('playwright');
-const { loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, len, norm } = require('./lib.cjs');
+const { loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, len, norm, pointerGesture, flickPoints } = require('./lib.cjs');
 
 const root = path.resolve(__dirname, '../..');
 const args = process.argv.slice(2);
@@ -83,32 +83,6 @@ async function drag(page, x0, y0, x1, y1) {
   await page.waitForTimeout(250);
   await page.mouse.up();
   await frames(page, 3);
-}
-
-/**
- * CDP でポインタ操作を送る。`points` は [{x, y, t}]（t は押した時刻からのミリ秒。先頭は押した位置で t = 0）、
- * `releaseAfterMs` は最後の点から離すまでのミリ秒（ポインタを止めている時間）。すべて await せずに送り、
- * ブラウザが指定の時刻で届ける（`event.timeStamp`）。
- */
-async function pointerGesture(page, points, releaseAfterMs = 1) {
-  const cdp = await page.context().newCDPSession(page);
-  const base = Date.now() / 1000;
-  const send = (type, p, ts, buttons) => cdp.send('Input.dispatchMouseEvent', {
-    type, x: p.x, y: p.y, button: type === 'mouseMoved' ? 'none' : 'left', buttons, clickCount: type === 'mouseMoved' ? 0 : 1, timestamp: ts,
-  });
-  const last = points[points.length - 1];
-  const sends = [send('mousePressed', points[0], base + points[0].t / 1000, 1)];
-  for (const p of points.slice(1)) sends.push(send('mouseMoved', p, base + p.t / 1000, 1));
-  sends.push(send('mouseReleased', last, base + (last.t + releaseAfterMs) / 1000, 0));
-  await Promise.all(sends);
-  await cdp.detach();
-}
-
-/** 横（dx）・縦（dy）へ `durationMs` かけて一定の速さで払う操作の点列（12 点）。 */
-function flickPoints(x0, y0, dx, dy, durationMs = 160, n = 10) {
-  const pts = [{ x: x0, y: y0, t: 0 }];
-  for (let i = 1; i <= n; i++) pts.push({ x: x0 + (dx * i) / n, y: y0 + (dy * i) / n, t: (durationMs * i) / n });
-  return pts;
 }
 
 const yawOf = (d) => Math.atan2(-d[0], -d[2]);
@@ -353,6 +327,23 @@ async function testInertiaFly(page, inside) {
   await settle(page);
   check('慣性の間も HUD の視点の表示（?pos=…&look=…）が更新される', midState.rotating && hudDuring !== hudBefore, `${hudBefore} → ${hudDuring}`);
 
+  // 最後の pointermove のあとに位置が変わって離す: その動きも離す直前の速さに入る（慣性が強くなる）。
+  // 遅く動かしたあと、最後の 16 ミリ秒で 80 ピクセル動いたところで離す。位置を離した所に含めないと、遅いままの慣性になる
+  const slowThenRelease = async (releaseDx) => {
+    await level();
+    const b0 = await state(page);
+    const slow = [{ x: cx, y: cy, t: 0 }, { x: cx + 10, y: cy, t: 100 }];
+    await pointerGesture(page, slow, 16, { x: cx + releaseDx, y: cy, t: 116 });
+    const q = await sampleFrames(page, (x) => !x.rotating, 80);
+    const total = wrapPi(yawOf(b0.direction) - yawOf(q[q.length - 1].direction));
+    return { total, rotated: q.some((x) => x.rotating) };
+  };
+  const slowSame = await slowThenRelease(10);
+  const slowFar = await slowThenRelease(90);
+  check('最後の pointermove のあとに動いて離した位置も、離す直前の速さに入る（その分、慣性が強くなる）',
+    slowFar.rotated && slowFar.total > 90 * 0.0025 * 0.9 && slowFar.total - 90 * 0.0025 > 3 * Math.max(0.01, slowSame.total - 10 * 0.0025),
+    `離した位置が最後の移動と同じ: 総回転 ${slowSame.total.toFixed(3)} rad（ドラッグ ${(10 * 0.0025).toFixed(3)}）、80 ピクセル先で離す: ${slowFar.total.toFixed(3)} rad（ドラッグ ${(90 * 0.0025).toFixed(3)}）`);
+
   // ポインタを止めてから離す: 慣性が付かない（狙った向きで止められる）
   await level();
   const t0 = await state(page);
@@ -524,6 +515,15 @@ async function testInertiaOverview(page, center) {
     `回転のあった標本 ${afterRelease}、1 フレームごとの回転量 ${steps.map((d) => d.toFixed(3)).join(' ')}`);
   check('俯瞰モード: 慣性の間も中心までの距離は変わらない', [s0, ...a].every((s) => Math.abs(dist(s) - dist(s0)) < 1e-4), `距離 ${dist(s0).toFixed(4)} → ${dist(last).toFixed(4)}`);
   check('俯瞰モード: 慣性の総回転量が見込める範囲に入る（ドラッグ 0.6 rad に、慣性が加わる）', Math.abs(wrapPi(azimuth(last) - azimuth(s0))) > 0.6 + 0.3, `総回転 ${Math.abs(wrapPi(azimuth(last) - azimuth(s0))).toFixed(3)} rad`);
+
+  await place();
+  const w0 = await state(page);
+  await pointerGesture(page, [{ x: cx, y: cy, t: 0 }, { x: cx + 10, y: cy, t: 100 }], 16, { x: cx + 90, y: cy, t: 116 });
+  const w = await sampleFrames(page, (x) => !x.rotating, 80);
+  const wl = w[w.length - 1];
+  const wTotal = Math.abs(wrapPi(azimuth(wl) - azimuth(w0)));
+  check('俯瞰モード: 最後の pointermove のあとに動いて離した位置も、離す直前の速さに入る（ドラッグだけより大きく回る）',
+    w.some((x) => x.rotating) && wTotal > 90 * 0.005 + 0.15, `総回転 ${wTotal.toFixed(3)} rad（ドラッグだけなら ${(90 * 0.005).toFixed(3)}）`);
 
   await place();
   const t0 = await state(page);

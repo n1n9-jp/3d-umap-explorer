@@ -172,6 +172,15 @@ export class OverviewControls {
     return this.inertia.active;
   }
 
+  /**
+   * 押下 `e`（pointerdown）が、回転の慣性を止めた押下か。点のクリックの判定が、慣性を止めるための押下を
+   * クリックに数えないために使う。カメラ操作とそのリスナーの登録順によらず、同じ答えになる
+   * （先にこちらが止めたときは覚えた押下と比べ、まだ止めていないときは、回っていれば true）。
+   */
+  pressStopsInertia(e: Event): boolean {
+    return this._enabled && this.inertia.isStoppedBy(e);
+  }
+
   /** 回転の慣性を止める（位置と向きはそのまま）。 */
   stopRotationInertia(): void {
     this.inertia.stop();
@@ -233,8 +242,9 @@ export class OverviewControls {
 
   private readonly onPointerDown = (e: PointerEvent): void => {
     if (!this._enabled) return;
-    // 慣性で回っている間にポインタを押したら止める（どのボタンでも）
-    this.inertia.stop();
+    // 慣性で回っている間にポインタを押したら止める（どのボタンでも）。止めた押下は覚えて、
+    // クリックの判定（`pressStopsInertia`）が「回転を止めるための押下」を点のクリックに数えないようにする
+    this.inertia.stopByPress(e);
     if (e.button !== 0 || this.dragPointerId !== null) return;
     this.dragPointerId = e.pointerId;
     this.lastX = e.clientX;
@@ -269,7 +279,7 @@ export class OverviewControls {
   private readonly onPointerUp = (e: PointerEvent): void => {
     if (e.pointerId !== this.dragPointerId) return;
     this.endDrag();
-    this.inertia.endDrag(eventTimeMs(e), this.rotateSpeed);
+    this.inertia.endDrag(eventTimeMs(e), this.rotateSpeed, e.clientX, e.clientY);
   };
 
   /** 押下の取り消し（pointercancel・lostpointercapture）。慣性は付けない。 */
