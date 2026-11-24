@@ -4,6 +4,8 @@ import {
   DEFAULT_INERTIA_STOP_SPEED,
   DEFAULT_INERTIA_TIME_CONSTANT,
   DragVelocityTracker,
+  FLY_INERTIA_TIME_CONSTANT,
+  OVERVIEW_INERTIA_TIME_CONSTANT,
   prefersReducedMotion,
   RotationInertia,
 } from './RotationInertia';
@@ -480,5 +482,57 @@ describe('prefers-reduced-motion', () => {
 
   it('「動きを減らす」でなければ既定の 0.3 秒', () => {
     expect(new RotationInertia({}, win(false)).timeConstant).toBe(DEFAULT_INERTIA_TIME_CONSTANT);
+  });
+});
+
+describe('RotationInertia: モードごとの既定の時定数', () => {
+  const win = (reduce: boolean) => ({ matchMedia: (q: string) => ({ matches: reduce && q.includes('reduce') }) as MediaQueryList });
+
+  it('飛行モード 0.35 秒・俯瞰モード 0.45 秒。省略したときの既定は 0.3 秒', () => {
+    expect(FLY_INERTIA_TIME_CONSTANT).toBe(0.35);
+    expect(OVERVIEW_INERTIA_TIME_CONSTANT).toBe(0.45);
+    expect(new RotationInertia({ defaultTimeConstant: FLY_INERTIA_TIME_CONSTANT }).timeConstant).toBe(0.35);
+    expect(new RotationInertia({ defaultTimeConstant: OVERVIEW_INERTIA_TIME_CONSTANT }).timeConstant).toBe(0.45);
+    expect(new RotationInertia({}).timeConstant).toBe(DEFAULT_INERTIA_TIME_CONSTANT);
+  });
+
+  it('timeConstant を指定するとそちらが優先され、null で、渡した既定へ戻る。0 は無効', () => {
+    const inertia = new RotationInertia({ timeConstant: 0.2, defaultTimeConstant: 0.45 });
+    expect(inertia.timeConstant).toBe(0.2);
+    inertia.timeConstant = 0;
+    expect(inertia.enabled).toBe(false);
+    inertia.timeConstant = null;
+    expect(inertia.timeConstant).toBe(0.45);
+    expect(inertia.enabled).toBe(true);
+  });
+
+  it('既定の時定数の指定が不正（NaN）なら 0.3 秒。「動きを減らす」設定なら、既定の値によらず無効', () => {
+    expect(new RotationInertia({ defaultTimeConstant: Number.NaN }).timeConstant).toBe(0.3);
+    expect(new RotationInertia({ defaultTimeConstant: 0.45 }, win(true)).timeConstant).toBe(0);
+    expect(new RotationInertia({ timeConstant: 0.45, defaultTimeConstant: 0.35 }, win(true)).timeConstant).toBe(0.45);
+  });
+
+  it('総回転量は、既定の時定数に比例する（v0 · τ）', () => {
+    const total = (tau: number) => {
+      const inertia = new RotationInertia({ defaultTimeConstant: tau });
+      inertia.start(2, 0);
+      let sum = 0;
+      for (let i = 0; i < 600 && inertia.step(1 / 60); i++) sum += inertia.dYaw;
+      return sum;
+    };
+    expect(total(0.45) / total(0.35)).toBeCloseTo(0.45 / 0.35, 1);
+  });
+
+  it('yawRate・pitchRate: 回っている間の現在の角速度。止まれば 0', () => {
+    const inertia = new RotationInertia({ timeConstant: 0.3 });
+    expect([inertia.yawRate, inertia.pitchRate]).toEqual([0, 0]);
+    inertia.start(2, -1);
+    expect(inertia.yawRate).toBe(2);
+    expect(inertia.pitchRate).toBe(-1);
+    inertia.step(0.3);
+    expect(inertia.yawRate).toBeCloseTo(2 * Math.exp(-1), 9);
+    expect(inertia.pitchRate).toBeCloseTo(-Math.exp(-1), 9);
+    inertia.stop();
+    expect([inertia.yawRate, inertia.pitchRate]).toEqual([0, 0]);
   });
 });

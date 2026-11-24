@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { PerspectiveCamera, Vector3 } from 'three';
+import { Euler, PerspectiveCamera, Vector3 } from 'three';
 import { FlyCameraControls } from './FlyCameraControls';
 
 type Handler = (e: never) => void;
@@ -1017,9 +1017,9 @@ describe('FlyCameraControls: 回転の慣性', () => {
     }
     expect(steps).toBeGreaterThan(30);
     expect(r.controls.isRotatingByInertia).toBe(false);
-    // 離す前の速さ 2.5 rad/s（= 1000 px/s × 0.0025）→ 総回転量は約 2.5 × 0.3 = 0.75 rad
-    expect(atRelease - yawOf(r.camera)).toBeGreaterThan(0.6);
-    expect(atRelease - yawOf(r.camera)).toBeLessThan(0.8);
+    // 離す前の速さ 2.5 rad/s（= 1000 px/s × 0.0025）→ 総回転量は約 2.5 × 0.35 = 0.875 rad
+    expect(atRelease - yawOf(r.camera)).toBeGreaterThan(0.7);
+    expect(atRelease - yawOf(r.camera)).toBeLessThan(0.95);
     expect(r.controls.update(1 / 60)).toBe(false);
   });
 
@@ -1099,8 +1099,8 @@ describe('FlyCameraControls: 回転の慣性', () => {
     up();
     for (let i = 0; i < 600; i++) r.controls.update(1 / 60);
     const turned = Math.abs(yawOf(r.camera) - atRelease);
-    expect(turned).toBeLessThan(4 * 0.3 + 1e-6);
-    expect(turned).toBeGreaterThan(4 * 0.3 * 0.95);
+    expect(turned).toBeLessThan(4 * 0.35 + 1e-6);
+    expect(turned).toBeGreaterThan(4 * 0.35 * 0.95);
   });
 
   it('ピッチは慣性の間も ±89° で止まり、止まったあとは回り続けない', () => {
@@ -1271,8 +1271,12 @@ describe('FlyCameraControls: 回転の慣性', () => {
     off.dispose();
   });
 
-  it('時定数は既定 0.3 秒で、調整できる', () => {
-    expect(r.controls.rotationTimeConstant).toBe(0.3);
+  it('時定数は既定 0.35 秒で、調整できる。null で既定へ戻る', () => {
+    expect(r.controls.rotationTimeConstant).toBe(0.35);
+    r.controls.rotationTimeConstant = 0.8;
+    expect(r.controls.rotationTimeConstant).toBe(0.8);
+    r.controls.rotationTimeConstant = null;
+    expect(r.controls.rotationTimeConstant).toBe(0.35);
     const total = (tau: number) => {
       const rig = createRig();
       rig.controls.rotationTimeConstant = tau;
@@ -1409,5 +1413,70 @@ describe('FlyCameraControls: 慣性で回る最中の前進', () => {
     const b = frames[frames.length - 1];
     const step = b.disp.clone().sub(a.disp);
     expect(angleBetween(step, b.dir)).toBeLessThan(0.01);
+  });
+});
+
+describe('FlyCameraControls: 残っている動きの取り出しと取り込み', () => {
+  it('getResidualMotion: 移動の速度と回転の慣性の角速度を返す。何もなければ 0', () => {
+    const r = createRig();
+    const none = r.controls.getResidualMotion();
+    expect(none.velocity.length()).toBe(0);
+    expect([none.yawRate, none.pitchRate]).toEqual([0, 0]);
+    keydown(r, 'KeyW');
+    frames(r.controls, 1);
+    const moving = r.controls.getResidualMotion();
+    expect(moving.velocity.length()).toBeCloseTo(r.controls.speed, 3);
+    expect(moving.velocity.z).toBeLessThan(0); // -Z へ前進
+    expect(moving.yawRate).toBe(0);
+    // 返した値は内部の状態を指さない（コピー）
+    moving.velocity.set(9, 9, 9);
+    expect(r.controls.getResidualMotion().velocity.x).toBeLessThan(1);
+  });
+
+  it('getResidualMotion: 慣性で回っている間のヨーの角速度（右へ払うと負）。無効にすると 0', () => {
+    const r = createRig();
+    let t = 1000;
+    r.el.emit('pointerdown', { button: 0, pointerId: 1, clientX: 100, clientY: 100, timeStamp: t });
+    for (let i = 1; i <= 8; i++) {
+      t += 16;
+      r.el.emit('pointermove', { pointerId: 1, clientX: 100 + 8 * i, clientY: 100, timeStamp: t });
+    }
+    r.el.emit('pointerup', { pointerId: 1, timeStamp: t });
+    const rotating = r.controls.getResidualMotion();
+    expect(rotating.yawRate).toBeLessThan(-0.5);
+    expect(rotating.pitchRate).toBeCloseTo(0, 9);
+    r.controls.enabled = false;
+    const off = r.controls.getResidualMotion();
+    expect([off.yawRate, off.pitchRate]).toEqual([0, 0]);
+    expect(off.velocity.length()).toBe(0);
+  });
+
+  it('syncFromCamera: カメラを外から動かしたあと、位置と向きを取り込む。速度・慣性・キー入力は保つ', () => {
+    const r = createRig();
+    keydown(r, 'KeyW');
+    frames(r.controls, 1);
+    const v = r.controls.getResidualMotion().velocity.clone();
+    r.camera.position.set(0.5, 0.2, -0.3);
+    r.camera.quaternion.setFromEuler(new Euler(0.1, 0.7, 0, 'YXZ'));
+    r.camera.updateMatrixWorld();
+    r.controls.syncFromCamera();
+    expect(r.controls.getResidualMotion().velocity.distanceTo(v)).toBeLessThan(1e-12);
+    const pose = r.controls.getPose();
+    expect(pose.position.distanceTo(new Vector3(0.5, 0.2, -0.3))).toBeLessThan(1e-12);
+    expect(pose.yaw).toBeCloseTo(0.7, 9);
+    expect(pose.pitch).toBeCloseTo(0.1, 9);
+    // キーは押されたまま、速度が（時定数 0.12 秒で）その姿勢の視線の向きへ移っていく
+    const before = r.camera.position.clone();
+    frames(r.controls, 2);
+    expect(r.camera.position.distanceTo(before)).toBeGreaterThan(0.1);
+    expect(r.controls.getResidualMotion().velocity.normalize().distanceTo(viewDirection(r.camera))).toBeLessThan(1e-6);
+  });
+
+  it('syncFromCamera: 無効のときは何もしない', () => {
+    const r = createRig();
+    r.controls.enabled = false;
+    r.camera.position.set(1, 2, 3);
+    r.controls.syncFromCamera();
+    expect(r.controls.getPose().position.toArray()).toEqual([0, 0, 0]);
   });
 });

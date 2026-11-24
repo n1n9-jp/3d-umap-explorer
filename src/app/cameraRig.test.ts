@@ -27,12 +27,13 @@ class FakeTarget {
   }
 }
 
-function createRig() {
+function createRig(options: { reducedMotion?: boolean; center?: Vector3 } = {}) {
   const camera = new PerspectiveCamera(60, 1.6, 0.0005, 12);
-  const win = new FakeTarget();
+  const win = new FakeTarget() as FakeTarget & { matchMedia?: (q: string) => { matches: boolean } };
+  if (options.reducedMotion) win.matchMedia = (q: string) => ({ matches: q.includes('prefers-reduced-motion: reduce') });
   const el = new FakeTarget();
   el.ownerDocument = { defaultView: win };
-  const rig = new CameraRig(camera, el as unknown as HTMLElement, new Vector3(), {});
+  const rig = new CameraRig(camera, el as unknown as HTMLElement, options.center ?? new Vector3(), {});
   return { camera, win, el, rig };
 }
 
@@ -358,7 +359,7 @@ describe('CameraRig: 回転の慣性', () => {
     });
   }
 
-  it('モードを切り替えると、回っていた慣性は止まり、切り替えで向きが跳ばない', () => {
+  it('モードを切り替えると、慣性は操作側では止まり、切り替えの瞬間に向きが跳ばない（残った回転は短い時定数で消える）', () => {
     const { camera, el, rig } = createRig();
     rig.setView({ pos: [0.2, 0.1, 1.5], look: [0, 0, 0] });
     flick(el, 12);
@@ -366,9 +367,12 @@ describe('CameraRig: 回転の慣性', () => {
     const dir = forward(camera).clone();
     rig.setMode('overview');
     expect(rig.fly.isRotatingByInertia).toBe(false);
-    expect(forward(camera).distanceTo(dir)).toBeLessThan(1e-9);
+    expect(forward(camera).distanceTo(dir)).toBeLessThan(1e-9); // 切り替えの瞬間は跳ばない
+    for (let i = 0; i < 120; i++) rig.update(1 / 60);
+    expect(rig.getState().reorienting).toBe(false);
+    const settled = forward(camera).clone();
     for (let i = 0; i < 20; i++) rig.update(1 / 60);
-    expect(forward(camera).distanceTo(dir)).toBeLessThan(1e-9);
+    expect(forward(camera).distanceTo(settled)).toBeLessThan(1e-12); // やがて止まる
 
     flick(el, 12, 12, 5000);
     rig.update(1 / 60);
@@ -376,8 +380,11 @@ describe('CameraRig: 回転の慣性', () => {
     rig.setMode('fly');
     expect(rig.overview.isRotatingByInertia).toBe(false);
     const dir2 = forward(camera).clone();
-    for (let i = 0; i < 20; i++) rig.update(1 / 60);
     expect(forward(camera).distanceTo(dir2)).toBeLessThan(1e-9);
+    for (let i = 0; i < 120; i++) rig.update(1 / 60);
+    const settled2 = forward(camera).clone();
+    for (let i = 0; i < 20; i++) rig.update(1 / 60);
+    expect(forward(camera).distanceTo(settled2)).toBeLessThan(1e-12);
   });
 
   it('飛行モードでは、慣性で回っている間も移動キーで進む（位置は回転では変わらない）', () => {
@@ -520,3 +527,518 @@ describe('CameraRig: 慣性を止めた押下はクリックに数えない', ()
   }
 });
 
+
+describe('CameraRig: モードごとの回転の慣性の既定値', () => {
+  it('飛行モード 0.35 秒・俯瞰モード 0.45 秒。代入は両方に効き、null でモードごとの既定へ戻る', () => {
+    const { rig } = createRig();
+    expect(rig.fly.rotationTimeConstant).toBe(0.35);
+    expect(rig.overview.rotationTimeConstant).toBe(0.45);
+    expect(rig.rotationTimeConstant).toBe(0.35); // 現在（飛行）のモードの値
+    rig.setMode('overview');
+    expect(rig.rotationTimeConstant).toBe(0.45);
+    rig.rotationTimeConstant = 0.8;
+    expect(rig.fly.rotationTimeConstant).toBe(0.8);
+    expect(rig.overview.rotationTimeConstant).toBe(0.8);
+    rig.rotationTimeConstant = null;
+    expect(rig.fly.rotationTimeConstant).toBe(0.35);
+    expect(rig.overview.rotationTimeConstant).toBe(0.45);
+  });
+
+  it('オプションで時定数を指定すると、両方のモードがその値を使う', () => {
+    const camera = new PerspectiveCamera(60, 1.6, 0.0005, 12);
+    const win = new FakeTarget();
+    const el = new FakeTarget();
+    el.ownerDocument = { defaultView: win };
+    const rig = new CameraRig(camera, el as unknown as HTMLElement, new Vector3(), { rotationInertia: { timeConstant: 0.2 } });
+    expect(rig.fly.rotationTimeConstant).toBe(0.2);
+    expect(rig.overview.rotationTimeConstant).toBe(0.2);
+    rig.rotationTimeConstant = null;
+    expect(rig.fly.rotationTimeConstant).toBe(0.35);
+    expect(rig.overview.rotationTimeConstant).toBe(0.45);
+  });
+
+  it('「動きを減らす」設定では、どちらのモードも既定で無効', () => {
+    const { rig } = createRig({ reducedMotion: true });
+    expect(rig.fly.rotationTimeConstant).toBe(0);
+    expect(rig.overview.rotationTimeConstant).toBe(0);
+  });
+});
+
+describe('CameraRig: 飛行 → 俯瞰で、点群の中心へ向き直す', () => {
+  const unit = (v: Vector3) => v.clone().normalize();
+  /** 位置 [0,0,2] から +X を向く（中心 [0,0,0] は真横の −Z 側で、90° ずれている）。 */
+  const lookAway = (rig: CameraRig) => rig.setView({ pos: [0, 0, 2], look: [5, 0, 2] });
+  const toCenter = (camera: PerspectiveCamera) => unit(new Vector3(0, 0, 0).sub(camera.position));
+  const step = (rig: CameraRig, seconds: number, dt = 0.05) => {
+    for (let t = 0; t < seconds - 1e-9; t += dt) rig.update(dt);
+  };
+
+  it('切り替えた瞬間は跳ばず、向き直しの最中は位置が変わらない。0.5 秒で終わり、終わったとき視線が中心を向く', () => {
+    const { camera, rig } = createRig();
+    lookAway(rig);
+    const pos = camera.position.clone();
+    const dir0 = forward(camera).clone();
+    expect(rig.getState().reorienting).toBe(false);
+    rig.setMode('overview');
+    expect(forward(camera).distanceTo(dir0)).toBeLessThan(1e-12);
+    expect(rig.getState().reorienting).toBe(true);
+    expect(rig.getState().homing).toBe(false);
+    for (let i = 0; i < 9; i++) {
+      rig.update(0.05); // 0.45 秒まで
+      expect(camera.position.toArray()).toEqual(pos.toArray());
+      expect(rig.getState().reorienting).toBe(true);
+    }
+    expect(forward(camera).distanceTo(toCenter(camera))).toBeGreaterThan(1e-3);
+    step(rig, 0.1);
+    expect(rig.getState().reorienting).toBe(false);
+    expect(camera.position.toArray()).toEqual(pos.toArray());
+    expect(forward(camera).distanceTo(toCenter(camera))).toBeLessThan(1e-9);
+    expect(rig.getState().mode).toBe('overview');
+    expect(rig.getState().pivot).toEqual([0, 0, 0]);
+  });
+
+  it('進み方は f(t) = 1 − (1−t)³(1+3t)（水平のずれなら、回った角度が f(t) × 90°）', () => {
+    const { camera, rig } = createRig();
+    lookAway(rig);
+    const dir0 = forward(camera).clone();
+    rig.setMode('overview');
+    let t = 0;
+    for (let i = 0; i < 10; i++) {
+      rig.update(0.05);
+      t += 0.05;
+      const f = 1 - (1 - t / 0.5) ** 3 * (1 + (3 * t) / 0.5);
+      if (t < 0.5 - 1e-9) expect(forward(camera).angleTo(dir0)).toBeCloseTo(f * (Math.PI / 2), 6);
+    }
+  });
+
+  it('始めと終わりが緩やか（最初と最後のフレームの回転量が、中ほどより小さい）', () => {
+    const { camera, rig } = createRig();
+    lookAway(rig);
+    rig.setMode('overview');
+    const turns: number[] = [];
+    let prev = forward(camera).clone();
+    for (let i = 0; i < 10; i++) {
+      rig.update(0.05);
+      turns.push(forward(camera).angleTo(prev));
+      prev = forward(camera).clone();
+    }
+    // 1 フレーム 0.05 秒の刻みでは、最初と最後のフレームも少し進む（最も速いのは 0.2〜0.25 秒の間）
+    expect(turns[0]).toBeLessThan((turns[4] as number) * 0.5);
+    expect(turns[9]).toBeLessThan((turns[4] as number) * 0.5);
+    expect(turns[0]).toBeLessThan((turns[3] as number) * 0.5);
+    expect(turns[9]).toBeLessThan((turns[5] as number) * 0.5);
+  });
+
+  it('途中の姿勢は横傾き（roll）を持たず、視線の仰角は ±89° に収まる', () => {
+    const { camera, rig } = createRig({ center: new Vector3(0.3, 2, 0.1) });
+    rig.setView({ pos: [0.3, -1, 0.1], look: [4, -1, 0.1] }); // 中心はほぼ真上
+    rig.setMode('overview');
+    for (let i = 0; i < 12; i++) {
+      rig.update(0.05);
+      expect(new Vector3(1, 0, 0).applyQuaternion(camera.quaternion).y).toBeCloseTo(0, 9);
+      expect(Math.abs(pitchOf(camera))).toBeLessThanOrEqual(MAX_VIEW_PITCH + 1e-9);
+    }
+  });
+
+  it('向きのずれが 3° 未満なら何もしない。3° 以上なら向き直す', () => {
+    const lookTilted = (deg: number) => {
+      const yaw = (deg * Math.PI) / 180; // 中心 [0,0,0] を向く向き（−Z）から、左へ deg だけずらす
+      return { pos: [0, 0, 2] as [number, number, number], look: [-Math.sin(yaw), 0, 2 - Math.cos(yaw)] as [number, number, number] };
+    };
+    {
+      const { camera, rig } = createRig();
+      rig.setView(lookTilted(2.9));
+      const dir = forward(camera).clone();
+      rig.setMode('overview');
+      expect(rig.getState().reorienting).toBe(false);
+      step(rig, 1);
+      expect(forward(camera).distanceTo(dir)).toBeLessThan(1e-12);
+    }
+    {
+      const { camera, rig } = createRig();
+      rig.setView(lookTilted(3.1));
+      rig.setMode('overview');
+      expect(rig.getState().reorienting).toBe(true);
+      step(rig, 0.6);
+      expect(forward(camera).distanceTo(toCenter(camera))).toBeLessThan(1e-9);
+    }
+  });
+
+  it('ドラッグ（左ボタンの pointerdown）で中断し、その場の向きに留まる。回転の中心は点群の中心のまま', () => {
+    const { camera, el, rig } = createRig();
+    lookAway(rig);
+    rig.setMode('overview');
+    step(rig, 0.2);
+    expect(rig.getState().reorienting).toBe(true);
+    el.emit('pointerdown', { button: 0, pointerId: 1, clientX: 10, clientY: 10, timeStamp: 100 });
+    expect(rig.getState().reorienting).toBe(false);
+    const dir = forward(camera).clone();
+    expect(dir.distanceTo(toCenter(camera))).toBeGreaterThan(1e-3);
+    step(rig, 0.6);
+    expect(forward(camera).distanceTo(dir)).toBeLessThan(1e-12);
+    expect(rig.getState().pivot).toEqual([0, 0, 0]);
+    // そのままドラッグすれば、点群の中心のまわりを回る（中心までの距離が保たれる）
+    const r0 = camera.position.length();
+    el.emit('pointermove', { pointerId: 1, clientX: 60, clientY: 10, timeStamp: 400 });
+    expect(camera.position.length()).toBeCloseTo(r0, 9);
+    expect(camera.position.distanceTo(new Vector3(0, 0, 2))).toBeGreaterThan(0.05);
+  });
+
+  it('右ボタンの押下では中断しない', () => {
+    const { el, rig } = createRig();
+    lookAway(rig);
+    rig.setMode('overview');
+    el.emit('pointerdown', { button: 2, pointerId: 1, clientX: 10, clientY: 10, timeStamp: 100 });
+    expect(rig.getState().reorienting).toBe(true);
+  });
+
+  it('ホイール（距離の変更）で中断する。ピンチ（ctrlKey）や横スクロール（deltaY 0）では中断しない', () => {
+    const { camera, el, rig } = createRig();
+    lookAway(rig);
+    rig.setMode('overview');
+    step(rig, 0.1);
+    el.emit('wheel', { deltaY: 100, deltaMode: 0, ctrlKey: true });
+    el.emit('wheel', { deltaY: 0, deltaMode: 0, ctrlKey: false });
+    expect(rig.getState().reorienting).toBe(true);
+    el.emit('wheel', { deltaY: 100, deltaMode: 0, ctrlKey: false, timeStamp: 100 });
+    expect(rig.getState().reorienting).toBe(false);
+    const dir = forward(camera).clone();
+    step(rig, 0.6);
+    expect(forward(camera).distanceTo(dir)).toBeLessThan(1e-12);
+    expect(rig.getState().pivot).toEqual([0, 0, 0]);
+  });
+
+  it('向き直しの最中に O で飛行モードへ戻すと、向き直しをやめ、その時点の姿勢から飛行を続ける', () => {
+    const { camera, win, rig } = createRig();
+    lookAway(rig);
+    rig.setMode('overview');
+    step(rig, 0.2);
+    const pos = camera.position.clone();
+    const dir = forward(camera).clone();
+    rig.setMode('fly');
+    expect(rig.getState().reorienting).toBe(false);
+    expect(rig.getState().mode).toBe('fly');
+    step(rig, 0.6);
+    expect(camera.position.distanceTo(pos)).toBeLessThan(1e-12);
+    expect(forward(camera).distanceTo(dir)).toBeLessThan(1e-9);
+    // 飛行の操作がその姿勢から使える（W は、その時点の視線の向きへ進む）
+    win.emit('keydown', { code: 'KeyW', target: null });
+    for (let i = 0; i < 10; i++) rig.update(0.05);
+    const moved = camera.position.clone().sub(pos);
+    expect(moved.length()).toBeGreaterThan(0.01);
+    expect(unit(moved).distanceTo(dir)).toBeLessThan(1e-6);
+  });
+
+  it('setView・goHome・flyTo で中断する', () => {
+    for (const action of ['setView', 'goHome', 'flyTo'] as const) {
+      const { rig } = createRig();
+      lookAway(rig);
+      rig.setMode('overview');
+      expect(rig.getState().reorienting).toBe(true);
+      if (action === 'setView') rig.setView({ pos: [0, 0, 1], look: [0, 0, 0] });
+      else if (action === 'goHome') rig.goHome(HOME);
+      else rig.flyTo(new Vector3(0, 0, -3), { durationMs: 500 });
+      expect(rig.getState().reorienting).toBe(false);
+    }
+  });
+
+  it('ホームへ移動中に O で切り替えても、向き直しはせず、移動を続ける', () => {
+    const { rig } = createRig();
+    lookAway(rig);
+    rig.goHome(HOME);
+    rig.setMode('overview');
+    expect(rig.getState().reorienting).toBe(false);
+    expect(rig.getState().homing).toBe(true);
+  });
+
+  it('中心と位置が重なっているときは何もしない', () => {
+    const { camera, rig } = createRig();
+    rig.setView({ pos: [0, 0, 0], look: [0, 0, -1] });
+    const dir = forward(camera).clone();
+    rig.setMode('overview');
+    expect(rig.getState().reorienting).toBe(false);
+    step(rig, 0.6);
+    expect(forward(camera).distanceTo(dir)).toBeLessThan(1e-12);
+  });
+
+  it('「動きを減らす」設定では、向き直しを 1 度に行う（動きを作らない）', () => {
+    const { camera, rig } = createRig({ reducedMotion: true });
+    lookAway(rig);
+    const pos = camera.position.clone();
+    rig.setMode('overview');
+    expect(rig.getState().reorienting).toBe(false);
+    expect(camera.position.toArray()).toEqual(pos.toArray());
+    expect(forward(camera).distanceTo(toCenter(camera))).toBeLessThan(1e-9);
+  });
+
+  it('dispose で向き直しを捨てる', () => {
+    const { rig } = createRig();
+    lookAway(rig);
+    rig.setMode('overview');
+    rig.dispose();
+    expect(rig.getState().reorienting).toBe(false);
+  });
+
+  it('向き直しが終わったあと、ドラッグで中心が画面の中央に留まったまま回る（中心の方向が視線から外れない）', () => {
+    const { camera, el, rig } = createRig();
+    lookAway(rig);
+    rig.setMode('overview');
+    step(rig, 0.6);
+    el.emit('pointerdown', { button: 0, pointerId: 1, clientX: 100, clientY: 100, timeStamp: 1000 });
+    for (let i = 1; i <= 10; i++) {
+      el.emit('pointermove', { pointerId: 1, clientX: 100 + 12 * i, clientY: 100 + 3 * i, timeStamp: 1000 + 200 * i });
+      expect(forward(camera).distanceTo(toCenter(camera))).toBeLessThan(1e-9);
+    }
+    el.emit('pointerup', { pointerId: 1, clientX: 220, clientY: 130, timeStamp: 3500 });
+  });
+});
+
+describe('CameraRig: 切り替えた瞬間に残っている動きを、時定数 0.15 秒で減らして消す', () => {
+  const TAU = 0.15;
+  /** W を押し続けて、速度が定常（基準速度）になるまで進める。 */
+  function cruise(rig: CameraRig, win: FakeTarget): void {
+    win.emit('keydown', { code: 'KeyW', target: null });
+    for (let i = 0; i < 40; i++) rig.update(0.1);
+  }
+
+  it('飛行 → 俯瞰: 移動の速度が、時定数 0.15 秒で減りながら進み、やがて止まる（総距離は v0 × τ）', () => {
+    const { camera, win, rig } = createRig();
+    rig.setView({ pos: [0, 0, 5], look: [0, 0, 4] });
+    cruise(rig, win);
+    const v0 = rig.getState().effectiveSpeed; // 定常の速度（W だけなので、視線の向きへ）
+    const dir = forward(camera).clone();
+    const at = camera.position.clone();
+    rig.setMode('overview');
+    const dt = 1 / 60;
+    const steps: number[] = [];
+    let prev = camera.position.clone();
+    for (let i = 0; i < 300; i++) {
+      rig.update(dt);
+      steps.push(camera.position.distanceTo(prev));
+      prev = camera.position.clone();
+    }
+    expect(steps[0]).toBeGreaterThan(0); // 急に止まらない
+    // 毎フレームの移動量は、exp(−dt/τ) の比で減る
+    for (let i = 1; i < 60; i++) expect((steps[i] as number) / (steps[i - 1] as number)).toBeCloseTo(Math.exp(-dt / TAU), 6);
+    const total = camera.position.distanceTo(at);
+    expect(total).toBeGreaterThan(v0 * TAU * 0.98);
+    expect(total).toBeLessThan(v0 * TAU * 1.0001);
+    // 進んだ向きは、切り替えの瞬間の視線（W の向き）
+    expect(camera.position.clone().sub(at).normalize().distanceTo(dir)).toBeLessThan(1e-6);
+    // 止まったあとは動かない
+    const settled = camera.position.clone();
+    for (let i = 0; i < 30; i++) rig.update(dt);
+    expect(camera.position.distanceTo(settled)).toBe(0);
+  });
+
+  it('総距離は刻み幅によらない', () => {
+    const run = (dt: number) => {
+      const { camera, win, rig } = createRig();
+      rig.setView({ pos: [0, 0, 5], look: [0, 0, 4] });
+      cruise(rig, win);
+      const at = camera.position.clone();
+      rig.setMode('overview');
+      for (let t = 0; t < 3; t += dt) rig.update(dt);
+      return camera.position.distanceTo(at);
+    };
+    expect(run(1 / 120)).toBeCloseTo(run(0.05), 6);
+  });
+
+  it('飛行 → 俯瞰: 回転の慣性が、その場で時定数 0.15 秒で減りながら回り、やがて止まる（総回転は rate × τ）', () => {
+    const { camera, el, rig } = createRig();
+    rig.setView({ pos: [0, 0, 2], look: [0, 0, 0] });
+    const flickFast = () => {
+      let t = 1000;
+      el.emit('pointerdown', { button: 0, pointerId: 1, clientX: 100, clientY: 100, timeStamp: t });
+      for (let i = 1; i <= 6; i++) {
+        t += 16;
+        el.emit('pointermove', { pointerId: 1, clientX: 100 + 5 * i, clientY: 100, timeStamp: t });
+      }
+      el.emit('pointerup', { pointerId: 1, timeStamp: t });
+    };
+    flickFast();
+    const rate = rig.fly.getResidualMotion().yawRate;
+    expect(rate).toBeLessThan(0); // 右へ払った（ヨーは減る）
+    const dir = forward(camera).clone();
+    const pos = camera.position.clone();
+    rig.setMode('overview');
+    expect(rig.fly.isRotatingByInertia).toBe(false);
+    expect(rig.getState().reorienting).toBe(false); // 向きのずれは 3° 未満
+    const yaws: number[] = [];
+    for (let i = 0; i < 300; i++) {
+      rig.update(1 / 60);
+      yaws.push(Math.atan2(-forward(camera).x, -forward(camera).z));
+    }
+    const yaw0 = Math.atan2(-dir.x, -dir.z);
+    expect(yaws[0]).toBeLessThan(yaw0); // 切り替えてすぐ止まらず、同じ向きへ回り続ける
+    // 総回転は rate × τ。角速度が stopSpeed（0.02 rad/s）を下回った時点で打ち切るので、その分（stopSpeed × τ）だけ少ない
+    const total = yaw0 - (yaws[299] as number);
+    expect(total).toBeLessThanOrEqual(-rate * TAU + 1e-9);
+    expect(total).toBeGreaterThan(-rate * TAU - 0.02 * TAU);
+    expect(camera.position.distanceTo(pos)).toBeLessThan(1e-12);
+    expect(rig.isRotatingByInertia).toBe(false);
+  });
+
+  it('向き直しの最中でも、残った回転は急に止まらず、始まりの向きを引き継ぎ、終わりは中心を向く', () => {
+    const { camera, el, rig } = createRig();
+    rig.setView({ pos: [0, 0, 2], look: [5, 0, 2] }); // 中心は 90° ずれている
+    let t = 1000;
+    el.emit('pointerdown', { button: 0, pointerId: 1, clientX: 100, clientY: 100, timeStamp: t });
+    for (let i = 1; i <= 8; i++) {
+      t += 16;
+      el.emit('pointermove', { pointerId: 1, clientX: 100 - 8 * i, clientY: 100, timeStamp: t }); // 左へ払う（中心の向きと同じ回り）
+    }
+    el.emit('pointerup', { pointerId: 1, timeStamp: t });
+    rig.update(1 / 60);
+    const before = forward(camera).clone();
+    rig.update(1 / 60);
+    const prevTurn = forward(camera).angleTo(before);
+    const last = forward(camera).clone();
+    expect(prevTurn).toBeGreaterThan(0.01);
+    rig.setMode('overview');
+    expect(rig.getState().reorienting).toBe(true);
+    rig.update(1 / 60);
+    const firstTurn = forward(camera).angleTo(last);
+    expect(firstTurn).toBeGreaterThan(prevTurn * 0.5); // 回転が途切れない
+    for (let i = 0; i < 60; i++) rig.update(1 / 60);
+    expect(rig.getState().reorienting).toBe(false);
+    expect(forward(camera).distanceTo(unit0(camera))).toBeLessThan(1e-9);
+  });
+
+  it('向き直しの最中に残った移動の速度でずれても、終わりは中心を向く', () => {
+    const { camera, win, rig } = createRig();
+    rig.setView({ pos: [0, 0, 5], look: [5, 0, 5] }); // +X へ進む（中心は 90° ずれている）
+    cruise(rig, win);
+    rig.setMode('overview');
+    expect(rig.getState().reorienting).toBe(true);
+    const pos = camera.position.clone();
+    for (let i = 0; i < 40 && rig.getState().reorienting; i++) rig.update(1 / 60);
+    expect(rig.getState().reorienting).toBe(false);
+    expect(camera.position.distanceTo(pos)).toBeGreaterThan(0.01); // 残った速度で、位置は動いている
+    expect(forward(camera).distanceTo(unit0(camera))).toBeLessThan(1e-9); // 終わった瞬間は、そのときの位置から中心を向く
+  });
+
+  it('俯瞰 → 飛行: 周回の慣性が、中心のまわりで時定数 0.15 秒で減りながら回り、やがて止まる。飛行の入力はすぐ使える', () => {
+    const { camera, win, el, rig } = createRig();
+    rig.setView({ pos: [1.4, 0.4, 1.5], look: [0, 0, 0] });
+    rig.setMode('overview');
+    for (let i = 0; i < 60; i++) rig.update(1 / 60); // 向き直しなし（中心を向いている）
+    const r0 = camera.position.length();
+    let t = 1000;
+    el.emit('pointerdown', { button: 0, pointerId: 1, clientX: 100, clientY: 100, timeStamp: t });
+    for (let i = 1; i <= 6; i++) {
+      t += 16;
+      el.emit('pointermove', { pointerId: 1, clientX: 100 + 8 * i, clientY: 100, timeStamp: t });
+    }
+    el.emit('pointerup', { pointerId: 1, timeStamp: t });
+    const rate = rig.overview.getResidualRotation().yawRate;
+    expect(rate).toBeLessThan(0);
+    const azimuth = () => Math.atan2(camera.position.x, camera.position.z);
+    const a0 = azimuth();
+    rig.setMode('fly');
+    expect(rig.overview.isRotatingByInertia).toBe(false);
+    expect(rig.fly.isRotatingByInertia).toBe(false);
+    for (let i = 0; i < 300; i++) {
+      rig.update(1 / 60);
+      expect(camera.position.length()).toBeCloseTo(r0, 6); // 中心までの距離は保たれる
+    }
+    const turned = azimuth() - a0; // 総回転は rate × τ（角速度が stopSpeed を下回った時点で打ち切るので、その分だけ少ない）
+    expect(turned).toBeGreaterThanOrEqual(rate * TAU - 1e-9);
+    expect(turned).toBeLessThan(rate * TAU + 0.02 * TAU);
+    const settled = camera.position.clone();
+    for (let i = 0; i < 20; i++) rig.update(1 / 60);
+    expect(camera.position.distanceTo(settled)).toBe(0);
+    // 飛行の入力がすぐ使える
+    win.emit('keydown', { code: 'KeyW', target: null });
+    for (let i = 0; i < 10; i++) rig.update(0.05);
+    expect(camera.position.distanceTo(settled)).toBeGreaterThan(0.01);
+  });
+
+  it('飛行モードで残った周回の最中に W を押しても、移動は止まらない（残りが、飛行操作の速度を消さない）', () => {
+    const { camera, win, el, rig } = createRig();
+    rig.setView({ pos: [1.4, 0.4, 1.5], look: [0, 0, 0] });
+    rig.setMode('overview');
+    let t = 1000;
+    el.emit('pointerdown', { button: 0, pointerId: 1, clientX: 100, clientY: 100, timeStamp: t });
+    for (let i = 1; i <= 6; i++) {
+      t += 16;
+      el.emit('pointermove', { pointerId: 1, clientX: 100 + 8 * i, clientY: 100, timeStamp: t });
+    }
+    el.emit('pointerup', { pointerId: 1, timeStamp: t });
+    rig.setMode('fly');
+    win.emit('keydown', { code: 'KeyW', target: null });
+    const p0 = camera.position.clone();
+    for (let i = 0; i < 30; i++) rig.update(1 / 60);
+    expect(rig.fly.getResidualMotion().velocity.length()).toBeGreaterThan(0.2); // 速度が積み上がっている（毎フレーム捨てられない）
+    expect(camera.position.distanceTo(p0)).toBeGreaterThan(0.1);
+  });
+
+  it('ポインタを押すと、残った回転は止まる', () => {
+    const { camera, el, rig } = createRig();
+    rig.setView({ pos: [1.4, 0.4, 1.5], look: [0, 0, 0] });
+    rig.setMode('overview');
+    let t = 1000;
+    el.emit('pointerdown', { button: 0, pointerId: 1, clientX: 100, clientY: 100, timeStamp: t });
+    for (let i = 1; i <= 6; i++) {
+      t += 16;
+      el.emit('pointermove', { pointerId: 1, clientX: 100 + 8 * i, clientY: 100, timeStamp: t });
+    }
+    el.emit('pointerup', { pointerId: 1, timeStamp: t });
+    rig.setMode('fly');
+    rig.update(1 / 60);
+    el.emit('pointerdown', { button: 0, pointerId: 2, clientX: 5, clientY: 5, timeStamp: 3000 });
+    const at = camera.position.clone();
+    for (let i = 0; i < 30; i++) rig.update(1 / 60);
+    expect(camera.position.distanceTo(at)).toBeLessThan(1e-12);
+  });
+
+  it('ホームへの移動・視点の設定・flyTo は、残った動きを捨てる', () => {
+    for (const action of ['setView', 'goHome', 'flyTo'] as const) {
+      const { camera, win, rig } = createRig();
+      rig.setView({ pos: [0, 0, 5], look: [0, 0, 4] });
+      cruise(rig, win);
+      rig.setMode('overview');
+      if (action === 'setView') {
+        rig.setView({ pos: [0, 0, 1], look: [0, 0, 0] });
+        const at = camera.position.clone();
+        for (let i = 0; i < 30; i++) rig.update(1 / 60);
+        expect(camera.position.distanceTo(at)).toBe(0);
+      } else if (action === 'goHome') {
+        rig.goHome(HOME);
+        runFlight(rig, 1.2);
+        for (let i = 0; i < 30; i++) rig.update(1 / 60);
+        expect(camera.position.toArray()).toEqual(HOME.pos);
+      } else {
+        rig.flyTo(new Vector3(0, 0, -3), { durationMs: 500 });
+        expect(rig.getState().mode).toBe('fly');
+        expect(rig.getState().reorienting).toBe(false);
+      }
+    }
+  });
+
+  it('「動きを減らす」設定では、残った動きはすぐに捨てる', () => {
+    const { camera, win, rig } = createRig({ reducedMotion: true });
+    rig.setView({ pos: [0, 0, 5], look: [0, 0, 4] });
+    cruise(rig, win);
+    const at = camera.position.clone();
+    rig.setMode('overview');
+    for (let i = 0; i < 60; i++) rig.update(1 / 60);
+    expect(camera.position.distanceTo(at)).toBe(0);
+  });
+
+  it('ホームへ移動中の切り替えでは、残った動きを持ち越さない', () => {
+    const { camera, win, rig } = createRig();
+    rig.setView({ pos: [0, 0, 5], look: [0, 0, 4] });
+    cruise(rig, win);
+    rig.goHome(HOME);
+    rig.setMode('overview');
+    runFlight(rig, 1.2);
+    for (let i = 0; i < 30; i++) rig.update(1 / 60);
+    expect(camera.position.toArray()).toEqual(HOME.pos);
+  });
+});
+
+/** 中心 [0,0,0] を向く単位ベクトル。 */
+function unit0(camera: PerspectiveCamera): Vector3 {
+  return new Vector3(0, 0, 0).sub(camera.position).normalize();
+}

@@ -1,7 +1,7 @@
 import { Quaternion, Vector3 } from 'three';
 import type { PerspectiveCamera } from 'three';
 import { DEFAULT_WHEEL_GESTURE_LIMIT_NOTCHES, isDiscreteWheelDelta, WheelGestureLimiter } from '../controls/WheelGesture';
-import { eventTimeMs, RotationInertia } from '../controls/RotationInertia';
+import { eventTimeMs, OVERVIEW_INERTIA_TIME_CONSTANT, RotationInertia } from '../controls/RotationInertia';
 import type { RotationInertiaOptions } from '../controls/RotationInertia';
 
 /**
@@ -87,7 +87,7 @@ export interface OverviewControlsOptions {
   wheelFactor?: number;
   /**
    * ドラッグを離したあとの回転の慣性。`timeConstant` を 0 以下にすると無効。
-   * 省略すると、時定数 0.3 秒で、「動きを減らす」設定（`prefers-reduced-motion: reduce`）なら無効。
+   * 省略すると、時定数 0.45 秒で、「動きを減らす」設定（`prefers-reduced-motion: reduce`）なら無効。
    */
   rotationInertia?: RotationInertiaOptions;
 }
@@ -130,7 +130,7 @@ export class OverviewControls {
     this.wheelFactor = options.wheelFactor ?? 1.15;
     this.wheelGesture = new WheelGestureLimiter({ limitNotches: overviewGestureLimitNotches(this.wheelFactor) });
     this.win = domElement.ownerDocument?.defaultView ?? (typeof window !== 'undefined' ? window : null);
-    this.inertia = new RotationInertia(options.rotationInertia, this.win);
+    this.inertia = new RotationInertia({ defaultTimeConstant: OVERVIEW_INERTIA_TIME_CONSTANT, ...options.rotationInertia }, this.win);
     domElement.addEventListener('pointerdown', this.onPointerDown);
     domElement.addEventListener('pointermove', this.onPointerMove);
     domElement.addEventListener('pointerup', this.onPointerUp);
@@ -157,7 +157,7 @@ export class OverviewControls {
 
   /**
    * ドラッグを離したあとの回転の慣性の時定数（秒）。0 以下で無効。
-   * 代入しなければ既定の 0.3 秒（「動きを減らす」設定なら無効）。`null` を代入すると、その既定へ戻す。
+   * 代入しなければ既定の 0.45 秒（「動きを減らす」設定なら無効）。`null` を代入すると、その既定へ戻す。
    */
   get rotationTimeConstant(): number {
     return this.inertia.timeConstant;
@@ -170,6 +170,15 @@ export class OverviewControls {
   /** 回転の慣性で回っている最中なら true。 */
   get isRotatingByInertia(): boolean {
     return this.inertia.active;
+  }
+
+  /**
+   * 慣性で回っている角速度（ラジアン/秒）。ヨーは正で反時計回り、ピッチは正で視線が上を向く向き（`orbitPose` の符号）。
+   * モードの切り替えで無効にする前に読み、呼び出し側が減衰させ続けるために使う。回っていなければ 0。
+   */
+  getResidualRotation(): { yawRate: number; pitchRate: number } {
+    const active = this.inertia.active;
+    return { yawRate: active ? this.inertia.yawRate : 0, pitchRate: active ? this.inertia.pitchRate : 0 };
   }
 
   /**

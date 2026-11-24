@@ -268,7 +268,7 @@ describe('OverviewControls: 回転の慣性', () => {
     }
     expect(moved).toBeGreaterThan(30);
     expect(r.controls.isRotatingByInertia).toBe(false);
-    expect(Math.abs(r.wrap(r.azimuth() - a0))).toBeGreaterThan(0.5); // 総回転量は約 2.5 × 0.3 rad
+    expect(Math.abs(r.wrap(r.azimuth() - a0))).toBeGreaterThan(0.5); // 総回転量は約 2.5 × 0.45 rad
     expect(r.controls.update(1 / 60)).toBe(false);
   });
 
@@ -349,8 +349,8 @@ describe('OverviewControls: 回転の慣性', () => {
     const a0 = r.azimuth();
     for (let i = 0; i < 600; i++) r.controls.update(1 / 60);
     const turned = Math.abs(r.wrap(r.azimuth() - a0));
-    expect(turned).toBeLessThan(4 * 0.3 + 1e-6);
-    expect(turned).toBeGreaterThan(4 * 0.3 * 0.95);
+    expect(turned).toBeLessThan(4 * 0.45 + 1e-6);
+    expect(turned).toBeGreaterThan(4 * 0.45 * 0.95);
   });
 
   it('仰角は慣性の間も ±89° に収まり、端で回り続けない', () => {
@@ -411,8 +411,13 @@ describe('OverviewControls: 回転の慣性', () => {
     expect(r.controls.isRotatingByInertia).toBe(true);
   });
 
-  it('時定数 0 で無効（オプションでも代入でも）。既定は 0.3 秒', () => {
-    expect(createInertiaRig().controls.rotationTimeConstant).toBe(0.3);
+  it('時定数 0 で無効（オプションでも代入でも）。既定は 0.45 秒で、null で既定へ戻る', () => {
+    expect(createInertiaRig().controls.rotationTimeConstant).toBe(0.45);
+    const c = createInertiaRig();
+    c.controls.rotationTimeConstant = 0.9;
+    expect(c.controls.rotationTimeConstant).toBe(0.9);
+    c.controls.rotationTimeConstant = null;
+    expect(c.controls.rotationTimeConstant).toBe(0.45);
     const a = createInertiaRig({ rotationInertia: { timeConstant: 0 } });
     a.drag(16);
     a.up();
@@ -422,6 +427,19 @@ describe('OverviewControls: 回転の慣性', () => {
     b.drag(16);
     b.up();
     expect(b.controls.isRotatingByInertia).toBe(false);
+  });
+
+  it('getResidualRotation: 慣性で回っている間の角速度（右へ払うと、ヨーは負）。止まれば 0', () => {
+    const r = createInertiaRig();
+    expect(r.controls.getResidualRotation()).toEqual({ yawRate: 0, pitchRate: 0 });
+    r.drag(8);
+    r.up();
+    expect(r.controls.isRotatingByInertia).toBe(true);
+    const rot = r.controls.getResidualRotation();
+    expect(rot.yawRate).toBeLessThan(-0.5);
+    expect(rot.pitchRate).toBeCloseTo(0, 9);
+    r.controls.stopRotationInertia();
+    expect(r.controls.getResidualRotation()).toEqual({ yawRate: 0, pitchRate: 0 });
   });
 
   it('「動きを減らす」設定のときは、既定で慣性が無効', () => {

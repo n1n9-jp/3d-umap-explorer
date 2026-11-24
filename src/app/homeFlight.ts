@@ -19,7 +19,7 @@ export function smootherstep(t: number): number {
 }
 
 /** 角度差を (-π, π] に畳む。 */
-function wrapAngle(a: number): number {
+export function wrapAngle(a: number): number {
   const twoPi = Math.PI * 2;
   let r = ((a % twoPi) + twoPi) % twoPi;
   if (r > Math.PI) r -= twoPi;
