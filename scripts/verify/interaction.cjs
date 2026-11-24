@@ -36,7 +36,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require('playwright');
 const {
-  loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, len, sendPointer, pointerGesture, flickPoints, readInfoRect, readUiRects, inRects, waitReorient, waitCameraIdle, sampleUntil, flightEase, expectedFlightDuration,
+  loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, len, sendPointer, pointerGesture, flickPoints, readInfoRect, readUiRects, inRects, waitReorient, waitCameraIdle, flightEase, expectedFlightDuration,
 } = require('./lib.cjs');
 
 const root = path.resolve(__dirname, '../..');
@@ -924,26 +924,40 @@ async function testFastGlideFlyTo(page, ds) {
   await setView(page, startPos, P.p);
   await waitStill(page);
   await page.mouse.move(cx, cy);
-  // 速度の自動調整で係数が上限近くまで上がり、P に近づいて下がり始めた瞬間に離す（速いまま、前方の近い点へ飛ぶ）
-  let peakScale = 0;
+  // 速度の自動調整で係数が上限近くまで上がり、P に近づいて下がり始めた瞬間に離す（速いまま、前方の近い点へ飛ぶ）。
+  // 標本の往復の間にも描画は進むので、離す判定はページの中で毎フレーム行い、その場で W の keyup を送る
+  await page.evaluate((target) => {
+    window.__release = null;
+    let peak = 0;
+    const tick = () => {
+      const s = window.__explorer.getState();
+      peak = Math.max(peak, s.speedScale);
+      const d = Math.hypot(s.position[0] - target[0], s.position[1] - target[1], s.position[2] - target[2]);
+      if ((peak >= 3 && s.speedScale < peak * 0.97) || d <= 0.6) {
+        window.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyW', key: 'w', bubbles: true }));
+        window.__release = { ...s, peak, d };
+        return;
+      }
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }, P.p);
   await page.keyboard.down('KeyW');
-  const run = await sampleUntil(page, (s) => {
-    peakScale = Math.max(peakScale, s.speedScale);
-    return (peakScale >= 3 && s.speedScale < peakScale * 0.97) || len(sub(s.position, P.p)) <= 0.6;
-  }, 8);
+  let released = true;
+  try { await page.waitForFunction(() => window.__release !== null, null, { timeout: 120000 }); } catch { released = false; }
   await startFrameLog(page);
-  await page.keyboard.up('KeyW');
   await page.mouse.dblclick(cx, cy); // 前方の P（画面の中央）
   let started = null;
   for (let k = 0; k < 20 && !started; k++) { await frames(page, 1); const s = await state(page); if (s.flight) started = s; }
+  await page.keyboard.up('KeyW'); // ページの中で離したので、Playwright の押下の状態をそろえる
   await waitCameraIdle(page);
   await frames(page, 1);
   const log = await stopFrameLog(page);
   const end = await state(page);
-  const pressed = run[run.length - 1];
+  const pressed = released ? await page.evaluate(() => window.__release) : null;
   const target = (await ix(page)).selected;
-  check('（前提）何もない場所で W を押し続け、速度の自動調整で速くなってから離した', !run.timedOut && pressed.speedScale >= 2.5,
-    `係数 ${pressed.speedScale.toFixed(2)}（最大 ${peakScale.toFixed(2)}）、実速度 ${pressed.effectiveSpeed.toFixed(3)}、P までの距離 ${len(sub(pressed.position, P.p)).toFixed(3)}`);
+  check('（前提）何もない場所で W を押し続け、速度の自動調整で速くなってから離した', !!pressed && pressed.speedScale >= 2.5,
+    pressed ? `係数 ${pressed.speedScale.toFixed(2)}（最大 ${pressed.peak.toFixed(2)}）、実速度 ${pressed.effectiveSpeed.toFixed(3)}、P までの距離 ${pressed.d.toFixed(3)}` : '離す条件に達しない');
   if (!started || target === null) { check('前方の点へ飛ぶ移動が始まる', false, `flight ${JSON.stringify(started && started.flight)}、選択 ${target}`); return; }
   const Q = [ds.positions[3 * target], ds.positions[3 * target + 1], ds.positions[3 * target + 2]];
   const stop = (await page.evaluate((i) => window.__explorer.interaction.stopDistance(i), target)).distance;
