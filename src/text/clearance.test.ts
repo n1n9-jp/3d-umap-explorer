@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
-import { DOT_CLEARANCE_MARGIN_PX, DOT_CLEARANCE_SCALE, pointsNearRects } from './clearance';
+import { DOT_CLEARANCE_MARGIN_PX, DOT_CLEARANCE_SCALE, pointsNearRects, pointsNearRectsIndexed } from './clearance';
+import { SpatialIndex } from '../spatial/SpatialIndex';
 import { DOTS_ONLY_MAX_RADIUS_PX } from '../render/pointCloud';
 import { DEFAULT_TEXT_SIZE } from './selection';
 
@@ -48,5 +49,85 @@ describe('pointsNearRects（単語の矩形の近くの丸い点）', () => {
   });
   it('小さくした丸い点の直径の上限は、文字の高さの下限の半分より小さい', () => {
     expect(2 * DOTS_ONLY_MAX_RADIUS_PX * DOT_CLEARANCE_SCALE).toBeLessThan(DEFAULT_TEXT_SIZE.minPx / 2);
+  });
+});
+
+/** 決まった乱数（テストを再現できるように）。 */
+function rng(seed: number) {
+  let s = seed >>> 0;
+  return () => { s = (Math.imul(s, 1664525) + 1013904223) >>> 0; return s / 4294967296; };
+}
+
+describe('pointsNearRectsIndexed（空間索引で絞った結果が、全点を調べた結果と一致する）', () => {
+  const rand = rng(12345);
+  const N = 6000;
+  const pos = new Float32Array(3 * N);
+  // 球の中に一様ではなく、塊をいくつか作る
+  for (let i = 0; i < N; i++) {
+    const c = i % 5;
+    for (let k = 0; k < 3; k++) pos[3 * i + k] = (c - 2) * 0.35 * (k === 0 ? 1 : 0.3) + (rand() - 0.5) * (0.2 + 0.1 * c);
+  }
+  const index = new SpatialIndex(pos);
+
+  const viewFor = (camPos: [number, number, number], target: [number, number, number], fov = 60, w = 1000, h = 800, near = 0.0005, far = 12) => {
+    const camera = new THREE.PerspectiveCamera(fov, w / h, near, far);
+    camera.position.set(...camPos);
+    camera.lookAt(new THREE.Vector3(...target));
+    camera.updateMatrixWorld();
+    return { view: camera.matrixWorldInverse.elements, projection: camera.projectionMatrix.elements, width: w, height: h };
+  };
+  const randomRects = (n: number, w: number, h: number) =>
+    Array.from({ length: n }, () => ({ x: rand() * w, y: rand() * h, width: 20 + rand() * 100, height: 8 + rand() * 20 }));
+
+  it('いろいろな視点・矩形で、全点を調べた結果と一致する（カメラの後ろ・点群の内部・外を含む）', () => {
+    const cams: { cam: [number, number, number]; look: [number, number, number] }[] = [
+      { cam: [0, 0, 2], look: [0, 0, 0] }, // 外から全体を
+      { cam: [0.1, 0.02, 0.05], look: [0.5, 0, 0] }, // 内部
+      { cam: [0.1, 0.02, 0.05], look: [-0.5, 0.1, 0.1] }, // 内部で、向きを変える
+      { cam: [-0.3, 0.1, 0], look: [0.6, -0.1, 0.2] },
+      { cam: [0, 0, 2], look: [0, 0, 5] }, // 点群に背を向ける
+    ];
+    let nonEmpty = 0;
+    for (const { cam, look } of cams) {
+      const v = viewFor(cam, look);
+      for (const count of [1, 3, 40, 200]) {
+        const rects = randomRects(count, v.width, v.height);
+        const exclude = new Set<number>([0, 7, 100, 4000]);
+        const all = pointsNearRects(null, pos, v, rects, DOT_CLEARANCE_MARGIN_PX, exclude);
+        const got = pointsNearRectsIndexed(index, v, rects, DOT_CLEARANCE_MARGIN_PX, exclude);
+        expect([...got].sort((a, b) => a - b)).toEqual([...all].sort((a, b) => a - b));
+        if (all.size > 0) nonEmpty++;
+      }
+    }
+    expect(nonEmpty).toBeGreaterThan(8);
+  });
+  it('矩形が画面の端や外にあっても、全点の場合と一致する', () => {
+    const v = viewFor([0.1, 0, 0.05], [0.5, 0.02, 0]);
+    const rects = [
+      { x: 0, y: 0, width: 40, height: 20 },
+      { x: v.width, y: v.height, width: 60, height: 20 },
+      { x: -50, y: 400, width: 30, height: 10 },
+      { x: 500, y: 400, width: 0.5, height: 0.5 },
+    ];
+    const all = pointsNearRects(null, pos, v, rects, DOT_CLEARANCE_MARGIN_PX, new Set());
+    const got = pointsNearRectsIndexed(index, v, rects, DOT_CLEARANCE_MARGIN_PX, new Set());
+    expect([...got].sort((a, b) => a - b)).toEqual([...all].sort((a, b) => a - b));
+  });
+  it('矩形がなければ空', () => {
+    expect(pointsNearRectsIndexed(index, viewFor([0, 0, 2], [0, 0, 0]), [], DOT_CLEARANCE_MARGIN_PX, new Set()).size).toBe(0);
+  });
+  it('点が少ない（葉 1 つ）でも一致する', () => {
+    const small = new Float32Array([0, 0, -1, 0.01, 0, -1, 0, 0.01, -1]);
+    const v = viewFor([0, 0, 0], [0, 0, -1]);
+    const rects = [{ x: 500, y: 400, width: 30, height: 10 }];
+    const got = pointsNearRectsIndexed(new SpatialIndex(small), v, rects, DOT_CLEARANCE_MARGIN_PX, new Set());
+    expect([...got].sort()).toEqual([...pointsNearRects(null, small, v, rects, DOT_CLEARANCE_MARGIN_PX, new Set())].sort());
+  });
+  it('矩形が小さければ、木の巡回で調べる点の数は全点よりずっと少ない', () => {
+    const v = viewFor([0, 0, 2], [0, 0, 0]);
+    let visited = 0;
+    const counting = { forEachInBoxes: (may: Parameters<SpatialIndex['forEachInBoxes']>[0], visit: Parameters<SpatialIndex['forEachInBoxes']>[1]) => index.forEachInBoxes(may, (...a) => { visited++; visit(...a); }) };
+    pointsNearRectsIndexed(counting, v, [{ x: 500, y: 400, width: 30, height: 10 }], DOT_CLEARANCE_MARGIN_PX, new Set());
+    expect(visited).toBeLessThan(N / 4);
   });
 });

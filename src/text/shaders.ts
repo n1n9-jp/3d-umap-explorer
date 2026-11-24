@@ -17,6 +17,9 @@ import { GLSL_FRAGMENT_COMMON, GLSL_VERTEX_COMMON, PALETTE_SIZE } from '../rende
 export const wordVertexShader = /* glsl */ `
 precision highp float;
 
+const float DEPTH_EPSILON = 1e-6;     // これ以下の奥行き（カメラの後ろ・真横）の単語は描かない
+const float NATURAL_EPSILON = 1e-6;   // 自然な文字の高さ（CSS ピクセル）の下限。累乗の底を正にする
+
 in vec3 iPoint;    // 点の位置
 in vec4 iQuad;     // 文字の四角形（基準点から左下の角までのずれと大きさ。em）
 in vec4 iUv;       // アトラス上の位置 (u0, v0, u1, v1)。v0 が上端
@@ -45,14 +48,18 @@ void main() {
   vec4 mv = modelViewMatrix * vec4(iPoint, 1.0);
   float dist = length(mv.xyz);
   float fade = nearFadeAt(dist) * iStyle.y;
-  if (fade <= 0.0 || mv.z >= 0.0) {
+  // 選んだあとにカメラの後ろ（または真横）へ回った単語は、頂点をクリップ空間の外へ出して描かない（点群のシェーダと同じ）。
+  // 以降の累乗（pow）の底は、奥行きが正のときだけ計算する（底が 0 以下の pow は GLSL では結果が未定義）
+  float depth = -mv.z;
+  if (fade <= 0.0 || !(depth > DEPTH_EPSILON)) {
     gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
     return;
   }
   float em = uTextScale * uPointSize;
   // 自然な大きさ（CSS ピクセル）から画面に描く大きさを決め、その比で 1 em のワールドの大きさを変える。
-  // pxPerUnitAt はピッキングの小領域でも全画面と同じ値になる（src/picking/GpuPicker.ts）
-  float natural = em * pxPerUnitAt(-mv.z) / uPixelRatio;
+  // pxPerUnitAt はピッキングの小領域でも全画面と同じ値になる（src/picking/GpuPicker.ts）。
+  // 底が正になるよう、自然な大きさには下限を置く（点の大きさ 0 や、極端に遠い単語でも、累乗と割り算が NaN にならない）
+  float natural = max(em * pxPerUnitAt(depth) / uPixelRatio, NATURAL_EPSILON);
   float shown = clamp(uTextSize.x * pow(natural / uTextSize.x, uTextSize.y), uTextSize.z, uTextSize.w);
   em *= shown / natural;
   vec2 corner = position.xy + 0.5;   // 0..1（PlaneGeometry の -0.5..0.5）

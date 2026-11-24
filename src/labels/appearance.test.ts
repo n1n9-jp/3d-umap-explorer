@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { appearanceParamsForBounds, INSIDE_OPACITY, INSIDE_SCALE, insideAppearance, labelAppearance } from './appearance';
+import { appearanceParamsForBounds, blendInsideAppearance, INSIDE_OPACITY, INSIDE_SCALE, insideAppearance, insideBlend, labelAppearance } from './appearance';
 
 const P = { near: 1, far: 3 };
 
@@ -53,5 +53,27 @@ describe('insideAppearance（内部にいるときのほかのクラスタの目
     expect(ia.scale).toBeLessThan(a.scale);
     expect(ia.opacity).toBeLessThan(a.opacity);
     expect(ia.scale).toBeGreaterThan(ib.scale);
+  });
+});
+
+describe('内部の見せ方の度合い', () => {
+  it('入る距離以下で 1、出る距離以上で 0、間は線形（単調に減る）', () => {
+    expect(insideBlend(0.2, 0.95, 1.05)).toBe(1);
+    expect(insideBlend(0.95, 0.95, 1.05)).toBe(1);
+    expect(insideBlend(1.0, 0.95, 1.05)).toBeCloseTo(0.5, 12);
+    expect(insideBlend(1.05, 0.95, 1.05)).toBe(0);
+    expect(insideBlend(3, 0.95, 1.05)).toBe(0);
+    expect(insideBlend(Infinity, 0.95, 1.05)).toBe(0);
+    let prev = 1;
+    for (let r = 0.9; r <= 1.1; r += 0.005) { const b = insideBlend(r, 0.95, 1.05); expect(b).toBeLessThanOrEqual(prev + 1e-12); prev = b; }
+  });
+  it('度合い 0 で外の見せ方、1 で内部の見せ方に一致する。間は連続', () => {
+    const a = labelAppearance(2, P);
+    expect(blendInsideAppearance(a, 0)).toEqual(a);
+    expect(blendInsideAppearance(a, 1)).toEqual(insideAppearance(a));
+    const half = blendInsideAppearance(a, 0.5);
+    expect(half.scale).toBeCloseTo(a.scale * (1 - 0.5 * (1 - INSIDE_SCALE)), 12);
+    expect(half.opacity).toBeCloseTo(a.opacity * (1 - 0.5 * (1 - INSIDE_OPACITY)), 12);
+    expect(blendInsideAppearance(a, 5)).toEqual(insideAppearance(a));
   });
 });

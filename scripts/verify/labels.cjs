@@ -20,6 +20,11 @@
  *     Ctrl＋ホイールはページのズームにならない（既定の動作を止める）。目印の上から始めたドラッグで視点が回り、
  *     目印のクリックとしては扱われない（回る量は目印のない場所のドラッグと同じ）。そのあとの動かさないクリックでは飛ぶ
  *   - カメラを小さく往復させても、重なり・画面の端の境目で目印の表示と非表示が切り替わり続けない
+ *   - クラスタの球の表面の付近で、カメラの位置を小さく往復させても（内から・外から）、向きを小さく往復させても、
+ *     目印の表示・非表示と現在地の表示（「現在地」と「最寄り」）が切り替わり続けない（入る距離と出る距離に幅がある）。
+ *     球が重なる場所で、現在地のクラスタが入れ替わり続けない
+ *   - 境界をゆっくり内から外へ、外から内へまたぐとき、1 フレームで現れる・消える目印の数が上限（MAX_LABEL_CHANGE_PER_FRAME）以下。
+ *     内部と外が同じ規則で目印の数を決めるので、境界で目印が一度に多数現れたり消えたりしない
  *   - 画面の端では、目印の矩形が画面に収まるものだけが出る（中心が画面内でも、矩形がはみ出すものは出ない）
  *   - キーボードでフォーカスした目印が出なくなるときは、フォーカスが次に出ている目印へ移る（body へ落ちない）。
  *     フォーカス中の目印は、ほかの目印との重なりでは隠れない
@@ -46,6 +51,8 @@ const port = Number(opt('port', '4330'));
 const dataPath = 'data/mnist/';
 const FOV = 60; // src/main.ts の PerspectiveCamera の縦の視野角
 const LABEL_PX_TOLERANCE = 1.0; // 投影位置の許容誤差（CSS ピクセル）
+/** 境界をゆっくりまたぐとき、1 フレームで現れる・消える目印の数の上限（src/labels/ClusterLabels.ts の内部と外で同じ上限の規則。自身の目印 1 個 + 数の上限の切り替わり） */
+const MAX_LABEL_CHANGE_PER_FRAME = 3;
 const only = opt('only', null);
 const wanted = (name) => !only || only.split(',').includes(name);
 
@@ -691,6 +698,100 @@ async function testStability(page) {
   check('重なりまたは画面の端の境目が、少なくとも 1 つ見つかった', foundAny >= 1, `${foundAny} 個`);
 }
 
+/** 現在地と目印の表示を 1 つの文字列にする（変わったら、表示のどこかが切り替わっている） */
+const stateKey = (st) => `${st.location.kind}:${st.location.clusterId}|${st.labels.map((l) => (l.visible ? '1' : '0')).join('')}`;
+
+/** 2 つの表示の違い（現れた・消えた目印の数の合計） */
+const labelDiff = (a, b) => a.labels.reduce((n, l, i) => n + (l.visible !== b.labels[i].visible ? 1 : 0), 0);
+
+async function testBoundary(page, clusters) {
+  console.log('\n[クラスタの境界での安定と、またぐときの目印の数の変化]');
+  const stats = [];
+  for (const id of [2, 4, 7]) {
+    const c = clusters[id];
+    const u = norm(c.center);
+    const at = (r) => add(c.center, mul(u, c.radius * r)); // 球の表面の付近（r は中心からの距離 ÷ radius）。外側（点群の外）へ向かう向き
+    const look = c.center;
+    const tag = `クラスタ ${id}（${c.name}）`;
+
+    // 外から近づいて、帯（0.95〜1.05）の中で、位置を小さく往復させる（半径の 0.99 倍と 1.03 倍の間）
+    await viewAt(page, { pos: at(1.6), look });
+    for (let r = 1.6; r >= 1.03; r -= 0.03) await viewAt(page, { pos: at(r), look });
+    const keysOut = [];
+    for (let k = 0; k < 20; k++) keysOut.push(stateKey(await viewAt(page, { pos: at(k % 2 === 0 ? 0.99 : 1.03), look })));
+    check(`${tag}: 外から近づいて、半径の 0.99 倍と 1.03 倍の間を往復しても、現在地・目印の表示が切り替わり続けない（外のまま）`,
+      new Set(keysOut).size === 1 && keysOut[0].startsWith('nearest:'), `${new Set(keysOut).size} 通り（${keysOut[0].split('|')[0]}）`);
+
+    // 内から離れて、同じ帯の中で往復させる（内のまま）
+    await viewAt(page, { pos: at(0.4), look });
+    for (let r = 0.4; r <= 1.0; r += 0.03) await viewAt(page, { pos: at(r), look });
+    const keysIn = [];
+    for (let k = 0; k < 20; k++) keysIn.push(stateKey(await viewAt(page, { pos: at(k % 2 === 0 ? 0.97 : 1.03), look })));
+    check(`${tag}: 内から出ようとして、半径の 0.97 倍と 1.03 倍の間を往復しても、現在地・目印の表示が切り替わり続けない（内のまま）`,
+      new Set(keysIn).size === 1 && keysIn[0].startsWith(`inside:${id}`), `${new Set(keysIn).size} 通り（${keysIn[0].split('|')[0]}）`);
+
+    // 向きの小さな往復（表面の上で、視線を ±0.2 度ずつ左右へ）。位置は帯の中
+    const pos = at(1.0);
+    const dir0 = norm(sub(look, pos));
+    const yaw = (d, a) => [d[0] * Math.cos(a) - d[2] * Math.sin(a), d[1], d[0] * Math.sin(a) + d[2] * Math.cos(a)];
+    await viewAt(page, { pos, look });
+    const keysTurn = [];
+    for (let k = 0; k < 20; k++) {
+      const d = yaw(dir0, (k % 2 === 0 ? 1 : -1) * 0.2 * Math.PI / 180);
+      keysTurn.push(stateKey(await viewAt(page, { pos, look: add(pos, mul(d, 0.5)) })));
+    }
+    check(`${tag}: 表面の上で視線を ±0.2 度ずつ往復させても、現在地・目印の表示が切り替わり続けない`, new Set(keysTurn).size === 1, `${new Set(keysTurn).size} 通り`);
+
+    // 境界をゆっくりまたぐ: 内から外へ、外から内へ。1 フレームで現れる・消える目印の数を数える
+    const crossing = async (from, to, steps) => {
+      let prev = await viewAt(page, { pos: at(from), look });
+      let maxChange = 0, kindChanges = 0;
+      for (let k = 1; k <= steps; k++) {
+        const r = from + ((to - from) * k) / steps;
+        const st = await viewAt(page, { pos: at(r), look });
+        maxChange = Math.max(maxChange, labelDiff(prev, st));
+        if (st.location.kind !== prev.location.kind) kindChanges++;
+        prev = st;
+      }
+      return { maxChange, kindChanges };
+    };
+    const outward = await crossing(0.3, 1.8, 100);
+    await viewAt(page, { pos: at(1.8), look });
+    const inward = await crossing(1.8, 0.3, 100);
+    stats.push({ id, outward, inward });
+    check(`${tag}: 内から外へゆっくりまたぐとき、1 フレームで現れる・消える目印は ${MAX_LABEL_CHANGE_PER_FRAME} 個以下で、内外の切り替えは 1 回`,
+      outward.maxChange <= MAX_LABEL_CHANGE_PER_FRAME && outward.kindChanges === 1, `最大 ${outward.maxChange} 個/フレーム、内外の切り替え ${outward.kindChanges} 回`);
+    check(`${tag}: 外から内へゆっくりまたぐとき、1 フレームで現れる・消える目印は ${MAX_LABEL_CHANGE_PER_FRAME} 個以下で、内外の切り替えは 1 回`,
+      inward.maxChange <= MAX_LABEL_CHANGE_PER_FRAME && inward.kindChanges === 1, `最大 ${inward.maxChange} 個/フレーム、内外の切り替え ${inward.kindChanges} 回`);
+  }
+
+  // 球が重なる場所: 2 つのクラスタの（距離 ÷ 半径）が等しい位置の付近で往復させても、現在地のクラスタが入れ替わり続けない
+  let tested = 0;
+  for (let i = 0; i < clusters.length && tested < 2; i++) {
+    for (let j = i + 1; j < clusters.length && tested < 2; j++) {
+      const a = clusters[i], b = clusters[j];
+      const D = len(sub(b.center, a.center));
+      const t = (a.radius * D) / (a.radius + b.radius); // a の中心からの距離（両方の ratio が等しくなる位置）
+      if (!(D < a.radius + b.radius) || t / a.radius > 0.85) continue;
+      const dir = norm(sub(b.center, a.center));
+      const amp = 0.02 * Math.min(a.radius, b.radius);
+      const pos = (off) => add(a.center, mul(dir, t + off));
+      const lookAt = add(a.center, mul(dir, t));
+      await viewAt(page, { pos: pos(-0.1 * a.radius), look: lookAt });
+      const ids = [];
+      for (let k = 0; k < 20; k++) {
+        const st = await viewAt(page, { pos: pos(k % 2 === 0 ? amp : -amp), look: lookAt });
+        ids.push(st.location.kind === 'inside' ? st.location.clusterId : -1);
+      }
+      check(`重なり合うクラスタ ${i} と ${j} の境目（距離 ÷ 半径が等しい位置）で、往復しても、現在地のクラスタが入れ替わり続けない`,
+        new Set(ids).size === 1 && ids[0] >= 0, `現在地 ${[...new Set(ids)].join(',')}`);
+      tested++;
+    }
+  }
+  check('球が重なる 2 つのクラスタの組が見つかった', tested >= 1, `${tested} 組`);
+  console.log(`  参考: ${stats.map((s) => `クラスタ ${s.id} 内→外 最大 ${s.outward.maxChange}/フレーム、外→内 最大 ${s.inward.maxChange}/フレーム`).join(' / ')}`);
+}
+
 async function testEdges(page, clusters, size) {
   console.log('\n[画面の端]');
   const home = await overviewView(page);
@@ -934,6 +1035,7 @@ async function main() {
     if (wanted('click')) await testClickToFly(page, ds, clusters, coarse, size);
     if (wanted('pointer')) await testPointerOnLabel(page, clusters);
     if (wanted('stability')) await testStability(page);
+    if (wanted('boundary')) await testBoundary(page, clusters);
     if (wanted('edges')) await testEdges(page, clusters, size);
     if (wanted('focus')) await testFocus(page, clusters);
     if (wanted('location')) await testLocationDom(page);

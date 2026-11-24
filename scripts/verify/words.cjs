@@ -23,6 +23,10 @@
  *     UI の要素（HUD・選択欄・現在地・情報パネル・ミニマップ・UMAP のパネル）の矩形とも重ならない。UMAP のパネルを開いても同じ
  *   - クラスタの内部では、ほかのクラスタの目印が小さく薄くなり、単語と重なる目印は隠れる（理由 words）
  *   - クラスタに属さない点の単語の文字は、点の灰色より明るい色（NOISE_TEXT_COLOR）で描く
+ *   - カメラを単語の群れへ向けたあと真後ろを向かせても（選んだあとにカメラの後ろへ回った単語）、コンソールにエラーも警告も出ず、
+ *     画面に異常な図形（背景でも点でも文字でもない大きな領域）が出ない。単語の群れの中を通り抜けても同じ
+ *   - カメラを速く回している間も、表示中の単語のいまの矩形（`currentRects`。描かれている文字の位置）が、表示中の目印の矩形と重ならない。
+ *     選び直しの間隔が短くなり（motion.ts）、障害物との間隔に余裕が加わることを確かめる
  *   - コンソールエラーがない
  * スクリーンショット（クラスタの縁・内部・内部の密な場所・点を選択した状態）を --out に保存する。失敗があれば終了コード 1 で終わる。
  */
@@ -70,10 +74,14 @@ const VIEWS = Object.fromEntries(libViews.map((v) => [v.name.replace(/^\d-/, '')
 // ---------- ページの操作 ----------
 
 const consoleErrors = [];
+const consoleWarnings = [];
 
 async function openPage(browser, base, query, dpr = 1) {
   const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: dpr });
-  page.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(`[error] ${m.text()} ${m.location()?.url ?? ''}`); });
+  page.on('console', (m) => {
+    if (m.type() === 'error') consoleErrors.push(`[error] ${m.text()} ${m.location()?.url ?? ''}`);
+    else if (m.type() === 'warning') consoleWarnings.push(`[warning] ${m.text()}`);
+  });
   page.on('pageerror', (e) => consoleErrors.push(`[pageerror] ${e.message}`));
   page.on('requestfailed', (r) => consoleErrors.push(`[requestfailed] ${r.url()}`));
   await page.goto(`${base}?${query}`);
@@ -590,6 +598,109 @@ async function testDpr(browser, base, page1) {
   }
 }
 
+// ---------- 選んだあとにカメラの後ろへ回った単語 ----------
+
+/** 2 つの PNG の、違う画素の割合（チャンネルの差が threshold を超える画素）と、違う画素の外接矩形の面積の割合。 */
+async function imageDiff(util, a, b, threshold = 24) {
+  return util.evaluate(async ({ a, b, threshold }) => {
+    const load = async (s) => { const img = new Image(); img.src = `data:image/png;base64,${s}`; await img.decode(); return img; };
+    const [ia, ib] = await Promise.all([load(a), load(b)]);
+    const read = (img) => { const c = new OffscreenCanvas(img.width, img.height); const g = c.getContext('2d'); g.drawImage(img, 0, 0); return g.getImageData(0, 0, img.width, img.height).data; };
+    const da = read(ia), db = read(ib);
+    let n = 0; const box = [Infinity, Infinity, -Infinity, -Infinity];
+    for (let y = 0; y < ia.height; y++) for (let x = 0; x < ia.width; x++) {
+      const o = 4 * (y * ia.width + x);
+      if (Math.max(Math.abs(da[o] - db[o]), Math.abs(da[o + 1] - db[o + 1]), Math.abs(da[o + 2] - db[o + 2])) > threshold) {
+        n++; box[0] = Math.min(box[0], x); box[1] = Math.min(box[1], y); box[2] = Math.max(box[2], x); box[3] = Math.max(box[3], y);
+      }
+    }
+    const total = ia.width * ia.height;
+    return { fraction: n / total, boxFraction: n ? ((box[2] - box[0] + 1) * (box[3] - box[1] + 1)) / total : 0, n };
+  }, { a: a.toString('base64'), b: b.toString('base64'), threshold });
+}
+
+async function testBehindCamera(browser, page) {
+  console.log('\n[選んだあとにカメラの後ろへ回った単語]');
+  const util = await browser.newPage();
+  const v = VIEWS.inside;
+  const dir = norm(sub(v.look, v.pos));
+  const run = async (name, makeView) => {
+    await setView(page, v);
+    const s0 = await waitWords(page);
+    const warn0 = consoleWarnings.length, err0 = consoleErrors.length;
+    await setView(page, makeView(dir));
+    // 向きを変えた直後のフレームを撮る。選んだ単語はカメラの後ろへ回り、消えるまでの数フレームは、まだインスタンスとして描かれる
+    const shots = [];
+    let stale = 0;
+    for (let k = 0; k < 4; k++) {
+      await frames(page, 1);
+      const w = await words(page);
+      if (w.drawnGlyphs > 0) stale++;
+      shots.push(await page.screenshot());
+    }
+    await waitWords(page);
+    const settled = await page.screenshot();
+    const diffs = [];
+    for (const shot of shots) diffs.push(await imageDiff(util, shot, settled));
+    const worst = diffs.reduce((m, d) => (d.fraction > m.fraction ? d : m), diffs[0]);
+    check(`${name}: 前提: 向きを変える前に単語が表示されていて、向きを変えたあとも、描画データが残るフレームがある`, s0.shown.length > 20 && stale >= 1, `表示 ${s0.shown.length} 語、描画データが残ったフレーム ${stale}/4`);
+    check(`${name}: コンソールにエラーも警告も出ない`, consoleWarnings.length === warn0 && consoleErrors.length === err0,
+      `警告 ${consoleWarnings.length - warn0} 件、エラー ${consoleErrors.length - err0} 件${consoleWarnings.length > warn0 ? `（${consoleWarnings.slice(warn0).join(' / ').slice(0, 300)}）` : ''}`);
+    check(`${name}: 直後の 4 フレームの画面が、落ち着いたあとの画面と同じ（違う画素 1% 未満・外接矩形も 5% 未満。異常な大きな図形がない）`,
+      worst.fraction < 0.01 && worst.boxFraction < 0.05, `違う画素 最大 ${(100 * worst.fraction).toFixed(3)}%、外接矩形 ${(100 * worst.boxFraction).toFixed(2)}%`);
+    return worst;
+  };
+  await run('真後ろを向く', (d) => ({ pos: v.pos, look: add(v.pos, mul(d, -0.5)) }));
+  await run('単語の群れの中を通り抜ける（カメラが単語を追い越す）', (d) => ({ pos: add(v.pos, mul(d, 0.15)), look: add(v.pos, mul(d, 0.65)) }));
+  await run('真上を向く', () => ({ pos: v.pos, look: add(v.pos, [0, 0.5, 0]) }));
+  await util.close();
+  await setView(page, v);
+  await waitWords(page);
+}
+
+// ---------- カメラが速く動く間 ----------
+
+async function testFastRotation(page) {
+  console.log('\n[カメラを速く回している間の、単語と目印の重なり・選び直しの間隔]');
+  const v = VIEWS.inside;
+  await setView(page, v);
+  await waitWords(page);
+  const pos = v.pos;
+  let d = norm(sub(v.look, v.pos));
+  const turn = (a) => { d = [d[0] * Math.cos(a) - d[2] * Math.sin(a), d[1], d[0] * Math.sin(a) + d[2] * Math.cos(a)]; };
+  const frameStats = [];
+  let before = (await words(page)).select.count;
+  for (let k = 0; k < 14; k++) {
+    turn(0.08); // 1 フレームで約 4.6 度（毎秒 90 度を超える速さ）
+    await setView(page, { pos, look: add(pos, mul(d, 0.5)) });
+    await frames(page, 1);
+    const r = await page.evaluate(() => {
+      const ex = window.__explorer;
+      const ws = ex.words.getState();
+      const ls = ex.labels.getState();
+      const chips = [...document.querySelectorAll('.cluster-label')].filter((e) => getComputedStyle(e).visibility !== 'hidden').map((e) => e.getBoundingClientRect());
+      let hits = 0;
+      for (const w of ws.currentRects) {
+        const x0 = w.x - w.width / 2, x1 = w.x + w.width / 2, y0 = w.y - w.height / 2, y1 = w.y + w.height / 2;
+        for (const c of chips) if (x0 < c.right && c.left < x1 && y0 < c.bottom && c.top < y1) hits++;
+      }
+      return { shown: ws.shown.length, current: ws.currentRects.length, hits, inside: ls.location.kind === 'inside', motion: ws.motion, count: ws.select.count };
+    });
+    frameStats.push(r);
+  }
+  const reselects = frameStats[frameStats.length - 1].count - before;
+  const insideFrames = frameStats.filter((r) => r.inside);
+  check('前提: 速く回している間、単語が表示されていて、クラスタの内部にいる', frameStats.every((r) => r.shown > 0) && insideFrames.length >= frameStats.length - 1, `${insideFrames.length}/${frameStats.length} フレームが内部`);
+  check('速く回している間、表示中の単語のいまの矩形が、表示中の目印の矩形と重ならない（毎フレーム）', insideFrames.every((r) => r.hits === 0),
+    `重なりのあったフレーム ${insideFrames.filter((r) => r.hits > 0).length}/${insideFrames.length}`);
+  check('速く回している間、毎フレーム選び直す（間隔が 33 ミリ秒まで縮む）', reselects >= frameStats.length - 2, `${frameStats.length} フレームで選び直し ${reselects} 回`);
+  check('動きが大きいとき、障害物との間隔に余裕が加わる（motion.marginPx > 0）', frameStats.some((r) => r.motion.marginPx > 0), `最大 ${Math.max(...frameStats.map((r) => r.motion.marginPx)).toFixed(1)}px、動き最大 ${Math.max(...frameStats.map((r) => r.motion.atSelectPx)).toFixed(0)}px`);
+  metrics.fastRotation = { reselects, frames: frameStats.length, maxMarginPx: Math.max(...frameStats.map((r) => r.motion.marginPx)) };
+  await setView(page, v);
+  const w = await waitWords(page);
+  check('止まれば、選び直しの間隔が基本の 100 ミリ秒に戻る', w.motion.intervalMs === 100 && w.motion.marginPx >= 0, `間隔 ${w.motion.intervalMs}ms`);
+}
+
 async function testSwitching(page) {
   console.log('\n[MNIST への切り替えと解放]');
   const switchTo = async (id) => {
@@ -644,6 +755,8 @@ async function main() {
     await testStability(page);
     await testFarAndToggle(page);
     await testDpr(browser, base, page);
+    await testBehindCamera(browser, page);
+    await testFastRotation(page);
     const ws = await words(page);
     metrics.select = ws.select;
     metrics.params = ws.params;
