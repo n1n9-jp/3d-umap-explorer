@@ -1416,6 +1416,63 @@ describe('FlyCameraControls: 慣性で回る最中の前進', () => {
   });
 });
 
+describe('FlyCameraControls: flyTo の所要時間と動きを減らす設定', () => {
+  const makeRig = (reduced: boolean, cloudRadius?: number) => {
+    const win = new FakeTarget() as FakeTarget & { matchMedia?: (q: string) => { matches: boolean } };
+    win.matchMedia = (q: string) => ({ matches: reduced && q.includes('prefers-reduced-motion: reduce') });
+    const el = new FakeTarget();
+    el.ownerDocument = { defaultView: win };
+    const camera = new PerspectiveCamera(60, 1, 0.001, 10);
+    const controls = new FlyCameraControls(camera, el as unknown as HTMLElement, { cloudRadius });
+    controls.setPose(new Vector3(0, 0, 1.2), new Vector3(0, 0, 0));
+    return { win, el, camera, controls };
+  };
+
+  it('cloudRadius があれば、距離に応じて基準の所要時間（既定 600ms）を伸縮する。なければ基準のまま', () => {
+    const plain = makeRig(false);
+    plain.controls.flyTo(new Vector3(0, 0, -1), { distance: 0 });
+    expect(plain.controls.flightInfo?.durationMs).toBe(600);
+    const scaled = makeRig(false, 1);
+    scaled.controls.flyTo(new Vector3(0, 0, -1), { distance: 0 }); // 移動の距離 2.2 = 2.2R
+    const want = 600 * Math.min(1.8, 0.8 + 0.25 * Math.log2(1 + 2.2 / 0.25));
+    expect(scaled.controls.flightInfo?.durationMs).toBeCloseTo(want, 9);
+    // 呼び出しごとの指定が優先
+    scaled.controls.flyTo(new Vector3(0, 0, -1), { distance: 0, cloudRadius: 100 });
+    expect(scaled.controls.flightInfo?.durationMs).toBeCloseTo(600 * 0.8 + 600 * 0.25 * Math.log2(1 + 2.2 / 25), 9);
+  });
+
+  it('「動きを減らす」設定: 所要時間が 0.5 倍で、キーを離したあとの速度を引き継がない', () => {
+    const cruise = (r: ReturnType<typeof makeRig>) => {
+      r.win.emit('keydown', { code: 'KeyD', key: 'd', ctrlKey: false, metaKey: false, altKey: false });
+      frames(r.controls, 1);
+      r.win.emit('keyup', { code: 'KeyD', key: 'd' });
+      r.controls.update(1 / 60); // 滑走の始まり
+    };
+    const normal = makeRig(false, 1);
+    const reduced = makeRig(true, 1);
+    cruise(normal);
+    cruise(reduced);
+    normal.controls.flyTo(new Vector3(0, 0, -1), { distance: 0.1 });
+    reduced.controls.flyTo(new Vector3(0, 0, -1), { distance: 0.1 });
+    const n = normal.controls.flightInfo;
+    const r = reduced.controls.flightInfo;
+    expect(r?.carriedSpeed).toBe(0);
+    expect(n?.carriedSpeed ?? 0).toBeGreaterThan(0);
+    // 同じ距離でなくても比で確かめる: 基準 600ms × 倍率の 0.5 倍（倍率は 0.8〜1.8）
+    expect(r?.durationMs).toBeGreaterThanOrEqual(600 * 0.8 * 0.5 - 1e-9);
+    expect(r?.durationMs).toBeLessThanOrEqual(600 * 1.8 * 0.5 + 1e-9);
+  });
+
+  it('flyTo の前に動いていなければ引き継ぐ速度は 0。着くと flightInfo は null', () => {
+    const r = makeRig(false, 1);
+    r.controls.flyTo(new Vector3(0, 0, -1), { distance: 0.1 });
+    expect(r.controls.flightInfo?.carriedSpeed).toBe(0);
+    frames(r.controls, 2);
+    expect(r.controls.flightInfo).toBeNull();
+    expect(r.controls.isFlying).toBe(false);
+  });
+});
+
 describe('FlyCameraControls: 移動の慣性の設定', () => {
   const keydown = (r: Rig, code: string) => r.win.emit('keydown', { code, key: code, ctrlKey: false, metaKey: false, altKey: false });
   const keyup = (r: Rig, code: string) => r.win.emit('keyup', { code, key: code });

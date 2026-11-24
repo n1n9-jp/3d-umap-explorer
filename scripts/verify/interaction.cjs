@@ -33,7 +33,9 @@ const { execSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require('playwright');
-const { loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, len, sendPointer, pointerGesture, flickPoints, readInfoRect, readUiRects, inRects, waitReorient } = require('./lib.cjs');
+const {
+  loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, len, sendPointer, pointerGesture, flickPoints, readInfoRect, readUiRects, inRects, waitReorient, waitCameraIdle, flightEase, expectedFlightDuration,
+} = require('./lib.cjs');
 
 const root = path.resolve(__dirname, '../..');
 const args = process.argv.slice(2);
@@ -80,8 +82,9 @@ async function waitFrames(page, fn, maxFrames = 20) {
   return { ...v, frames: maxFrames, ok: false };
 }
 
-/** カメラが動かなくなるまで待つ（連続する 2 フレームで位置と向きが同じ）。 */
+/** 自動移動（点へ飛ぶ・ホームへ戻る）が終わり（状態と模擬の時間で待つ）、カメラが動かなくなるまで待つ（連続する 2 フレームで位置と向きが同じ）。 */
 async function waitStill(page, maxFrames = 40) {
+  await waitCameraIdle(page);
   let prev = await state(page);
   for (let k = 0; k < maxFrames; k++) {
     await frames(page, 1);
@@ -761,6 +764,121 @@ async function testStopPressOnLabel(page, view) {
   await frames(page, 2);
 }
 
+// ---------- 点へ飛ぶ移動の緩急と所要時間 ----------
+
+/** 描画のフレームごとに、位置・向き・自動移動の状態を記録しはじめる（フレームの間に評価の往復が挟まらないよう、ページの中で記録する）。 */
+async function startFrameLog(page) {
+  await page.evaluate(() => {
+    const log = (window.__frameLog = []);
+    window.__frameLogOn = true;
+    const tick = () => {
+      if (!window.__frameLogOn) return;
+      const s = window.__explorer.getState();
+      log.push({ p: s.position, d: s.direction, flight: s.flight, mode: s.mode });
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
+}
+
+async function stopFrameLog(page) {
+  return page.evaluate(() => { window.__frameLogOn = false; return window.__frameLog; });
+}
+
+/**
+ * 点 `p` へダブルクリックで飛び、フレームごとの状態を記録して、緩急・所要時間・動き始めと終わりの緩やかさを確かめる。
+ * カメラは止まった状態から始める（引き継ぐ速度は 0）。移動の完了は、状態（flight）と模擬の時間で待つ。
+ * `reduced` は「動きを減らす」設定のとき（所要時間が 0.5 倍）。
+ */
+async function checkFlyEasing(page, p, title, { radius, reduced = false }) {
+  const s0 = await state(page);
+  await startFrameLog(page);
+  await page.mouse.dblclick(p.x, p.y);
+  // 移動が始まる（flight が現れる）のを待ってから、終わるまで待つ
+  let started = false;
+  for (let k = 0; k < 40 && !started; k++) { await frames(page, 1); started = !!(await state(page)).flight; }
+  await waitCameraIdle(page);
+  await frames(page, 1);
+  const log = await stopFrameLog(page);
+  const end = await state(page);
+  const flights = log.filter((x) => x.flight);
+  check(`${title}: 移動が始まり、状態（flight）が終わる`, started && flights.length >= 4 && flights[0].flight.kind === 'fly', `${flights.length} フレーム`);
+  if (!started || flights.length < 4) return;
+
+  const e = sub(end.position, s0.position);
+  const dist = len(e);
+  const T0 = 800;
+  const factor = reduced ? 0.5 : 1;
+  const wantMs = expectedFlightDuration(T0, dist, radius) * factor;
+  const gotMs = flights[0].flight.durationMs;
+  console.log(`  [実測] ${title}: 距離 ${dist.toFixed(3)}（点群の半径 ${radius.toFixed(3)} の ${(dist / radius).toFixed(2)} 倍）、所要時間 ${gotMs.toFixed(0)}ms（基準 ${T0}ms${reduced ? '、動きを減らす設定' : ''}）、記録した移動のフレーム ${flights.length}`);
+  check(`${title}: 所要時間が、基準 ${T0}ms を距離で伸縮した式のとおり${reduced ? '（動きを減らす設定で 0.5 倍）' : ''}`,
+    Math.abs(gotMs - wantMs) < 1, `${gotMs.toFixed(2)}ms、期待 ${wantMs.toFixed(2)}ms`);
+  check(`${title}: 所要時間が基準の 0.8〜1.8 倍に収まる`, gotMs >= T0 * 0.8 * factor - 1e-6 && gotMs <= T0 * 1.8 * factor + 1e-6);
+
+  // 各フレームの、出発点から終点への進んだ割合 frac が f(progress) と一致する（途中も、出発点と終点を結ぶ線の上）
+  const frac = (q) => { const v = sub(q, s0.position); return (v[0] * e[0] + v[1] * e[1] + v[2] * e[2]) / (dist * dist); };
+  const offLine = (q) => { const f = frac(q); return len(sub(sub(q, s0.position), [e[0] * f, e[1] * f, e[2] * f])); };
+  let maxErr = 0, maxOff = 0;
+  for (const x of flights) {
+    maxErr = Math.max(maxErr, Math.abs(frac(x.p) - flightEase(x.flight.progress)));
+    maxOff = Math.max(maxOff, offLine(x.p));
+  }
+  check(`${title}: 位置の進みが緩急 f(t) = 1 − (1−t)³(1+3t) のとおり（フレームごと）`, maxErr < 1e-4 && maxOff < 1e-5, `進みの誤差の最大 ${maxErr.toExponential(2)}、線からのずれの最大 ${maxOff.toExponential(2)}`);
+
+  // 動き始めが緩やか: 最初のフレームの移動量が、全体の距離に対して小さい
+  const first = flights[0];
+  const firstFrac = frac(first.p);
+  // 一様な速さなら、移動量は進みと同じ割合になる。動き始めが緩やかなら、それより小さく、全体の 15% 未満（easeOutQuart は進みの約 3 倍の割合で、30% 超）
+  check(`${title}: 動き始めが緩やか（最初のフレームの移動量が、一様な速さの場合より小さく、全体の距離の 15% 未満）`,
+    firstFrac < first.flight.progress && firstFrac < 0.15 && first.flight.progress < 0.25,
+    `最初のフレーム: 進み ${first.flight.progress.toFixed(3)}、移動量 ${(firstFrac * 100).toFixed(2)}%（easeOutQuart なら 30% 超）`);
+
+  // 終わりの手前でも減速している: 隣り合うフレームの平均の速さ（全体の距離 / 所要時間 の単位）が、終わりへ向けて小さくなる
+  const pts = [...flights.map((x) => ({ prog: x.flight.progress, f: frac(x.p) })), { prog: 1, f: 1 }];
+  const speeds = pts.slice(1).map((q, i) => (q.f - pts[i].f) / Math.max(1e-9, q.prog - pts[i].prog));
+  const peak = Math.max(...speeds);
+  const tail = speeds.slice(-3);
+  check(`${title}: 終わりの手前でも減速している（最後の区間の平均の速さが最大の半分未満で、終わりへ向けて単調に遅くなる）`,
+    tail[tail.length - 1] < peak * 0.5 && (tail.length < 3 || (tail[0] > tail[1] && tail[1] > tail[2])) && peak > 1.0,
+    `速さ（最大 ${peak.toFixed(2)}、全体の距離 / 所要時間 を 1 として）、終わりの 3 区間 ${tail.map((v) => v.toFixed(2)).join(' → ')}`);
+
+  // 向きは進みの 70% で合い終える（終わりの向きから 70% 以降は動かない）
+  const turn = angleBetween(s0.direction, end.direction);
+  if (turn > 0.05) {
+    const after70 = flights.filter((x) => x.flight.progress >= 0.7);
+    const before50 = flights.filter((x) => x.flight.progress < 0.5);
+    check(`${title}: 向きは進みの 70% で合い終える`, after70.every((x) => angleBetween(x.d, end.direction) < 1e-6) && before50.every((x) => angleBetween(x.d, end.direction) > 1e-4),
+      `全回転 ${turn.toFixed(3)} rad、70% 以降 ${after70.length} フレーム、50% 未満 ${before50.length} フレーム`);
+  }
+}
+
+async function testFlyEasing(page, ds, views) {
+  console.log('\n[点へ飛ぶ移動の緩急と所要時間]');
+  const radius = ds.manifest.bounds.radius;
+  await page.keyboard.press('Escape');
+  const cases = [
+    { title: '遠い点（全体の俯瞰から）', view: views[0] },
+    { title: '近い点（クラスタの内部から）', view: views[2] },
+  ];
+  for (const c of cases) {
+    await setView(page, c.view.pos, c.view.look);
+    await waitStill(page);
+    const p = await findVisiblePoint(page, { minPx: c.view === views[2] ? 6 : 3 });
+    if (!p) { check(`${c.title}: 検証に使う点が見つかる`, false); continue; }
+    await checkFlyEasing(page, p, c.title, { radius });
+  }
+  // 動きを減らす設定: 所要時間が 0.5 倍（引き継ぐ速度もない）
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await setView(page, views[0].pos, views[0].look);
+  await waitStill(page);
+  const p = await findVisiblePoint(page, { minPx: 3 });
+  if (p) await checkFlyEasing(page, p, '動きを減らす設定（遠い点）', { radius, reduced: true });
+  else check('動きを減らす設定: 検証に使う点が見つかる', false);
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await page.keyboard.press('Escape');
+}
+
 async function main() {
   const dataDir = path.join(root, 'public', dataPath);
   const ds = loadDataset(dataDir);
@@ -811,6 +929,7 @@ async function main() {
     await testStopPressOnLabel(page, overview);
     await testDoubleClick(page, edge);
     await testOverviewDoubleClick(page, overview);
+    await testFlyEasing(page, ds, views);
     await page.close();
 
     check('コンソールエラーがない', consoleErrors.length === 0, consoleErrors.join(' | '));

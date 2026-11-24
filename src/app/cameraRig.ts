@@ -4,7 +4,7 @@ import { FlyCameraControls, type FlyToOptions, type MoveInertiaOptions } from '.
 import { MAX_VIEW_PITCH, viewAngles, type ViewAngles, type ViewSpec } from '../render/view';
 import { OverviewControls, orbitPose, type OverviewZoomState } from './overviewControls';
 import type { AutoSpeed } from './autoSpeed';
-import { HOME_DURATION_SECONDS, HomeFlight, poseLookAt, type FlightPose } from './homeFlight';
+import { HOME_DURATION_SECONDS, HomeFlight, homeFlightDuration, poseLookAt, type FlightPose } from './homeFlight';
 import { REORIENT_MIN_ANGLE, Reorient, ResidualMotion, wrapAngle } from './modeTransition';
 import { isFromEditable } from './keyEvents';
 import { prefersReducedMotion, type RotationInertiaOptions } from '../controls/RotationInertia';
@@ -32,6 +32,8 @@ export interface CameraState {
   autoSpeed: AutoSpeedState;
   /** ホームの視点へ移動中か（`goHome` の途中）。 */
   homing: boolean;
+  /** 自動移動（`flyTo`・`goHome`）の最中なら、その所要時間と進み。最中でなければ null。 */
+  flight: FlightState | null;
   /** ドラッグを離したあとの回転の慣性で回っている最中か（現在のモード）。 */
   rotating: boolean;
   /** 俯瞰モードの中心までの距離の状態（目標の距離・実際の距離・寄っている途中か）。飛行モードでは null。 */
@@ -77,6 +79,20 @@ export interface CameraRigOptions {
    * 「動きを減らす」設定（`prefers-reduced-motion: reduce`）なら、どちらも 0.12 秒（キーを離すとすぐ止まる）。
    */
   moveInertia?: MoveInertiaOptions;
+  /**
+   * 点群の半径（データセットの `bounds.radius`）。自動移動（`flyTo`・`goHome`）の所要時間を、移動の距離との比で
+   * 0.8〜1.8 倍に伸縮する目安にする。省略すると伸縮しない。
+   */
+  cloudRadius?: number;
+}
+
+/** 自動移動（点・塊へ飛ぶ `flyTo`、ホームへの `goHome`）の進行状況。検証用。 */
+export interface FlightState {
+  kind: 'fly' | 'home';
+  /** 実際の所要時間（ミリ秒。距離による伸縮と動きを減らす設定の倍率を反映済み）。 */
+  durationMs: number;
+  /** 進み（0〜1。経過時間 / 所要時間。緩急の前の値）。 */
+  progress: number;
 }
 
 /** 飛行モードで、移動中のホーム復帰を中断させるキー（`FlyCameraControls` の移動キーと同じ）。 */
@@ -112,6 +128,8 @@ export class CameraRig {
   private readonly euler = new Euler(0, 0, 0, 'YXZ');
   private readonly win: Window;
   private readonly domElement: HTMLElement;
+  /** 点群の半径。自動移動の所要時間を伸縮する目安。 */
+  private readonly cloudRadius: number | undefined;
   /** ホームの視点へ移動中なら、その移動。 */
   private flight: HomeFlight | null = null;
   /** flyTo による自動移動の最中（速度の自動調整を止めている） */
@@ -126,7 +144,12 @@ export class CameraRig {
     this.domElement = domElement;
     this.win = domElement.ownerDocument?.defaultView ?? window;
     this.center = center.clone();
-    this.fly = new FlyCameraControls(camera, domElement, { rotationInertia: options.rotationInertia, moveInertia: options.moveInertia });
+    this.cloudRadius = options.cloudRadius;
+    this.fly = new FlyCameraControls(camera, domElement, {
+      rotationInertia: options.rotationInertia,
+      moveInertia: options.moveInertia,
+      cloudRadius: options.cloudRadius,
+    });
     this.overview = new OverviewControls(camera, domElement, {
       rotationInertia: options.rotationInertia,
       zoomTimeConstant: options.zoomTimeConstant,
@@ -255,8 +278,10 @@ export class CameraRig {
   }
 
   /**
-   * 現在の位置と向きから `view`（ホームの視点）へ、約 1 秒かけて滑らかに移動する。モードは変えない。
-   * 位置と向きの両方を補間し、始まりと終わりを緩やかにする。移動中に操作（飛行モードでは移動キーとドラッグ、
+   * 現在の位置と向きから `view`（ホームの視点）へ、滑らかに移動する。モードは変えない。
+   * 位置と向きの両方を補間し、始まりと終わりを緩やかにする。所要時間は、基準 `durationSeconds`（既定 1 秒。
+   * ミニマップのクリックは 0.6 秒）を、移動の距離に応じて 0.8〜1.8 倍に伸縮する（点群の半径 `cloudRadius` との比。
+   * 「動きを減らす」設定なら、さらに 0.5 倍）。移動中に操作（飛行モードでは移動キーとドラッグ、
    * 俯瞰モードではドラッグとホイール・ピンチ）をするか、`setView` を呼ぶと中断してその場に留まる。
    * 移動の間は、速度の自動調整は働かない（終わったあと、着いた位置から調整し直す）。
    */
@@ -270,7 +295,8 @@ export class CameraRig {
     this.stopTransition();
     const from = this.currentPose();
     const to: FlightPose = { position: [...view.pos], ...viewAngles(view, from) };
-    this.flight = new HomeFlight(from, to, durationSeconds);
+    const seconds = homeFlightDuration(from, to, durationSeconds, this.cloudRadius, prefersReducedMotion(this.win));
+    this.flight = new HomeFlight(from, to, seconds);
     this.notify();
   }
 
@@ -286,6 +312,7 @@ export class CameraRig {
   /**
    * `target` を注視する位置へ自動移動する（`FlyCameraControls.flyTo`）。俯瞰モードなら飛行モードへ切り替えてから。
    * 移動中は速度の自動調整を止め（移動の速さは所要時間で決まり、係数には依らない）、着いたら止まった状態として測り直す。
+   * 所要時間は、`options.durationMs`（基準）を、移動の距離と点群の半径（`cloudRadius`）に応じて伸縮する（`FlyMotion.flyTo`）。
    */
   flyTo(target: Vector3, options?: FlyToOptions): void {
     this.cancelHome(); // ホームへの移動中なら中断して、その場から飛ぶ
@@ -375,6 +402,7 @@ export class CameraRig {
         distance: this.autoSpeed ? this.autoSpeed.distance : null,
       },
       homing: this.flight !== null,
+      flight: this.flightState(),
       rotating: this.isRotatingByInertia,
       overview: this._mode === 'overview' ? this.overview.zoomState() : null,
       moveInertia: {
@@ -399,6 +427,12 @@ export class CameraRig {
     this.fly.dispose();
     this.overview.dispose();
     this.listeners.clear();
+  }
+
+  private flightState(): FlightState | null {
+    if (this.flight) return { kind: 'home', durationMs: this.flight.durationSeconds * 1000, progress: this.flight.progress };
+    const info = this._mode === 'fly' ? this.fly.flightInfo : null;
+    return info ? { kind: 'fly', durationMs: info.durationMs, progress: info.progress } : null;
   }
 
   /** カメラの現在の位置と向き（yaw / pitch）。 */

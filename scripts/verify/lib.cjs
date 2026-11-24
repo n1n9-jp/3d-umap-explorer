@@ -173,6 +173,58 @@ function computeViews(ds) {
   };
 }
 
+// ---------- 模擬の時間で待つ ----------
+
+/**
+ * 1 標本（`measureFrames(1)` ひとつ分）の間にアプリが進めた模擬の時間（秒）の下限。アプリは 1 フレームで
+ * min(0.1, 実時間) 秒だけ進める（src/main.ts の描画ループ）。状態（getState）には 1 フレームの時間が出ないので、
+ * measureFrames の結果から求める。測った 1 フレームのほかに、測る前の 1 フレーム（数えない）も進むので、
+ * （数えたフレーム + 1）× min(0.1, 平均の 1 フレームの時間）を下限とする。標本のあいだに挟まる描画は数えないので、実際はこれ以上。
+ */
+const simSecondsOf = (stats) => (stats.frames + 1) * Math.min(0.1, stats.meanMs / 1000);
+
+/** 状態に、ここまでに進めた模擬の時間の下限（simSeconds）を足して返す。`decorate(s)` で値を足せる。 */
+async function sampleOnce(page, simBefore, decorate) {
+  const stats = await page.evaluate(() => window.__explorer.measureFrames(1));
+  const s = await page.evaluate(() => window.__explorer.getState());
+  if (decorate) await decorate(s);
+  s.simSeconds = simBefore + simSecondsOf(stats);
+  return s;
+}
+
+/**
+ * `until(s, samples)` が true になるまで 1 フレームずつ進めて状態を記録する。待つ上限は、フレーム数ではなく
+ * 模擬の時間（`maxSimSeconds` 秒分。下限の見積もりで数えるので、実際はそれ以上進んでいる）で決める。描画が速くても遅くても、
+ * 慣性や自動移動などの「時間で決まる動き」が終わるまでの待ちは同じ長さになる。上限に達したら、配列の `timedOut` が true になる。
+ */
+async function sampleUntil(page, until, maxSimSeconds = 3, decorate = null) {
+  const samples = [];
+  let sim = 0;
+  samples.timedOut = false;
+  while (sim < maxSimSeconds) {
+    const s = await sampleOnce(page, sim, decorate);
+    sim = s.simSeconds;
+    samples.push(s);
+    if (until(s, samples)) return samples;
+  }
+  samples.timedOut = true;
+  return samples;
+}
+
+/** 模擬の時間で `seconds` 秒分（下限の見積もり）だけ描画を進める。 */
+async function waitSim(page, seconds) {
+  let sim = 0;
+  while (sim < seconds) sim += simSecondsOf(await page.evaluate(() => window.__explorer.measureFrames(1)));
+}
+
+/**
+ * 緩急 f(t) = 1 − (1−t)³(1+3t)（src/controls/easing.ts と同じ式）と、移動の所要時間の式
+ * T = clamp(T0 × (0.8 + 0.25 × log2(1 + d / (0.25 R))), T0 × 0.8, T0 × 1.8)。検証が、アプリの定数を使わずに期待値を求めるための独立の実装。
+ */
+const flightEase = (t) => { const x = Math.min(1, Math.max(0, t)); return 1 - (1 - x) ** 3 * (1 + 3 * x); };
+const expectedFlightDuration = (base, distance, radius) =>
+  Math.min(base * 1.8, Math.max(base * 0.8, base * (0.8 + 0.25 * Math.log2(1 + distance / (0.25 * radius)))));
+
 // ---------- サーバーとブラウザ ----------
 
 function waitForServer(url, timeoutMs = 30000) {
@@ -244,22 +296,37 @@ function flickPoints(x0, y0, dx, dy, durationMs = 160, n = 10) {
   return pts;
 }
 
-// ---------- 模擬の時間で待つ ----------
+// ---------- カメラの動きが終わるまで待つ（模擬の時間で） ----------
 
 /**
  * O キーで俯瞰モードへ切り替えたあと、点群の中心への向き直し（`getState().reorienting`。0.5 秒）が終わるまで待つ。
- * 待ちの上限は、壁時計ではなく模擬の時間（`maxSimSeconds` 秒分）で決める。アプリは 1 フレームで min(0.1, 実時間) 秒だけ進むので、
- * 描画が遅くても速くても、向き直しが終わるまでの待ちは同じ長さになる（`controls.cjs` の `sampleUntil` と同じ見積もり）。
+ * 待ちの上限は、壁時計ではなく模擬の時間（`maxSimSeconds` 秒分。`sampleUntil` と同じ見積もり）で決める。
  * 向き直しが始まらなかった（中心とのずれが 3° 未満）ときは、すぐ返る。終わったら { ok: true }、上限に達したら { ok: false }。
  */
 async function waitReorient(page, maxSimSeconds = 3) {
-  let sim = 0;
-  for (;;) {
-    if (!(await page.evaluate(() => window.__explorer.getState().reorienting))) return { ok: true, sim };
-    if (sim >= maxSimSeconds) return { ok: false, sim };
-    const stats = await page.evaluate(() => window.__explorer.measureFrames(1));
-    sim += (stats.frames + 1) * Math.min(0.1, stats.meanMs / 1000);
-  }
+  if (!(await page.evaluate(() => window.__explorer.getState().reorienting))) return { ok: true, sim: 0 };
+  const samples = await sampleUntil(page, (s) => !s.reorienting, maxSimSeconds);
+  return { ok: !samples.timedOut, sim: samples[samples.length - 1].simSeconds };
 }
 
-module.exports = { readInfoRect, readUiRects, inRects, TOP_UI_IDS, loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, add, mul, len, norm, sendPointer, pointerGesture, flickPoints, waitReorient };
+/** 自動の動き（自動移動 `flight`・ホームへの移動 `homing`・向き直し `reorienting`・切り替えの残った動き `settling`）のどれかが有効か。 */
+const cameraAnimating = (s) => Boolean(s.flight || s.homing || s.reorienting || s.settling);
+
+/**
+ * カメラの自動の動き（`cameraAnimating`：自動移動・ホームへの移動・向き直し・切り替えの残った動き）が、すべて終わるまで待つ。
+ * 待ちの上限は模擬の時間（最長の自動移動 = 基準 1 秒 × 1.8 倍と、そのあとの向き直し・残った動きより長い 6 秒）で、超えたら例外にする。
+ * すでに止まっていれば、すぐ返る。最後の状態を返す。
+ */
+async function waitCameraIdle(page, maxSimSeconds = 6) {
+  const now = await page.evaluate(() => window.__explorer.getState());
+  if (!cameraAnimating(now)) return now;
+  const samples = await sampleUntil(page, (s) => !cameraAnimating(s), maxSimSeconds);
+  if (samples.timedOut) throw new Error(`カメラの自動の動きが模擬の時間で ${maxSimSeconds} 秒たっても終わらない`);
+  return samples[samples.length - 1];
+}
+
+module.exports = {
+  readInfoRect, readUiRects, inRects, TOP_UI_IDS,
+  loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, add, mul, len, norm, sendPointer, pointerGesture, flickPoints,
+  simSecondsOf, sampleOnce, sampleUntil, waitSim, waitReorient, cameraAnimating, waitCameraIdle, flightEase, expectedFlightDuration,
+};

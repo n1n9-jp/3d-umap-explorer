@@ -34,7 +34,9 @@ const { execSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require('playwright');
-const { loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, add, len, norm, pointerGesture, flickPoints } = require('./lib.cjs');
+const {
+  loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, add, len, norm, pointerGesture, flickPoints, sampleOnce: libSampleOnce, sampleUntil: libSampleUntil, waitSim, waitCameraIdle,
+} = require('./lib.cjs');
 
 const root = path.resolve(__dirname, '../..');
 const args = process.argv.slice(2);
@@ -136,25 +138,16 @@ const pitchOf = (d) => Math.asin(Math.max(-1, Math.min(1, d[1])));
 const wrapPi = (a) => Math.atan2(Math.sin(a), Math.cos(a));
 // 同じ向きどうしでも誤差が出ないように、acos ではなく atan2(|外積|, 内積) で求める
 const angleBetween = (a, b) => Math.atan2(len(cross(a, b)), dot(a, b));
-// 慣性の最初の角速度の上限 4 rad/s と時定数 0.3 秒から決まる、慣性だけの総回転量の上限（RotationInertia の既定値）
-const INERTIA_MAX_TOTAL = 4 * 0.3;
+// 慣性の最初の角速度の上限 4 rad/s と飛行モードの時定数 0.35 秒から決まる、慣性だけの総回転量の上限（RotationInertia の既定値）
+const INERTIA_MAX_TOTAL = 4 * 0.35;
 
-/**
- * 1 標本（`measureFrames(1)` ひとつ分）の間にアプリが進めた模擬の時間（秒）の下限。アプリは 1 フレームで
- * min(0.1, 実時間) 秒だけ進める（src/main.ts の描画ループ）。状態（getState）には 1 フレームの時間が出ないので、
- * measureFrames の結果から求める。測った 1 フレームのほかに、測る前の 1 フレーム（数えない）も進むので、
- * （数えたフレーム + 1）× min(0.1, 平均の 1 フレームの時間）を下限とする。標本のあいだに挟まる描画は数えないので、実際はこれ以上。
- */
-const simSecondsOf = (stats) => (stats.frames + 1) * Math.min(0.1, stats.meanMs / 1000);
+/** 状態に、ホバー中の点（hovered）を足す（`lib.cjs` の `sampleOnce`・`sampleUntil` へ渡す）。 */
+const addHovered = async (page, s) => {
+  s.hovered = await page.evaluate(() => window.__explorer.interaction.getState().hovered);
+};
 
 /** 状態に、ホバー中の点（hovered）と、ここまでに進めた模擬の時間の下限（simSeconds）を足して返す。 */
-async function sampleOnce(page, simBefore) {
-  const stats = await frames(page, 1);
-  const s = await state(page);
-  s.hovered = await page.evaluate(() => window.__explorer.interaction.getState().hovered);
-  s.simSeconds = simBefore + simSecondsOf(stats);
-  return s;
-}
+const sampleOnce = (page, simBefore) => libSampleOnce(page, simBefore, (s) => addHovered(page, s));
 
 /**
  * 1 フレームずつ進めて状態を記録する。`until(s, samples)` が true になるか、ちょうど `n` 標本で終わる（標本の数を決めて記録したいとき）。
@@ -171,30 +164,8 @@ async function sampleFrames(page, until, n = 80) {
   return samples;
 }
 
-/**
- * `until(s, samples)` が true になるまで 1 フレームずつ進めて状態を記録する。待つ上限は、フレーム数ではなく
- * 模擬の時間（`maxSimSeconds` 秒分。下限の見積もりで数えるので、実際はそれ以上進んでいる）で決める。描画が速くても遅くても、
- * 慣性などの「時間で決まる動き」が終わるまでの待ちは同じ長さになる。上限に達したら、配列の `timedOut` が true になる。
- */
-async function sampleUntil(page, until, maxSimSeconds = 3) {
-  const samples = [];
-  let sim = 0;
-  samples.timedOut = false;
-  while (sim < maxSimSeconds) {
-    const s = await sampleOnce(page, sim);
-    sim = s.simSeconds;
-    samples.push(s);
-    if (until(s, samples)) return samples;
-  }
-  samples.timedOut = true;
-  return samples;
-}
-
-/** 模擬の時間で `seconds` 秒分（下限の見積もり）だけ描画を進める。 */
-async function waitSim(page, seconds) {
-  let sim = 0;
-  while (sim < seconds) sim += simSecondsOf(await frames(page, 1));
-}
+/** `lib.cjs` の `sampleUntil` に、ホバー中の点（hovered）を足す。 */
+const sampleUntil = (page, until, maxSimSeconds = 3) => libSampleUntil(page, until, maxSimSeconds, (s) => addHovered(page, s));
 
 /** 移動の慣性（キーを離したあとの滑走）が終わるまで待つ。滑走は最高速から約 1.75 秒で止まる。止まらなければ例外にする。 */
 async function waitGlideEnd(page) {
@@ -817,8 +788,8 @@ async function testInertiaFly(page, inside) {
     a.some((s) => s.rotating) && afterRelease >= 2 && steps.every((d) => d > -1e-9),
     `回転のあった標本 ${afterRelease}、1 フレームごとの回転量 ${steps.map((d) => d.toFixed(3)).join(' ')}`);
   check('やがて止まる（rotating が false になり、そのあと向きが変わらない）', !last.rotating && !a.timedOut && (await staysStill(page)), `${a.length} 標本、模擬の時間 ${last.simSeconds.toFixed(2)} 秒以上`);
-  // ドラッグ 150px = 0.375 rad。離す直前の速さ ≈ 940 px/s = 2.3 rad/s、時定数 0.3 秒 → 慣性の総回転量 ≈ 0.7 rad
-  check('慣性の総回転量が、離す直前の速さと時定数から見込める範囲に入る', total > 0.375 + 0.4 && total < 0.375 + INERTIA_MAX_TOTAL, `総回転 ${total.toFixed(3)} rad（ドラッグ 0.375 + 慣性 ${(total - 0.375).toFixed(3)}、見込み ≈ 0.7）`);
+  // ドラッグ 150px = 0.375 rad。離す直前の速さ ≈ 940 px/s = 2.3 rad/s、時定数 0.35 秒 → 慣性の総回転量 ≈ 0.8 rad
+  check('慣性の総回転量が、離す直前の速さと時定数から見込める範囲に入る', total > 0.375 + 0.4 && total < 0.375 + INERTIA_MAX_TOTAL, `総回転 ${total.toFixed(3)} rad（ドラッグ 0.375 + 慣性 ${(total - 0.375).toFixed(3)}、見込み ≈ 0.8）`);
   check('慣性では位置が動かない', len(sub(s0.position, last.position)) < 1e-9);
   await level();
   await waitSim(page, 0.4); // HUD の視点の表示は（模擬の時間で）約 0.25 秒ごとに書き換わる
@@ -970,8 +941,7 @@ async function testInertiaFly(page, inside) {
   await frames(page, 1);
   const h0 = await state(page);
   check('慣性の間に H を押すと、ホームへの移動が始まり、慣性は止まる', h0.homing && !h0.rotating);
-  const hs = await sampleUntil(page, (x) => !x.homing);
-  const hl = hs[hs.length - 1];
+  const hl = await waitCameraIdle(page); // 移動の完了は、状態（flight・homing・reorienting・settling）と模擬の時間で待つ
   check('ホームへ着いたあとも、慣性は残らない（向きはホームの向き）', !hl.homing && !hl.rotating && angleBetween(hl.direction, norm(sub(home.look, home.pos))) < 1e-3 && len(sub(hl.position, home.pos)) < 1e-3);
 
   await flickAndWait();

@@ -34,7 +34,7 @@ const { execSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require('playwright');
-const { loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, add, mul, len, norm, readInfoRect } = require('./lib.cjs');
+const { loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, add, mul, len, norm, readInfoRect, waitCameraIdle } = require('./lib.cjs');
 
 const root = path.resolve(__dirname, '../..');
 const args = process.argv.slice(2);
@@ -100,6 +100,7 @@ const shownKey = (s) => s.shown.map((w) => w.index).sort((a, b) => a - b).join('
 
 /** カメラが動かなくなるまで待つ。 */
 async function waitStill(page, maxFrames = 80) {
+  await waitCameraIdle(page); // 自動移動・ホームへの移動・向き直し・切り替えの残った動きが終わるまで（模擬の時間で）
   let prev = await state(page);
   for (let k = 0; k < maxFrames; k++) {
     await frames(page, 1);

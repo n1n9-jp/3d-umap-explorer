@@ -7,9 +7,9 @@ import {
   GLIDE_STOP_RATIO,
   MAX_PITCH,
   createMoveInput,
-  easeOutQuart,
 } from './FlyMotion';
 import type { MoveInput } from './FlyMotion';
+import { flightEase, scaledFlightDuration } from './easing';
 
 const deg = (d: number) => (d * Math.PI) / 180;
 
@@ -21,6 +21,10 @@ function input(patch: Partial<MoveInput>): MoveInput {
 function run(m: FlyMotion, seconds: number, dt: number, inp: MoveInput): void {
   const n = Math.round(seconds / dt);
   for (let i = 0; i < n; i++) m.step(dt, inp);
+}
+
+function wrapDiff(a: number, b: number): number {
+  return Math.atan2(Math.sin(a - b), Math.cos(a - b));
 }
 
 function expectClose(a: Vector3, b: Vector3, eps: number): void {
@@ -318,15 +322,165 @@ describe('FlyMotion: flyTo', () => {
     expect(m.position.z).toBeCloseTo(-0.9, 9);
   });
 
-  it('ease-out quartic: 中間点で進行率 1-(1-t)^4', () => {
-    expect(easeOutQuart(0)).toBe(0);
-    expect(easeOutQuart(1)).toBe(1);
-    expect(easeOutQuart(0.5)).toBeCloseTo(1 - 0.5 ** 4, 12);
-
+  it('位置は緩急 f(t) = 1 − (1−t)³(1+3t) で進む（始めの 1 歩は小さい）', () => {
     const m = new FlyMotion();
     m.flyTo(new Vector3(0, 0, -1), { distance: 0, durationMs: 1000 });
     m.step(0.1, createMoveInput());
-    expect(m.position.z).toBeCloseTo(-easeOutQuart(0.1), 12);
+    expect(m.position.z).toBeCloseTo(-flightEase(0.1), 12);
+    // 最初の 1/60 秒の移動量は、全体の距離（1）の 0.1% 未満（easeOutQuart では 6% を超えていた）
+    const a = new FlyMotion();
+    a.flyTo(new Vector3(0, 0, -1), { distance: 0, durationMs: 1000 });
+    a.step(1 / 60, createMoveInput());
+    expect(Math.abs(a.position.z)).toBeLessThan(0.002);
+  });
+
+  it('向きは進みの 70% で合い終え、位置はまだ着いていない', () => {
+    const make = () => {
+      const m = new FlyMotion();
+      m.setPose(new Vector3(0.5, 0.3, 0.8), new Vector3(1.5, 0.3, 0.8)); // +X を向いて始める
+      m.flyTo(new Vector3(-0.4, 0.2, -0.6), { distance: 0.05, durationMs: 1000 });
+      return m;
+    };
+    const ref = make();
+    finish(ref);
+    const m = make();
+    for (let i = 0; i < 3; i++) m.step(0.1, createMoveInput()); // 進み 0.3: まだ回っている途中
+    expect(Math.abs(wrapDiff(m.yaw, ref.yaw))).toBeGreaterThan(0.05);
+    for (let i = 0; i < 4; i++) m.step(0.1, createMoveInput());
+    m.step(0.002, createMoveInput()); // 進み 0.702
+    expect(m.isFlying).toBe(true);
+    expect(Math.abs(wrapDiff(m.yaw, ref.yaw))).toBeLessThan(1e-12);
+    expect(m.pitch).toBeCloseTo(ref.pitch, 12);
+    expect(m.position.distanceTo(ref.position)).toBeGreaterThan(0.01);
+  });
+
+  it('始めのカメラの速度 v0 を引き継ぐ（t=0 の速度が v0）。終わりの位置は目標で、速度は 0', () => {
+    const m = new FlyMotion({ speed: 0.5 });
+    m.setPose(new Vector3(0, 0, 1), new Vector3(0, 0, 0));
+    run(m, 1, 1 / 60, input({ right: true }));
+    run(m, 0.2, 1 / 60, createMoveInput()); // 滑走の途中
+    expect(m.isGliding).toBe(true);
+    const v0 = m.velocity.clone();
+    expect(v0.length()).toBeGreaterThan(0.05);
+    const p0 = m.position.clone();
+    const target = new Vector3(0, 0, -1);
+    m.flyTo(target, { distance: 0.1, durationMs: 1000 });
+    expect(m.velocity.length()).toBe(0);
+    expect(m.flightInfo?.carriedSpeed).toBeCloseTo(v0.length(), 12);
+
+    // 十分小さい刻みの 1 歩で、(位置の差) / dt が v0（二次の項は dt に比例して消える）
+    const dt = 1e-4;
+    m.step(dt, createMoveInput());
+    const v = m.position.clone().sub(p0).divideScalar(dt);
+    expect(v.distanceTo(v0)).toBeLessThan(v0.length() * 2e-3 + 1e-3);
+
+    // 終わり: 位置は目標、速度は 0（終わりの直前の速さが 0 へ向かう）
+    finish(m);
+    expect(m.isFlying).toBe(false);
+    expect(m.position.distanceTo(target)).toBeCloseTo(0.1, 9);
+    expect(m.velocity.length()).toBe(0);
+    const before = m.position.clone();
+    m.step(1 / 60, createMoveInput());
+    expect(m.position.distanceTo(before)).toBe(0);
+  });
+
+  it('引き継ぐ項は終わりへ向けて 0 になる（終わりの直前の速さが小さい）', () => {
+    const m = new FlyMotion();
+    m.setPose(new Vector3(0, 0, 1), new Vector3(0, 0, 0));
+    run(m, 1, 1 / 60, input({ right: true }));
+    m.flyTo(new Vector3(0, 0, -1), { distance: 0.1, durationMs: 1000 });
+    let prev = m.position.clone();
+    let lastSpeed = Infinity;
+    for (let i = 0; i < 1000 && m.isFlying; i++) {
+      prev = m.position.clone();
+      m.step(0.001, createMoveInput());
+      lastSpeed = m.position.distanceTo(prev) / 0.001;
+    }
+    expect(lastSpeed).toBeLessThan(0.01);
+  });
+
+  it('飛行の途中で flyTo し直すと、その瞬間の飛行の速度を引き継ぐ（速さが跳ばない）', () => {
+    const m = new FlyMotion();
+    m.flyTo(new Vector3(0, 0, -1), { distance: 0.1, durationMs: 1000 });
+    for (let i = 0; i < 20; i++) m.step(0.01, createMoveInput()); // t = 0.2
+    const before = m.position.clone();
+    m.step(1e-4, createMoveInput());
+    const vFlight = m.position.clone().sub(before).divideScalar(1e-4);
+    expect(vFlight.length()).toBeGreaterThan(0.5);
+    m.flyTo(new Vector3(1, 0, -1), { distance: 0.1, durationMs: 1000 });
+    expect(m.flightInfo?.carriedSpeed).toBeGreaterThan(vFlight.length() * 0.95);
+    expect(m.flightInfo?.carriedSpeed).toBeLessThan(vFlight.length() * 1.05);
+  });
+
+  it('所要時間は、基準 × 距離による倍率（0.8〜1.8 倍）。cloudRadius がなければ基準のまま', () => {
+    const R = 1;
+    const duration = (distanceToTarget: number, opts: { cloudRadius?: number; durationMs?: number } = {}) => {
+      const m = new FlyMotion();
+      m.setPose(new Vector3(0, 0, distanceToTarget), new Vector3(0, 0, 0));
+      m.flyTo(new Vector3(0, 0, 0), { distance: 0, durationMs: 800, ...opts });
+      return m.flightInfo?.durationMs ?? 0;
+    };
+    expect(duration(2, {})).toBe(800);
+    expect(duration(0.1, { cloudRadius: R })).toBeCloseTo(scaledFlightDuration(800, 0.1, R), 9);
+    expect(duration(1, { cloudRadius: R })).toBeCloseTo(800 * (0.8 + 0.25 * Math.log2(1 + 4)), 9);
+    // 近い移動は基準より短く、遠い移動は長い。上下限に収まる
+    expect(duration(0.01, { cloudRadius: R })).toBeLessThan(800);
+    expect(duration(0.01, { cloudRadius: R })).toBeGreaterThanOrEqual(800 * 0.8 - 1e-9);
+    expect(duration(3, { cloudRadius: R })).toBeGreaterThan(800 * 1.5);
+    expect(duration(1e4, { cloudRadius: R })).toBeCloseTo(800 * 1.8, 9);
+  });
+
+  it('動きを減らす設定: 所要時間が 0.5 倍で、v0 を引き継がない', () => {
+    const make = (reducedMotion: boolean) => {
+      const m = new FlyMotion();
+      m.setPose(new Vector3(0, 0, 1), new Vector3(0, 0, 0));
+      run(m, 1, 1 / 60, input({ right: true }));
+      m.flyTo(new Vector3(0, 0, -1), { distance: 0.1, durationMs: 800, cloudRadius: 1, reducedMotion });
+      return m;
+    };
+    const normal = make(false);
+    const reduced = make(true);
+    expect(reduced.flightInfo?.durationMs).toBeCloseTo((normal.flightInfo?.durationMs ?? 0) * 0.5, 9);
+    expect(reduced.flightInfo?.carriedSpeed).toBe(0);
+    expect(normal.flightInfo?.carriedSpeed).toBeGreaterThan(0.1);
+    // 引き継ぎがないので、最初の 1 歩の x の動きが、緩急だけの補間（目標は x=0 側）と一致する
+    const start = reduced.position.clone();
+    reduced.step(1e-3, createMoveInput());
+    expect(Math.abs(reduced.position.x - start.x)).toBeLessThan(1e-3 * 0.01);
+    // 動きを減らす設定で durationMs: 0 なら、そのまま即座に着く
+    const z = new FlyMotion();
+    z.flyTo(new Vector3(0, 0, -1), { distance: 0.1, durationMs: 0, reducedMotion: true });
+    expect(z.isFlying).toBe(false);
+  });
+
+  it('刻み幅（1/240・1/60・1/30・0.1）を変えても、終わりの姿勢が一致する', () => {
+    const run1 = (dt: number) => {
+      const m = new FlyMotion();
+      m.setPose(new Vector3(0.7, 0.3, 0.9), new Vector3(0, 0, 0));
+      m.flyTo(new Vector3(-0.3, 0.2, -0.5), { distance: 0.04, durationMs: 800, cloudRadius: 1.1 });
+      finish(m, dt);
+      return m;
+    };
+    const ref = run1(1 / 240);
+    for (const dt of [1 / 60, 1 / 30, 0.1]) {
+      const m = run1(dt);
+      expect(m.isFlying).toBe(false);
+      expectClose(m.position, ref.position, 1e-9);
+      expect(m.yaw).toBeCloseTo(ref.yaw, 9);
+      expect(m.pitch).toBeCloseTo(ref.pitch, 9);
+    }
+  });
+
+  it('flightInfo: 飛行中だけ値を持ち、進みが 0 → 1 に増える', () => {
+    const m = new FlyMotion();
+    expect(m.flightInfo).toBeNull();
+    m.flyTo(new Vector3(0, 0, -1), { distance: 0.1, durationMs: 1000 });
+    expect(m.flightInfo?.progress).toBe(0);
+    m.step(0.1, createMoveInput());
+    expect(m.flightInfo?.progress).toBeCloseTo(0.1, 12);
+    expect(m.flightInfo?.durationMs).toBe(1000);
+    finish(m);
+    expect(m.flightInfo).toBeNull();
   });
 
   it('刻み幅によらず終了位置は同じ', () => {
