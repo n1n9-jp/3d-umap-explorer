@@ -300,7 +300,10 @@ async function testOverlay(page, title, q) {
   check('近傍の表示の有無で、ピッキングの番号の画像が変わらない', hOn === hOff, `${hOn} / ${hOff}`);
 
   // 描画に出ているか: 画面の中の近傍の位置と、長い線の中ほどで、水色の画素が増える
-  const inside = (x, y) => x > 20 && y > 60 && x < width - 20 && y < height - 20 && !(x > 900 && y < 340);
+  // 画面の端の UI（情報パネル・上部の UI・HUD・ミニマップ）の下は、実際の矩形で除く
+  const uiRects = await readObstacles(page);
+  const inside = (x, y) => x > 20 && y > 20 && x < width - 20 && y < height - 20
+    && !uiRects.some((r) => x > r.left - 12 && x < r.right + 12 && y > r.top - 12 && y < r.bottom + 12);
   let ringsSeen = 0, ringsTried = 0;
   for (const l of st.lines) {
     if (!inside(l.to[0], l.to[1])) continue;
@@ -365,8 +368,8 @@ async function testEdges(page, q) {
   await testEdgeObstacles(page, st, P);
 }
 
-/** 画面の端の UI（単語の文字が避けるものと同じ）の、いまの実際の矩形（CSS ピクセル）。表示されているものだけ。 */
-const readObstacles = (page) => page.evaluate(() => ['hud', 'dataset-switcher', 'umap-panel', 'cluster-location', 'info', 'minimap'].flatMap((id) => {
+/** 画面の端の UI（単語の文字が避けるものと同じ。src/app/datasetView.ts の WORD_OBSTACLE_IDS）の、いまの実際の矩形（CSS ピクセル）。表示されているものだけ。 */
+const readObstacles = (page) => page.evaluate(() => ['hud', 'title-mode', 'dataset-switcher', 'umap-panel', 'cluster-location', 'info', 'minimap'].flatMap((id) => {
   const el = document.getElementById(id);
   if (!el || el.hidden) return [];
   const r = el.getBoundingClientRect();

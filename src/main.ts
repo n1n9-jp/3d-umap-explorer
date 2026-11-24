@@ -4,6 +4,8 @@ import { type ClipPlanes } from './render/clip';
 import { formatView, parsePositiveNumber, parseView, type ViewSpec } from './render/view';
 import type { CameraState } from './app/cameraRig';
 import { renderHud } from './app/hud';
+import { ModeSwitch, type ModeSwitchState } from './app/modeSwitch';
+import { TopLayout } from './app/topLayout';
 import type { PickResult } from './picking/GpuPicker';
 import type { PickingDebug } from './picking/debug';
 import { bindAutoSpeedKey } from './app/autoSpeedKey';
@@ -53,6 +55,10 @@ declare global {
       homeView(): ViewSpec;
       /** 現在のモード・位置・注視点・速度・速度の自動調整の状態。 */
       getState(): CameraState;
+      /** 左上のカメラのモードの表示（src/app/modeSwitch.ts）。表示が示しているモード・選択中のボタン・読み上げの文 */
+      modeSwitch: {
+        getState(): ModeSwitchState;
+      };
       measureFrames(n: number): Promise<FrameStats>;
       pointCloud: PointCloud;
       /** カメラのクリップ面（検証用）。override に値を渡すと、カメラの位置による決定の代わりにその値を使う（null で戻す） */
@@ -196,10 +202,15 @@ async function start(): Promise<void> {
   const neighbors = new NeighborsShared();
 
   const switcher = new DatasetSwitcher(doc, catalog, (id) => { void switchTo(id, { pushHistory: true }); });
+  // 左上のカメラのモードの表示。クリック・Enter・Space・矢印キーで選んだモードへ切り替える（表示は updateHud で追従する）
+  const modeSwitch = new ModeSwitch(doc, (mode) => view?.controller.setMode(mode));
+  // 画面の上部の高さ（右上の列が、HUD・現在地・ミニマップに重ならないように）
+  const topLayout = new TopLayout(doc);
 
   const updateHud = () => {
     if (!view) return;
     const s = view.controller.getState();
+    modeSwitch.set(s.mode); // O キー・クリック・点へ飛ぶ操作による自動の切り替えのどれでも、ここを通る（onChange）
     renderHud(hud, {
       datasetName: view.name,
       pointCount: view.arrays.manifest.count,
@@ -434,6 +445,7 @@ async function start(): Promise<void> {
     // 画面の倍率（devicePixelRatio）が変わったら、画面の大きさが変わったときと同じ経路で、描画バッファ・点の大きさ・
     // ミニマップを合わせ直す（ズームやモニタの移動では resize イベントが来ないことがある）
     if (currentPixelRatio() !== renderer.getPixelRatio()) resize();
+    topLayout.update(); // 単語の文字が避ける UI の矩形（view.update で読む）より先に、上部の配置を決める
     umapFeature?.update(dt); // 埋め込みを切り替えるとき、点を新旧の座標の間で動かす
     view?.update(dt, window.innerWidth, window.innerHeight);
     renderer.render(scene, camera);
@@ -463,6 +475,7 @@ async function start(): Promise<void> {
     setView: (spec) => v().controller.setView(spec),
     homeView: () => v().homeView(),
     getState: () => v().controller.getState(),
+    modeSwitch: { getState: () => modeSwitch.getState() },
     measureFrames: (n) =>
       new Promise((resolve) => {
         frameTimes = [];

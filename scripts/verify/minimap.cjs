@@ -28,7 +28,7 @@ const { execSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require('playwright');
-const { loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, add, mul, len, norm, readInfoRect } = require('./lib.cjs');
+const { loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, add, mul, len, norm, readInfoRect, readUiRects } = require('./lib.cjs');
 
 const root = path.resolve(__dirname, '../..');
 const args = process.argv.slice(2);
@@ -236,9 +236,11 @@ async function compareIdImages(page) {
 /** 画面に見えていて、投影した中心で pick するとその点が返る点（地図・HUD・パネルを避ける）。 */
 async function findVisiblePoint(page, inRect = null) {
   const info = await readInfoRect(page); // 情報パネルは実際の矩形で避ける
-  return page.evaluate(async ({ inRect, w, h, info }) => {
+  const ui = await readUiRects(page); // 上部の UI（左上のタイトルとモード・右上の選択欄）も実際の矩形で避ける
+  return page.evaluate(async ({ inRect, w, h, info, ui }) => {
     const ex = window.__explorer;
-    const inInfo = (x, y) => info && x > info.left - 12 && x < info.right + 12 && y > info.top - 12 && y < info.bottom + 12;
+    const inInfo = (x, y) => (info && x > info.left - 12 && x < info.right + 12 && y > info.top - 12 && y < info.bottom + 12)
+      || ui.some((r) => x > r.left - 12 && x < r.right + 12 && y > r.top - 12 && y < r.bottom + 12);
     const m = ex.minimap.getState();
     const inMap = (x, y) => x >= m.gauge.left - 8 && y >= m.map.top - 8;
     const ok = inRect
@@ -258,7 +260,7 @@ async function findVisiblePoint(page, inRect = null) {
       if (r && r.index === c.i && r.pixelDistance === 0) return c;
     }
     return null;
-  }, { inRect, w: width, h: height, info });
+  }, { inRect, w: width, h: height, info, ui });
 }
 
 const near = (a, b, tol) => Math.abs(a - b) <= tol;

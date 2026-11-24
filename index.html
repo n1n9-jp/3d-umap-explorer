@@ -50,7 +50,7 @@
       #cluster-location[data-kind="nearest"] { color: #b4bccb; }
       .cluster-location-swatch { width: 12px; height: 12px; border-radius: 50%; flex: none; }
       #info {
-        position: fixed; right: 12px; top: 12px; z-index: 2;
+        position: relative;
         padding: 10px 12px; border-radius: 8px; border: 1px solid rgba(255, 194, 51, 0.55);
         background: rgba(7, 8, 12, 0.94); color: #d6dce8;
         font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -73,16 +73,16 @@
       #info-close:hover { color: #fff; }
       #info-close:focus-visible { outline: 2px solid #ffc233; outline-offset: 1px; color: #fff; }
       /* 元のデータで近い点の一覧（src/neighbors/） */
-      /* 縦の短い画面でも、パネル全体を画面の中に収める（上下 12px の余白）。一覧がはみ出すときは、一覧の部分だけがスクロールする。
+      /* 縦の短い画面でも、パネル全体を右上の列（#top-right）の中に収める。一覧がはみ出すときは、一覧の部分だけがスクロールする。
          一覧を最小の高さにしても収まらないほど短いときだけ、パネル全体をスクロールする。
          パネルの幅は、上の段（画像と文字）で決まる（一覧は contain: inline-size で幅に影響せず、その幅で折り返す） */
       #info {
         display: flex; flex-direction: column; align-items: stretch; gap: 8px;
-        box-sizing: border-box; max-height: calc(100vh - 24px); overflow-y: auto; scrollbar-width: thin;
+        box-sizing: border-box; max-height: 100%; overflow-y: auto; scrollbar-width: thin;
       }
       #info .info-main { display: flex; gap: 12px; align-items: flex-start; flex: none; }
       #info-neighbors {
-        contain: inline-size; min-width: 320px; flex: 0 1 auto; min-height: 140px; /* 見出し・要約・一覧の最小の高さ・一言が重ならない下限 */ display: flex; flex-direction: column;
+        contain: inline-size; min-width: min(320px, calc(100vw - 52px)); flex: 0 1 auto; min-height: 140px; /* 見出し・要約・一覧の最小の高さ・一言が重ならない下限 */ display: flex; flex-direction: column;
         border-top: 1px solid rgba(79, 216, 255, 0.35); padding-top: 6px; font-size: 11px; line-height: 1.4;
       }
       #info-neighbors[hidden] { display: none; }
@@ -154,10 +154,10 @@
       #minimap .mm-gauge-label { fill: #8a93a6; font: 9px/1 sans-serif; text-anchor: middle; pointer-events: none; }
       #minimap.outside .mm-fan { stroke-dasharray: 3 2; }
       #minimap .mm-outside-text { fill: #fff; font: 600 10px/1 sans-serif; paint-order: stroke; stroke: #07080c; stroke-width: 3px; pointer-events: none; }
-      /* データセットの選択欄（左上） */
+      /* データセットの選択欄（右上の列の先頭） */
       #dataset-switcher {
-        position: fixed; left: 12px; top: 10px; z-index: 2;
-        display: flex; align-items: center; gap: 8px; flex-wrap: wrap; max-width: calc(100vw - 24px);
+        position: relative; flex: none; box-sizing: border-box;
+        display: flex; align-items: center; justify-content: flex-end; gap: 4px 8px; flex-wrap: wrap; max-width: 100%;
         padding: 5px 10px; border-radius: 6px; background: rgba(7, 8, 12, 0.82);
         font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #b4bccb;
       }
@@ -181,10 +181,10 @@
       #umap-open:focus-visible { outline: 2px solid #ffc233; outline-offset: 1px; }
       #umap-open[aria-expanded="true"] { border-color: #ffc233; }
       #umap-open:disabled { opacity: 0.6; cursor: default; }
-      /* UMAP の再計算のパネル（左上、選択欄の下）。src/app/umapPanel.ts */
+      /* UMAP の再計算のパネル（右上の列、選択欄の下）。src/app/umapPanel.ts */
       #umap-panel {
-        position: fixed; left: 12px; top: 50px; z-index: 2; width: 300px; max-width: calc(100vw - 48px);
-        max-height: calc(100vh - 70px); overflow: auto; box-sizing: border-box;
+        position: relative; width: 300px; max-width: 100%; flex: none;
+        max-height: 100%; overflow: auto; box-sizing: border-box; scrollbar-width: thin;
         padding: 10px 12px; border-radius: 8px; border: 1px solid rgba(180, 188, 203, 0.45);
         background: rgba(7, 8, 12, 0.94); color: #d6dce8;
         font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -224,6 +224,78 @@
       #umap-cache button { width: 100%; text-align: left; }
       #umap-cache button[aria-current="true"] { border-color: #ffc233; opacity: 1; }
       #umap-panel .umap-note { margin: 8px 0 0; color: #8a93a6; font-size: 11px; }
+      /* ---- 画面の上部（src/app/topLayout.ts）。左上に作品タイトルとカメラのモード、右上に選択欄・UMAP のパネル・情報パネル ----
+         #top-bar の高さは、右上の列が下の UI（HUD・現在地・ミニマップ）に重ならないように、毎フレーム決め直す（--top-bar-height） */
+      #top-bar {
+        position: fixed; left: 12px; right: 12px; top: 10px; z-index: 2;
+        height: var(--top-bar-height, calc(100vh - 20px)); box-sizing: border-box;
+        display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); gap: 8px 12px;
+        align-items: start; pointer-events: none;
+      }
+      #top-right {
+        grid-column: 2; height: 100%; min-height: 0; min-width: 0;
+        display: flex; flex-direction: column; align-items: flex-end; gap: 8px; pointer-events: none;
+      }
+      #top-panels {
+        flex: 0 1 auto; min-height: 0; max-width: 100%; display: flex; flex-direction: row; align-items: flex-start; justify-content: flex-end;
+        gap: 8px; pointer-events: none;
+      }
+      #top-right > *, #top-panels > * { pointer-events: auto; }
+      /* 横に並べる余裕のない画面では、UMAP のパネルと情報パネルを縦に並べ、それぞれの中でスクロールする */
+      @media (max-width: 1179px) {
+        #top-panels { flex-direction: column; align-items: flex-end; overflow-y: auto; scrollbar-width: thin; }
+        #top-panels > #umap-panel, #top-panels > #info { flex: 0 1 auto; max-height: none; }
+        #top-panels > #umap-panel { min-height: min(120px, 100%); }
+        #top-panels > #info { min-height: min(150px, 100%); }
+      }
+      /* 幅の狭い画面では、タイトルとモードの下に右上の列を置く */
+      @media (max-width: 719px) {
+        #top-bar { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+        #title-mode { grid-row: 1; justify-self: start; }
+        #top-right { grid-column: 1; grid-row: 2; }
+        /* 選択欄の行を 2 行に詰める（選択欄と再計算のボタン／埋め込みの状態）。「データ」の文字は読み上げにだけ残す */
+        #dataset-switcher > label[for="dataset-select"] {
+          position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0;
+          overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
+        }
+        #dataset-select { min-width: 0; max-width: calc(100% - 130px); }
+        #embedding-status { order: 3; flex-basis: 100%; text-align: right; font-size: 11px; line-height: 1.35; }
+        #dataset-status { order: 4; flex-basis: 100%; text-align: right; }
+        #top-panels > #umap-panel { min-height: min(92px, 100%); }
+        #top-panels > #info { min-height: min(106px, 100%); }
+      }
+      #title-mode {
+        grid-column: 1; grid-row: 1; pointer-events: auto; max-width: 100%; box-sizing: border-box;
+        padding: 6px 10px 7px; border-radius: 6px; background: rgba(7, 8, 12, 0.82);
+        font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #b4bccb;
+        text-shadow: 0 0 4px #000;
+      }
+      #app-title { margin: 0 0 5px; font-size: 15px; line-height: 1.2; font-weight: 700; color: #f2f5fa; letter-spacing: 0.02em; white-space: nowrap; }
+      #title-mode .mode-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+      #mode-switch { display: inline-flex; border: 1px solid rgba(180, 188, 203, 0.35); border-radius: 5px; overflow: hidden; }
+      #mode-switch .mode-option {
+        display: flex; flex-direction: column; align-items: flex-start; gap: 1px; margin: 0; cursor: pointer;
+        padding: 3px 9px 2px; border: 0; border-bottom: 2px solid transparent; border-radius: 0;
+        background: transparent; color: #7d8598; text-align: left;
+        font: inherit; transition: color 0.25s ease, background-color 0.25s ease, border-color 0.25s ease;
+      }
+      #mode-switch .mode-option + .mode-option { border-left: 1px solid rgba(180, 188, 203, 0.35); }
+      #mode-switch .mode-option:hover { color: #c9d0dd; background: rgba(255, 255, 255, 0.05); }
+      #mode-switch .mode-option[aria-checked="true"] { color: #ffc233; background: rgba(255, 194, 51, 0.13); border-bottom-color: #ffc233; cursor: default; }
+      #mode-switch .mode-option:focus { outline: none; }
+      #mode-switch .mode-option:focus-visible { outline: 2px solid #ffc233; outline-offset: -2px; }
+      #mode-switch .mode-name { font-size: 14px; font-weight: 700; line-height: 1.25; }
+      #mode-switch .mode-desc { font-size: 10px; line-height: 1.3; white-space: nowrap; }
+      #mode-switch .mode-option[aria-checked="false"] .mode-desc { color: #6b7385; }
+      #mode-switch .mode-option[aria-checked="true"] .mode-desc { color: #e8d9a8; }
+      #title-mode .mode-key { color: #8a93a6; font-size: 11px; white-space: nowrap; }
+      #title-mode kbd {
+        display: inline-block; min-width: 1.3em; padding: 0 4px; margin-right: 3px; text-align: center; box-sizing: border-box;
+        border: 1px solid rgba(180, 188, 203, 0.55); border-bottom-width: 2px; border-radius: 3px; color: #e8ecf4; font: inherit; line-height: 1.35;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #mode-switch .mode-option { transition: none; }
+      }
       #hover-label {
         position: fixed; left: 0; top: 0; z-index: 3; pointer-events: none;
         padding: 1px 7px; border-radius: 4px; border: 1px solid #f2f5fa;
@@ -235,70 +307,89 @@
   <body>
     <div id="app"></div>
     <div id="hud">読み込み中…</div>
-    <div id="dataset-switcher" hidden>
-      <label for="dataset-select">データ</label>
-      <select id="dataset-select"></select>
-      <span id="dataset-status" role="status" aria-live="polite" hidden></span>
-      <span id="embedding-status">埋め込み: 事前計算</span>
-      <button id="umap-open" type="button" aria-controls="umap-panel" aria-expanded="false" title="UMAP の再計算（U）" disabled>UMAP 再計算 (U)</button>
-    </div>
-    <section id="umap-panel" role="region" aria-labelledby="umap-heading" tabindex="-1" hidden>
-      <h2 id="umap-heading">UMAP の再計算</h2>
-      <p id="umap-current"></p>
-      <form id="umap-form" novalidate>
-        <label for="umap-nn">近傍数</label>
-        <input id="umap-nn" type="number" inputmode="numeric" step="1" />
-        <label for="umap-md">min_dist</label>
-        <input id="umap-md" type="number" inputmode="decimal" />
-        <label for="umap-seed">乱数の種</label>
-        <input id="umap-seed" type="number" inputmode="numeric" step="1" />
-        <label class="umap-check"><input id="umap-preview" type="checkbox" /> 計算の途中を表示する</label>
-        <div class="umap-buttons">
-          <button id="umap-run" type="submit">計算</button>
-          <button id="umap-cancel" type="button" hidden>中断</button>
-          <button id="umap-revert" type="button">事前計算に戻す</button>
-        </div>
-      </form>
-      <div id="umap-progress" hidden>
-        <progress id="umap-progress-bar" max="200" value="0"></progress>
-        <span id="umap-progress-text" role="status" aria-live="polite"></span>
-      </div>
-      <p id="umap-message" role="status" aria-live="polite" hidden></p>
-      <div id="umap-cache" hidden>
-        <h3>保持している結果</h3>
-        <ul id="umap-cache-list"></ul>
-      </div>
-      <p class="umap-note">点の配置は、近傍数・min_dist・乱数の種で変わります。塊の中の並びは元のデータの近さを反映しますが、遠く離れた塊どうしの位置関係や距離は当てにしないでください。</p>
-      <button id="umap-close" type="button" aria-label="UMAP の再計算のパネルを閉じる"><span aria-hidden="true">×</span></button>
-    </section>
     <div id="cluster-location" hidden></div>
-    <div id="info-live" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
-    <section id="info" role="region" aria-labelledby="info-heading" hidden>
-      <h2 id="info-heading" class="sr-only">選択中の点</h2>
-      <div class="info-main">
-      <canvas id="info-image" width="112" height="112" role="img" aria-label="手書きの数字の画像"></canvas>
-      <div>
-        <div class="info-label"><span id="info-swatch" aria-hidden="true"></span><span id="info-label"></span></div>
-        <dl>
-          <dt>番号</dt><dd id="info-index"></dd>
-          <dt>クラスタ</dt><dd id="info-cluster"></dd>
-        </dl>
-        <div class="info-hint">ダブルクリックで近づく<br />Esc で選択を解除</div>
-      </div>
-      </div>
-      <button id="info-close" type="button" aria-label="選択を解除"><span aria-hidden="true">×</span></button>
-      <!-- 元のデータで近い点（src/neighbors/）。Tab の順で閉じるボタンのあと -->
-      <section id="info-neighbors" aria-labelledby="info-neighbors-heading" hidden>
-        <div class="nb-head">
-          <h3 id="info-neighbors-heading">元のデータで近い点</h3>
-          <span class="nb-legend" aria-hidden="true">●地図で近い点にも入っている ○入っていない</span>
-          <button id="info-back" type="button" hidden>← 前の点</button>
+    <!-- 画面の上部。左上に作品タイトルとカメラのモード、右上にデータセットの選択欄・UMAP の再計算のパネル・情報パネル（src/app/topLayout.ts） -->
+    <div id="top-bar">
+      <header id="title-mode">
+        <h1 id="app-title">3D UMAP Explorer</h1>
+        <div class="mode-row">
+          <!-- カメラのモードの 2 択（src/app/modeSwitch.ts）。O キーでも切り替わる -->
+          <div id="mode-switch" role="radiogroup" aria-label="カメラのモード" aria-describedby="mode-key-hint">
+            <button type="button" role="radio" class="mode-option" data-mode="overview" aria-checked="false"><span class="mode-name">俯瞰</span><span class="mode-desc">外から回して眺める</span></button>
+            <button type="button" role="radio" class="mode-option" data-mode="fly" aria-checked="true"><span class="mode-name">飛行</span><span class="mode-desc">中へ入って飛ぶ</span></button>
+          </div>
+          <span id="mode-key-hint" class="mode-key"><kbd>O</kbd>で切り替え</span>
         </div>
-        <p id="info-neighbors-summary"></p>
-        <ol id="info-neighbors-list" aria-label="元のデータで近い順"></ol>
-        <p id="info-neighbors-hint"></p>
-      </section>
-    </section>
+        <div id="mode-live" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
+      </header>
+      <div id="top-right">
+        <div id="dataset-switcher" hidden>
+          <label for="dataset-select">データ</label>
+          <select id="dataset-select"></select>
+          <span id="dataset-status" role="status" aria-live="polite" hidden></span>
+          <span id="embedding-status">埋め込み: 事前計算</span>
+          <button id="umap-open" type="button" aria-controls="umap-panel" aria-expanded="false" title="UMAP の再計算（U）" disabled>UMAP 再計算 (U)</button>
+        </div>
+        <div id="top-panels">
+          <section id="umap-panel" role="region" aria-labelledby="umap-heading" tabindex="-1" hidden>
+            <h2 id="umap-heading">UMAP の再計算</h2>
+            <p id="umap-current"></p>
+            <form id="umap-form" novalidate>
+              <label for="umap-nn">近傍数</label>
+              <input id="umap-nn" type="number" inputmode="numeric" step="1" />
+              <label for="umap-md">min_dist</label>
+              <input id="umap-md" type="number" inputmode="decimal" />
+              <label for="umap-seed">乱数の種</label>
+              <input id="umap-seed" type="number" inputmode="numeric" step="1" />
+              <label class="umap-check"><input id="umap-preview" type="checkbox" /> 計算の途中を表示する</label>
+              <div class="umap-buttons">
+                <button id="umap-run" type="submit">計算</button>
+                <button id="umap-cancel" type="button" hidden>中断</button>
+                <button id="umap-revert" type="button">事前計算に戻す</button>
+              </div>
+            </form>
+            <div id="umap-progress" hidden>
+              <progress id="umap-progress-bar" max="200" value="0"></progress>
+              <span id="umap-progress-text" role="status" aria-live="polite"></span>
+            </div>
+            <p id="umap-message" role="status" aria-live="polite" hidden></p>
+            <div id="umap-cache" hidden>
+              <h3>保持している結果</h3>
+              <ul id="umap-cache-list"></ul>
+            </div>
+            <p class="umap-note">点の配置は、近傍数・min_dist・乱数の種で変わります。塊の中の並びは元のデータの近さを反映しますが、遠く離れた塊どうしの位置関係や距離は当てにしないでください。</p>
+            <button id="umap-close" type="button" aria-label="UMAP の再計算のパネルを閉じる"><span aria-hidden="true">×</span></button>
+          </section>
+          <section id="info" role="region" aria-labelledby="info-heading" hidden>
+            <h2 id="info-heading" class="sr-only">選択中の点</h2>
+            <div class="info-main">
+            <canvas id="info-image" width="112" height="112" role="img" aria-label="手書きの数字の画像"></canvas>
+            <div>
+              <div class="info-label"><span id="info-swatch" aria-hidden="true"></span><span id="info-label"></span></div>
+              <dl>
+                <dt>番号</dt><dd id="info-index"></dd>
+                <dt>クラスタ</dt><dd id="info-cluster"></dd>
+              </dl>
+              <div class="info-hint">ダブルクリックで近づく<br />Esc で選択を解除</div>
+            </div>
+            </div>
+            <button id="info-close" type="button" aria-label="選択を解除"><span aria-hidden="true">×</span></button>
+            <!-- 元のデータで近い点（src/neighbors/）。Tab の順で閉じるボタンのあと -->
+            <section id="info-neighbors" aria-labelledby="info-neighbors-heading" hidden>
+              <div class="nb-head">
+                <h3 id="info-neighbors-heading">元のデータで近い点</h3>
+                <span class="nb-legend" aria-hidden="true">●地図で近い点にも入っている ○入っていない</span>
+                <button id="info-back" type="button" hidden>← 前の点</button>
+              </div>
+              <p id="info-neighbors-summary"></p>
+              <ol id="info-neighbors-list" aria-label="元のデータで近い順"></ol>
+              <p id="info-neighbors-hint"></p>
+            </section>
+          </section>
+        </div>
+      </div>
+    </div>
+    <div id="info-live" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
     <div id="info-neighbors-live" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
     <!-- 画面の外やカメラの後ろにある、元のデータで近い点の方向を示す印（src/neighbors/）。操作は受けない -->
     <div id="neighbor-edges" aria-hidden="true"></div>
