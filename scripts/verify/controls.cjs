@@ -265,6 +265,76 @@ async function testWheel(page) {
   check('HUD の飛行速度が下がった値に更新される', hud2.includes(`飛行速度 ${s2.toPrecision(3)}`), JSON.stringify(hud2.split('\n')[1]));
 }
 
+/** 俯瞰モードで、距離が目標へ寄り終える（寄っている途中でなくなる）まで 1 フレームずつ進める。 */
+const settleZoom = (page, maxSimSeconds = 4) => sampleUntil(page, (s) => s.overview && !s.overview.zooming, maxSimSeconds);
+
+/** 描画の中央のキャンバスへ、ピンチ（ctrlKey つきのホイール）を 1 回送る。ページのズームを止めたか（defaultPrevented）を返す。 */
+const pinch = (page, deltaY) => page.evaluate((dy) => {
+  const el = document.querySelector('#app canvas');
+  const e = new WheelEvent('wheel', { deltaY: dy, deltaMode: 0, ctrlKey: true, bubbles: true, cancelable: true, clientX: 640, clientY: 400 });
+  el.dispatchEvent(e);
+  return e.defaultPrevented;
+}, deltaY);
+
+const dist = (s) => len(sub(s.position, s.pivot));
+
+/**
+ * 俯瞰モードのホイールとピンチ。ホイールは目標の距離だけを動かし、実際の距離は複数のフレームにわたって単調に目標へ寄る。
+ * 最終的な倍率は 1 ノッチ 1.15 倍（寄る向きは 1/1.15 倍）のまま。待ちは模擬の時間で数える（`settleZoom`）。
+ */
+async function testOverviewZoom(page, o1, speedBefore, dist0) {
+  await page.mouse.wheel(0, 100);
+  const out = await settleZoom(page);
+  const outD = out.map(dist);
+  const first = out[0].overview;
+  const lastS = out[out.length - 1];
+  check('俯瞰モードのホイールは飛行速度を変えず、中心からの距離を変える（下へ回すと離れる）', lastS.speed === speedBefore && dist(lastS) > dist0 + 0.01,
+    `距離 ${dist0.toFixed(3)} → ${dist(lastS).toFixed(3)}`);
+  check('ホイールで目標の距離が決まり（1.15 倍）、そこへ寄る', Math.abs(first.targetDistance / dist0 - 1.15) < 1e-6 && !out.timedOut,
+    `目標 ${first.targetDistance.toFixed(4)}（${(first.targetDistance / dist0).toFixed(4)} 倍）、${out.length} フレームで寄り終えた`);
+  const moves = outD.slice(1).map((d, i) => d - outD[i]);
+  const changedFrames = outD.filter((d, i) => d !== (i ? outD[i - 1] : dist0)).length;
+  check('距離は 1 度に跳ばず、複数のフレームにわたって単調に目標へ寄る', changedFrames >= 3 && moves.every((m) => m >= -1e-9) && outD.every((d) => d <= first.targetDistance + 1e-9),
+    `距離が変わったフレーム ${changedFrames}、各フレームの距離 ${outD.map((d) => d.toFixed(3)).join(' → ')}`);
+  check('寄り終えたら目標に一致して止まる（寄っている途中でなく、目標と実際の距離が同じ）', !lastS.overview.zooming && lastS.overview.distance === lastS.overview.targetDistance && Math.abs(dist(lastS) / dist0 - 1.15) < 1e-6,
+    `倍率 ${(dist(lastS) / dist0).toFixed(6)}`);
+  const stay = await sampleFrames(page, () => false, 3);
+  check('止まったあとは、カメラが動かない', stay.every((s) => maxAbsDiff(s.position, lastS.position) === 0 && !s.overview.zooming));
+
+  await page.mouse.wheel(0, -100);
+  const back = await settleZoom(page);
+  const backS = back[back.length - 1];
+  check('上へ回すと近づき、もとの距離へ戻る（1/1.15 倍）', !back.timedOut && Math.abs(dist(backS) / dist(lastS) - 1 / 1.15) < 1e-6 && Math.abs(dist(backS) / dist0 - 1) < 1e-6,
+    `距離 ${dist(lastS).toFixed(4)} → ${dist(backS).toFixed(4)}`);
+
+  // ピンチ（ctrlKey つきのホイール）: factor = exp(deltaY × 0.01)。広げる（負）と近づく
+  const prevented = await pinch(page, -50);
+  const pin = await settleZoom(page);
+  const pinS = pin[pin.length - 1];
+  check('ピンチ（ctrlKey つきのホイール）で距離が変わる（広げると近づく）。ページのズームは止める', prevented === true && !pin.timedOut && Math.abs(dist(pinS) / dist(backS) - Math.exp(-0.5)) < 1e-6,
+    `倍率 ${(dist(pinS) / dist(backS)).toFixed(4)}（見込み ${Math.exp(-0.5).toFixed(4)}）、${pin.length} フレーム`);
+  const pinD = pin.map(dist);
+  check('ピンチも、複数のフレームにわたって単調に寄る', pinD.filter((d, i) => d !== (i ? pinD[i - 1] : dist(backS))).length >= 3 && pinD.every((d, i) => i === 0 ? d <= dist(backS) + 1e-9 : d <= pinD[i - 1] + 1e-9));
+  await pinch(page, 50);
+  const unpin = await settleZoom(page);
+  check('ピンチで離れると、もとの距離へ戻る', !unpin.timedOut && Math.abs(dist(unpin[unpin.length - 1]) / dist0 - 1) < 1e-6, `距離 ${dist(unpin[unpin.length - 1]).toFixed(4)}（もとは ${dist0.toFixed(4)}）`);
+
+  // 寄っている途中にドラッグで回しても、回転と距離の変化は両立する
+  const cx = width / 2, cy = height / 2;
+  const z0 = await state(page);
+  await page.mouse.wheel(0, -100);
+  await page.mouse.wheel(0, -100);
+  await drag(page, cx, cy, cx + 150, cy - 60);
+  const zs = await settleZoom(page);
+  const z2 = zs[zs.length - 1];
+  const v0 = sub(z0.position, z0.pivot), v2 = sub(z2.position, z2.pivot);
+  check('寄っている途中でドラッグしても、距離は目標（1.15 の 2 乗分の 1 倍）へ寄る', !zs.timedOut && Math.abs(dist(z2) / dist(z0) - 1 / 1.15 ** 2) < 1e-6, `倍率 ${(dist(z2) / dist(z0)).toFixed(6)}（見込み ${(1 / 1.15 ** 2).toFixed(6)}）`);
+  check('寄っている途中でドラッグしても、視点は回る', angleBetween(z0.direction, z2.direction) > 0.3 && angleBetween(v0, v2) > 0.3, `向きの回転 ${angleBetween(z0.direction, z2.direction).toFixed(3)} rad`);
+  await page.mouse.wheel(0, 100);
+  await page.mouse.wheel(0, 100);
+  await settleZoom(page);
+}
+
 async function testModes(page, view, centerOf) {
   console.log('\n[モード切り替え]');
   const cx = width / 2, cy = height / 2;
@@ -290,13 +360,8 @@ async function testModes(page, view, centerOf) {
   check('俯瞰モードでは W を押しても動かない', maxAbsDiff(o0.position, o1.position) < 1e-9);
   await page.mouse.move(cx, cy);
   const speedBefore = o1.speed;
-  await page.mouse.wheel(0, 100);
-  await frames(page, 3);
-  const o2 = await state(page);
-  check('俯瞰モードのホイールは飛行速度を変えず、中心からの距離を変える', o2.speed === speedBefore && len(sub(o2.position, o2.pivot)) > len(sub(o1.position, o1.pivot)) + 0.01,
-    `距離 ${len(sub(o1.position, o1.pivot)).toFixed(3)} → ${len(sub(o2.position, o2.pivot)).toFixed(3)}（下へ回すと離れる）`);
-  await page.mouse.wheel(0, -100);
-  await frames(page, 3);
+  const dist0 = len(sub(o1.position, o1.pivot));
+  await testOverviewZoom(page, o1, speedBefore, dist0);
 
   // ドラッグで点群の中心のまわりを回る
   const d0 = await state(page);
@@ -682,6 +747,18 @@ async function testInertiaReducedMotion(browser, base) {
     check(`「視差効果を減らす」では、${mode === 'fly' ? '飛行' : '俯瞰'}モードでも既定で慣性が付かない（ドラッグの回転だけで、離したあとに回らない）`,
       a.every((s) => !s.rotating) && moved > 0.1 && angleBetween(a[0].direction, a[a.length - 1].direction) < 1e-9, `ドラッグでの回転 ${moved.toFixed(3)} rad`);
   }
+  // 俯瞰モードのホイール・ピンチは、「視差効果を減らす」では寄る途中を作らず、1 度に動く（時定数 0）
+  const z0 = await state(page);
+  await page.mouse.move(cx, cy);
+  await page.mouse.wheel(0, 100);
+  await frames(page, 1);
+  const z1 = await state(page);
+  check('「視差効果を減らす」では、俯瞰モードのホイールで距離が 1 度に動く（寄っている途中が出ない）',
+    z1.mode === 'overview' && !z1.overview.zooming && Math.abs(dist(z1) / dist(z0) - 1.15) < 1e-6, `倍率 ${(dist(z1) / dist(z0)).toFixed(6)}`);
+  await pinch(page, -50);
+  await frames(page, 1);
+  const z2 = await state(page);
+  check('「視差効果を減らす」では、俯瞰モードのピンチでも距離が 1 度に動く', !z2.overview.zooming && Math.abs(dist(z2) / dist(z1) - Math.exp(-0.5)) < 1e-6, `倍率 ${(dist(z2) / dist(z1)).toFixed(6)}`);
   await page.close();
 }
 
