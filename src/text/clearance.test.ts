@@ -38,6 +38,10 @@ describe('pointsNearRects（単語の矩形の近くの丸い点）', () => {
   it('単語がなければ何も選ばない', () => {
     expect(pointsNearRects(candidates, positions, view, [], DOT_CLEARANCE_MARGIN_PX, new Set()).size).toBe(0);
   });
+  it('候補に null を渡すと全点から選ぶ', () => {
+    const got = pointsNearRects(null, positions, view, [rect], DOT_CLEARANCE_MARGIN_PX, new Set());
+    expect([...got].sort()).toEqual([0, 1, 2]);
+  });
   it('複数の矩形のどれかに入れば選ぶ', () => {
     const got = pointsNearRects(candidates, positions, view, [rect, { x: 500, y: 300, width: 10, height: 10 }], 0, new Set());
     expect([...got].sort()).toEqual([0, 1, 4]);

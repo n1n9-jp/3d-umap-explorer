@@ -13,10 +13,12 @@ export const DOT_CLEARANCE_SCALE = 0.4;
 export const DOT_CLEARANCE_MARGIN_PX = 4;
 
 /**
- * `candidates`（点の番号）のうち、画面へ投影した中心が、いずれかの矩形を `marginPx` 広げた範囲に入るものの番号。
+ * `candidates`（点の番号。null なら全点）のうち、画面へ投影した中心が、いずれかの矩形を `marginPx` 広げた範囲に入るものの番号。
  * `exclude`（文字を出している点）は除く。
+ * 丸い点は、カメラから離れていても半径の上限の大きさで描かれる（word2vec では距離 0.67 まで直径 10px）ので、
+ * 文字の候補（カメラに近い点）だけでなく全点を見る。投影は 1 点あたり数十回の演算で、1 万点でも 1 ミリ秒ほど。
  */
-export function pointsNearRects(candidates: ArrayLike<number>, positions: ArrayLike<number>, view: SelectView,
+export function pointsNearRects(candidates: ArrayLike<number> | null, positions: ArrayLike<number>, view: SelectView,
   rects: readonly ScreenRect[], marginPx: number, exclude: ReadonlySet<number>): Set<number> {
   const out = new Set<number>();
   if (!rects.length) return out;
@@ -26,8 +28,9 @@ export function pointsNearRects(candidates: ArrayLike<number>, positions: ArrayL
     minX = Math.min(minX, r.x - r.width / 2); maxX = Math.max(maxX, r.x + r.width / 2);
     minY = Math.min(minY, r.y - r.height / 2); maxY = Math.max(maxY, r.y + r.height / 2);
   }
-  for (let k = 0; k < candidates.length; k++) {
-    const i = candidates[k]!;
+  const n = candidates ? candidates.length : Math.floor(positions.length / 3);
+  for (let k = 0; k < n; k++) {
+    const i = candidates ? candidates[k]! : k;
     if (exclude.has(i)) continue;
     const q = projectPoint(view, positions[3 * i]!, positions[3 * i + 1]!, positions[3 * i + 2]!);
     if (!q) continue;

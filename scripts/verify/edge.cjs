@@ -17,7 +17,9 @@
  *   - ホームの視点で、目印の数が変更前（HOME_LABELS_BEFORE）と同じ
  *   - word2vec の縁の視点で、単語が出ている（12px 以上の単語が 15 語以上）
  *   - 縁の視点の小さな点（直径が最小サイズに近い点）でも、点の中心から 4 CSS ピクセルずらした位置のホバーで、その点が選ばれる（吸着）
+ *   - word2vec の少し外・縁・内部で、単語の矩形の近くに中心がある丸い点の直径が NEAR_WORD_DOT_MAX 以下（文字の周りの点を小さくする）
  *   - 表示中の目印の矩形と単語の矩形が重ならない
+ *   - 目印の数の上限が切り替わる境目で、カメラを小さく往復させても、目印の表示が切り替わり続けない
  *   - コンソールエラーがない
  */
 const { execSync } = require('node:child_process');
@@ -40,6 +42,9 @@ const DOT_TO_TEXT_MAX = 1.0;
 const NEAR_LABEL_LIMIT = 3;
 /** 変更前（63fa2d5）のホームの視点での目印の数（1280×800） */
 const HOME_LABELS_BEFORE = { 'word2vec-10k': 10, mnist: 10 };
+/** 単語の矩形の近くの丸い点（src/text/clearance.ts の DOT_CLEARANCE_MARGIN_PX・DOT_CLEARANCE_SCALE と同じ値）。直径の上限は 10 × 0.4 */
+const CLEAR_MARGIN_PX = 4;
+const NEAR_WORD_DOT_MAX = 4;
 /** 吸着の確認で、点の中心からずらす距離（CSS ピクセル。吸着の半径 7 より小さい） */
 const SNAP_OFFSET_PX = 4;
 
@@ -86,7 +91,7 @@ async function waitSettled(page, maxFrames = 60) {
 
 /* eslint-disable no-undef */
 /** ページの中で、見えている丸い点の直径・単語・目印を測る。 */
-async function measure(SNAP) {
+async function measure([SNAP, CLEAR_MARGIN]) {
   const ex = window.__explorer, dbg = ex.picking;
   const img = await dbg.readIdImage();
   const { width: W, height: H, ids } = img;
@@ -108,7 +113,8 @@ async function measure(SNAP) {
       }
     }
   }
-  let maxDiameter = 0, maxMeasured = 0, minDiameter = Infinity;
+  let maxDiameter = 0, maxMeasured = 0, minDiameter = Infinity, maxNearWords = 0, nearWords = 0;
+  const rects = ws ? ws.shown.map((w) => w.rect) : [];
   let smallest = null;
   for (const [id, ext] of extent) {
     const q = dbg.project(id);
@@ -118,6 +124,11 @@ async function measure(SNAP) {
     maxDiameter = Math.max(maxDiameter, d);
     minDiameter = Math.min(minDiameter, d);
     maxMeasured = Math.max(maxMeasured, ext / scale);
+    // 単語の矩形の近く（矩形を CLEAR_MARGIN 広げた範囲）に中心がある点
+    if (rects.some((r) => Math.abs(q.clientX - r.x) <= r.width / 2 + CLEAR_MARGIN && Math.abs(q.clientY - r.y) <= r.height / 2 + CLEAR_MARGIN)) {
+      nearWords++;
+      maxNearWords = Math.max(maxNearWords, d);
+    }
     // 吸着の確認に使う、小さく、隣の点から離れた点（上下左右 SNAP + 3 ピクセルに別の点がない）
     if (!smallest || d < smallest.d) {
       const cx = Math.round(q.clientX * scale), cy = Math.round(q.clientY * scale);
@@ -142,7 +153,7 @@ async function measure(SNAP) {
   }
   const textPx = ws ? ws.shown.map((w) => w.textPx) : [];
   return {
-    dots: { visible: extent.size, maxDiameter, minDiameter: extent.size ? minDiameter : 0, maxMeasured, cap: 2 * p.dotRadius[1] },
+    dots: { visible: extent.size, nearWords, maxNearWords, maxDiameter, minDiameter: extent.size ? minDiameter : 0, maxMeasured, cap: 2 * p.dotRadius[1] },
     words: { shown: textPx.length, minTextPx: textPx.length ? Math.min(...textPx) : null, maxTextPx: textPx.length ? Math.max(...textPx) : null, readable: textPx.filter((t) => t >= 12 - 1e-6).length },
     labels: { visible: visibleLabels.length, names: visibleLabels.map((l) => l.name), reasons: ls.labels.reduce((m, l) => { if (l.reason) m[l.reason] = (m[l.reason] ?? 0) + 1; return m; }, {}) },
     location: { kind: ls.location.kind, text: ls.location.text, shown: !document.getElementById('cluster-location').hidden },
@@ -185,9 +196,10 @@ async function runDataset(browser, base, id, dir) {
     await page.mouse.move(2, 2); // ホバーの輪を出さない
     await frames(page, 2);
     await page.screenshot({ path: path.join(outDir, `${id}-${v.name}.png`) });
-    const m = await page.evaluate(measure, SNAP_OFFSET_PX);
+    const m = await page.evaluate(measure, [SNAP_OFFSET_PX, CLEAR_MARGIN_PX]);
     out[v.name] = m;
     console.log(`  ${v.label}: 丸い点 ${m.dots.visible} 個・直径の最大 ${m.dots.maxDiameter.toFixed(1)}px（実測 ${m.dots.maxMeasured.toFixed(1)}px、上限 ${m.dots.cap}px）`
+      + ` / 単語の近くの点 ${m.dots.nearWords} 個・直径の最大 ${m.dots.maxNearWords.toFixed(1)}px`
       + ` / 単語 ${m.words.shown} 語（12px 以上 ${m.words.readable}、文字の高さ ${m.words.minTextPx?.toFixed(1) ?? '-'}〜${m.words.maxTextPx?.toFixed(1) ?? '-'}px）`
       + ` / 目印 ${m.labels.visible} 個 ${JSON.stringify(m.labels.reasons)} / 現在地 ${m.location.shown ? m.location.text : '（なし）'}`);
   }
@@ -195,7 +207,7 @@ async function runDataset(browser, base, id, dir) {
   const edge = list.find((v) => v.name === 'edge');
   await setView(page, edge);
   await waitSettled(page);
-  const m = await page.evaluate(measure, SNAP_OFFSET_PX);
+  const m = await page.evaluate(measure, [SNAP_OFFSET_PX, CLEAR_MARGIN_PX]);
   let snap = null;
   if (m.smallest) {
     const t = m.smallest;
@@ -209,8 +221,53 @@ async function runDataset(browser, base, id, dir) {
     await page.mouse.move(2, 2);
   }
   out.snap = snap;
+  out.boundary = await budgetBoundary(page, edge);
   await page.close();
   return out;
+}
+
+const labelInfo = (page) => page.evaluate(() => {
+  const l = window.__explorer.labels.getState();
+  return { budget: l.budget, proximity: l.proximity, key: l.labels.filter((s) => s.visible).map((s) => s.id).join(',') };
+});
+
+/**
+ * 目印の数の上限が切り替わる境目（縁の視点から同じ向きに離れていく途中）を探し、その前後でカメラを小さく往復させて、
+ * 目印の表示が切り替わり続けないかを数える。
+ */
+async function budgetBoundary(page, edge) {
+  const out = norm(sub(edge.pos, edge.look));
+  const r0 = len(sub(edge.pos, edge.look));
+  const at = (s) => ({ pos: add(edge.look, mul(out, s)), look: edge.look });
+  const go = async (s) => { await setView(page, at(s)); await waitStill(page); await frames(page, 2); return labelInfo(page); };
+  // 上限が変わる 2 点を、0.02 刻みで探す
+  let prevS = r0, prev = await go(r0), found = null;
+  for (let s = r0 + 0.02; s < r0 + 1.0; s += 0.02) {
+    const cur = await go(s);
+    if (cur.budget !== prev.budget) { found = [prevS, s]; break; }
+    prevS = s; prev = cur;
+  }
+  if (!found) return null;
+  // 二分探索で境目を 0.001 まで詰める（近い側から近づける）
+  let [lo, hi] = found;
+  const loBudget = (await go(lo)).budget;
+  while (hi - lo > 0.001) {
+    const mid = (lo + hi) / 2;
+    await go(lo); // 近い側の状態から動かす
+    if ((await go(mid)).budget === loBudget) lo = mid; else hi = mid;
+  }
+  // 境目をまたいで ±0.002 往復する
+  const d = 0.002;
+  await go(hi + d);
+  let last = (await go(hi + d)).key, toggles = 0;
+  const budgets = new Set();
+  for (let k = 0; k < 16; k++) {
+    const info = await go(k % 2 === 0 ? hi - d : hi + d);
+    budgets.add(info.budget);
+    if (info.key !== last) toggles++;
+    last = info.key;
+  }
+  return { distance: hi, from: loBudget, toggles, budgets: [...budgets] };
 }
 
 async function main() {
@@ -243,6 +300,11 @@ async function main() {
         limit !== null && r.dots.maxDiameter <= limit + 1e-6 && r.dots.maxMeasured <= limit + 1.5,
         `直径の最大 ${r.dots.maxDiameter.toFixed(1)}px（実測 ${r.dots.maxMeasured.toFixed(1)}px）、文字の高さの最小 ${r.words.minTextPx?.toFixed(1) ?? '-'}px`);
     }
+    for (const name of ['near', 'edge', 'inside']) {
+      const r = w[name];
+      check(`word2vec ${name}: 単語の矩形の近くの丸い点は小さい（直径 ${NEAR_WORD_DOT_MAX}px 以下）`, r.dots.maxNearWords <= NEAR_WORD_DOT_MAX + 1e-3,
+        `${r.dots.nearWords} 個、直径の最大 ${r.dots.maxNearWords.toFixed(1)}px`);
+    }
     check('word2vec inside: 近い点ほど大きい（直径の最大値が最小サイズの 2 倍以上）', w.inside.dots.maxDiameter >= 2 * w.inside.dots.minDiameter,
       `${w.inside.dots.minDiameter.toFixed(1)}〜${w.inside.dots.maxDiameter.toFixed(1)}px`);
     check(`word2vec edge: 読める大きさ（12px 以上）の単語が 15 語以上出ている`, w.edge.words.readable >= 15, `${w.edge.words.readable} 語`);
@@ -253,6 +315,8 @@ async function main() {
       check(`${id} home: 目印の数が変更前と同じ（${HOME_LABELS_BEFORE[id]} 個）`, r.home.labels.visible === HOME_LABELS_BEFORE[id], `${r.home.labels.visible} 個`);
       check(`${id}: 表示中の目印の矩形と単語の矩形が重ならない（全視点）`, ['home', 'near', 'edge', 'inside', 'deep'].every((k) => r[k].overlaps === 0),
         ['home', 'near', 'edge', 'inside', 'deep'].map((k) => r[k].overlaps).join(','));
+      check(`${id}: 目印の数の上限の境目（クラスタの中心から ${r.boundary?.distance.toFixed(3) ?? '-'}）で、カメラを小さく往復させても目印の表示が切り替わり続けない`,
+        r.boundary && r.boundary.toggles === 0, JSON.stringify(r.boundary));
       check(`${id} edge: 小さな点（直径 ${r.snap?.d.toFixed(1) ?? '-'}px）でも、中心から ${SNAP_OFFSET_PX}px ずらしたホバーで選ばれる（吸着）`,
         r.snap && r.snap.hovered === r.snap.id, JSON.stringify(r.snap));
     }

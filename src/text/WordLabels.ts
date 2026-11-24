@@ -351,9 +351,9 @@ export class WordLabels {
     });
     this.shown = res.words;
     this.shownSet = new Set(res.words.map((w) => w.index));
-    // 単語の矩形の近くの丸い点を小さくする（近くの点だけが大きく描かれるので、候補の範囲で足りる）
+    // 単語の矩形の近くの丸い点を小さくする（離れた点も上限の大きさで描かれるので、全点から選ぶ）
     this.clearTargets = this.deps.cloud.dotScales
-      ? pointsNearRects(candidates, this.deps.positions, view, res.words.map((w) => w.rect), DOT_CLEARANCE_MARGIN_PX, this.shownSet)
+      ? pointsNearRects(null, this.deps.positions, view, res.words.map((w) => w.rect), DOT_CLEARANCE_MARGIN_PX, this.shownSet)
       : new Set();
     this.dirtyLayout = true;
     const ms = performance.now() - t0;
