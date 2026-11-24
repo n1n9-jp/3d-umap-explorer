@@ -814,7 +814,9 @@ async function checkFlyEasing(page, p, title, { radius, reduced = false }) {
   // 動き始めが緩やか: 最初のフレームの移動量が、全体の距離に対して小さい
   const first = flights[0];
   const firstFrac = frac(first.p);
-  check(`${title}: 動き始めが緩やか（最初のフレームの移動量が全体の距離の 10% 未満）`, firstFrac < 0.1 && first.flight.progress < 0.2,
+  // 一様な速さなら、移動量は進みと同じ割合になる。動き始めが緩やかなら、それより小さく、全体の 15% 未満（easeOutQuart は進みの約 3 倍の割合で、30% 超）
+  check(`${title}: 動き始めが緩やか（最初のフレームの移動量が、一様な速さの場合より小さく、全体の距離の 15% 未満）`,
+    firstFrac < first.flight.progress && firstFrac < 0.15 && first.flight.progress < 0.25,
     `最初のフレーム: 進み ${first.flight.progress.toFixed(3)}、移動量 ${(firstFrac * 100).toFixed(2)}%（easeOutQuart なら 30% 超）`);
 
   // 終わりの手前でも減速している: 隣り合うフレームの平均の速さ（全体の距離 / 所要時間 の単位）が、終わりへ向けて小さくなる
