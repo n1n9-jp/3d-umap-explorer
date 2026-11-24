@@ -27,12 +27,16 @@ class FakeTarget {
   }
 }
 
-function createRig() {
+function createRig(options: { cloudRadius?: number; reducedMotion?: boolean } = {}) {
   const camera = new PerspectiveCamera(60, 1.6, 0.0005, 12);
-  const win = new FakeTarget();
+  const win = new FakeTarget() as FakeTarget & { matchMedia?: (q: string) => { matches: boolean } };
+  if (options.reducedMotion !== undefined) {
+    const reduced = options.reducedMotion;
+    win.matchMedia = (q: string) => ({ matches: reduced && q.includes('prefers-reduced-motion: reduce') });
+  }
   const el = new FakeTarget();
   el.ownerDocument = { defaultView: win };
-  const rig = new CameraRig(camera, el as unknown as HTMLElement, new Vector3(), {});
+  const rig = new CameraRig(camera, el as unknown as HTMLElement, new Vector3(), { cloudRadius: options.cloudRadius });
   return { camera, win, el, rig };
 }
 
@@ -520,3 +524,65 @@ describe('CameraRig: 慣性を止めた押下はクリックに数えない', ()
   }
 });
 
+
+describe('CameraRig: 自動移動の所要時間（getState().flight）', () => {
+  const DEFAULT_START = { pos: [0, 0, 0] as [number, number, number], look: [0, 0, -1] as [number, number, number] };
+
+  it('goHome: 基準 1 秒を距離で伸縮した所要時間と、進みが読める。着くと null', () => {
+    const { rig } = createRig({ cloudRadius: 1 });
+    rig.setView(DEFAULT_START);
+    expect(rig.getState().flight).toBeNull();
+    rig.goHome(HOME); // 距離 ≈ 2.62
+    const f = rig.getState().flight;
+    const d = Math.hypot(...HOME.pos);
+    expect(f?.kind).toBe('home');
+    expect(f?.durationMs).toBeCloseTo(1000 * Math.min(1.8, 0.8 + 0.25 * Math.log2(1 + d / 0.25)), 6);
+    expect(f?.progress).toBe(0);
+    rig.update(0.1);
+    expect(rig.getState().flight?.progress).toBeCloseTo(0.1 / ((f?.durationMs ?? 1) / 1000), 9);
+    runFlight(rig, 2.5);
+    expect(rig.getState().flight).toBeNull();
+    expect(rig.getState().position).toEqual(HOME.pos);
+  });
+
+  it('goHome: 基準（ミニマップは 0.6 秒）・近い移動は短く、半径がなければ基準のまま', () => {
+    const near = createRig({ cloudRadius: 1 });
+    near.rig.setView(DEFAULT_START);
+    near.rig.goHome({ pos: [0, 0, 0.1], look: [0, 0, -1] }, 0.6);
+    expect(near.rig.getState().flight?.durationMs).toBeLessThan(600);
+    expect(near.rig.getState().flight?.durationMs).toBeGreaterThanOrEqual(600 * 0.8 - 1e-9);
+    const plain = createRig();
+    plain.rig.setView(DEFAULT_START);
+    plain.rig.goHome(HOME, 0.6);
+    expect(plain.rig.getState().flight?.durationMs).toBeCloseTo(600, 9);
+  });
+
+  it('goHome: 動きを減らす設定なら 0.5 倍', () => {
+    const a = createRig({ cloudRadius: 1, reducedMotion: false });
+    const b = createRig({ cloudRadius: 1, reducedMotion: true });
+    for (const r of [a, b]) {
+      r.rig.setView(DEFAULT_START);
+      r.rig.goHome(HOME);
+    }
+    expect(b.rig.getState().flight?.durationMs).toBeCloseTo((a.rig.getState().flight?.durationMs ?? 0) * 0.5, 9);
+    runFlight(b.rig, 1.0);
+    expect(b.rig.getState().homing).toBe(false);
+  });
+
+  it('flyTo: 基準を距離で伸縮した所要時間。動きを減らす設定なら 0.5 倍。着くと null', () => {
+    const a = createRig({ cloudRadius: 1, reducedMotion: false });
+    const b = createRig({ cloudRadius: 1, reducedMotion: true });
+    for (const r of [a, b]) {
+      r.rig.setView({ pos: [0, 0, 1.5], look: [0, 0, 0] });
+      r.rig.flyTo(new Vector3(0, 0, -0.5), { distance: 0.05, durationMs: 800 });
+    }
+    const fa = a.rig.getState().flight;
+    const d = 1.5 + 0.5 - 0.05;
+    expect(fa?.kind).toBe('fly');
+    expect(fa?.durationMs).toBeCloseTo(800 * Math.min(1.8, 0.8 + 0.25 * Math.log2(1 + d / 0.25)), 6);
+    expect(b.rig.getState().flight?.durationMs).toBeCloseTo((fa?.durationMs ?? 0) * 0.5, 9);
+    for (let i = 0; i < 30; i++) a.rig.update(0.1);
+    expect(a.rig.getState().flight).toBeNull();
+    expect(a.rig.getState().position[2]).toBeCloseTo(-0.45, 9);
+  });
+});

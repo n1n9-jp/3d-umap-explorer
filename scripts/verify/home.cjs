@@ -16,7 +16,7 @@ const { execSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require('playwright');
-const { loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, len, norm } = require('./lib.cjs');
+const { loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, len, norm, expectedFlightDuration } = require('./lib.cjs');
 
 const root = path.resolve(__dirname, '../..');
 const args = process.argv.slice(2);
@@ -64,7 +64,7 @@ function sampleFlight(page, limit = 150) {
     const samples = [];
     const tick = () => {
       const s = window.__explorer.getState();
-      samples.push({ p: s.position, d: s.direction, homing: s.homing, mode: s.mode });
+      samples.push({ p: s.position, d: s.direction, homing: s.homing, mode: s.mode, flight: s.flight });
       if (!s.homing || samples.length >= max) resolve(samples);
       else requestAnimationFrame(tick);
     };
@@ -94,6 +94,30 @@ function projectAll(ds, s, aspect) {
     if (depth <= 0 || m > 1) outside++;
   }
   return { extent, minDepth, outside };
+}
+
+const smootherstep = (t) => { const x = Math.min(1, Math.max(0, t)); return x * x * x * (x * (x * 6 - 15) + 10); };
+
+/**
+ * ホームへの移動の所要時間（基準 1 秒を距離で伸縮した式）と、進み方（smootherstep のまま）を、フレームごとの状態から確かめる。
+ * カメラは止まった状態から始める。`label` は表示用、`R` は点群の半径。
+ */
+function checkHomeTiming(label, s0, home, samples, R) {
+  const flights = samples.filter((x) => x.flight);
+  const e = sub(home.pos, s0.position);
+  const dist = len(e);
+  if (flights.length < 3) { check(`${label}: 移動中の状態（flight）が読める`, false, `${flights.length} フレーム`); return; }
+  const wantMs = expectedFlightDuration(1000, dist, R);
+  const got = flights[0].flight.durationMs;
+  console.log(`  [実測] ${label}: 距離 ${dist.toFixed(3)}（点群の半径 ${R.toFixed(3)} の ${(dist / R).toFixed(2)} 倍）、所要時間 ${got.toFixed(0)}ms（基準 1000ms）、記録した移動のフレーム ${flights.length}`);
+  check(`${label}: 所要時間が、基準 1 秒を距離で伸縮した式のとおり（0.8〜1.8 倍）`, flights[0].flight.kind === 'home' && Math.abs(got - wantMs) < 1, `${got.toFixed(2)}ms、期待 ${wantMs.toFixed(2)}ms`);
+  let maxErr = 0;
+  for (const x of flights) {
+    const v = sub(x.p, s0.position);
+    const f = (v[0] * e[0] + v[1] * e[1] + v[2] * e[2]) / (dist * dist);
+    maxErr = Math.max(maxErr, Math.abs(f - smootherstep(x.flight.progress)));
+  }
+  check(`${label}: 位置の進みが smootherstep のとおり（フレームごと）`, maxErr < 1e-4, `誤差の最大 ${maxErr.toExponential(2)}`);
 }
 
 const pitchOf = (d) => Math.asin(Math.max(-1, Math.min(1, d[1])));
@@ -162,11 +186,12 @@ async function testHomeFly(page, ds, views) {
   const peak = Math.max(...steps);
   check('始まりと終わりが緩やか（最初と最後のフレームの移動量が最大の半分以下）', steps[0] < peak * 0.5 && steps[steps.length - 1] < peak * 0.5,
     `最初 ${(firstSteps[0] / peak).toFixed(2)}, 最後 ${(lastSteps[lastSteps.length - 1] / peak).toFixed(2)}（最大に対する比）`);
+  checkHomeTiming('飛行モードの H', s0, home, samples, ds.manifest.bounds.radius);
   const after = await state(page);
   check('着いたあと、速度の係数が有限の正の値（自動調整が壊れていない）', Number.isFinite(after.speedScale) && after.speedScale > 0, `係数 ${after.speedScale.toFixed(3)}`);
 }
 
-async function testHomeOverview(page, views) {
+async function testHomeOverview(page, ds, views) {
   console.log('\n[俯瞰モードで H]');
   const edge = views[1];
   await page.keyboard.press('KeyO');
@@ -182,6 +207,7 @@ async function testHomeOverview(page, views) {
   check('俯瞰モードのまま、ホームの視点へ戻る', last.mode === 'overview' && samples.every((x) => x.mode === 'overview') && !last.homing &&
     maxAbsDiff(last.p, home.pos) < 1e-4 && maxAbsDiff(last.d, dirOfView(home)) < 1e-5,
     `位置の差 ${maxAbsDiff(last.p, home.pos).toExponential(1)}, ${samples.length} フレーム`);
+  checkHomeTiming('俯瞰モードの H', s0, home, samples, ds.manifest.bounds.radius);
   const total = len(sub(home.pos, s0.position));
   const pts = [s0.position, ...samples.map((x) => x.p)];
   const steps = pts.slice(1).map((p, i) => len(sub(p, pts[i])));
@@ -285,7 +311,7 @@ async function main() {
     const page = await openPage(browser, base);
     await frames(page, 3);
     await testHomeFly(page, ds, views);
-    await testHomeOverview(page, views);
+    await testHomeOverview(page, ds, views);
     await page.keyboard.press('KeyO'); // 飛行モードへ（testHomeOverview の最後で飛行に戻っている）
     await waitForMode(page, 'overview');
     await page.keyboard.press('KeyO');

@@ -27,7 +27,7 @@ const { execSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require('playwright');
-const { loadDataset, waitForServer, startPreview, CHROMIUM_ARGS, sub, len } = require('./lib.cjs');
+const { loadDataset, waitForServer, startPreview, CHROMIUM_ARGS, sub, len, waitFlightEnd } = require('./lib.cjs');
 
 const root = path.resolve(__dirname, '../..');
 const args = process.argv.slice(2);
@@ -103,8 +103,9 @@ async function waitFor(page, fn, maxFrames = 40, arg = null) {
   return null;
 }
 
-/** カメラが動かなくなるまで待つ。 */
+/** 自動移動（点へ飛ぶ）が終わり（状態と模擬の時間で待つ）、カメラが動かなくなるまで待つ。 */
 async function waitStill(page, maxFrames = 60) {
+  await waitFlightEnd(page);
   let prev = await camState(page);
   for (let k = 0; k < maxFrames; k++) {
     await frames(page, 1);

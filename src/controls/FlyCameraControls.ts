@@ -7,12 +7,12 @@ import {
   REDUCED_MOTION_TIME_CONSTANT,
   createMoveInput,
 } from './FlyMotion';
-import type { FlyMotionOptions, FlyPose, FlyToOptions, MoveInput } from './FlyMotion';
+import type { FlightInfo, FlyMotionOptions, FlyPose, FlyToOptions, MoveInput } from './FlyMotion';
 import { isDiscreteWheelDelta, WheelGestureLimiter } from './WheelGesture';
 import { eventTimeMs, prefersReducedMotion, RotationInertia } from './RotationInertia';
 import type { RotationInertiaOptions } from './RotationInertia';
 
-export type { FlyPose, FlyToOptions } from './FlyMotion';
+export type { FlightInfo, FlyPose, FlyToOptions } from './FlyMotion';
 
 /** キーを押したとき・離したときの移動の慣性。 */
 export interface MoveInertiaOptions {
@@ -35,6 +35,8 @@ export interface FlyCameraControlsOptions extends Omit<FlyMotionOptions, 'accelT
    * （`prefers-reduced-motion: reduce`）なら、どちらも 0.12 秒（キーを離すとすぐ止まる）。
    */
   moveInertia?: MoveInertiaOptions;
+  /** 点群の半径。`flyTo` の所要時間を、移動の距離に応じて伸縮するときの目安にする。省略すると伸縮しない。 */
+  cloudRadius?: number;
 }
 
 export interface FlyCameraControlsEventMap {
@@ -111,6 +113,8 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
   readonly domElement: HTMLElement;
   /** ドラッグ 1 ピクセルあたりの回転量（ラジアン）。 */
   rotateSpeed: number;
+  /** 点群の半径。`flyTo` の所要時間を、移動の距離に応じて伸縮するときの目安（正の有限値でなければ伸縮しない）。 */
+  cloudRadius: number | undefined;
 
   private readonly motion: FlyMotion;
   private readonly input: MoveInput = createMoveInput();
@@ -135,6 +139,7 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
     this.camera = camera;
     this.domElement = domElement;
     this.rotateSpeed = options.rotateSpeed ?? 0.0025;
+    this.cloudRadius = options.cloudRadius;
     this.motion = new FlyMotion(options);
     this.win = domElement.ownerDocument?.defaultView ?? window;
     this.explicitAccel = finiteOrNull(options.moveInertia?.accelTimeConstant);
@@ -284,6 +289,11 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
     return this.motion.isFlying;
   }
 
+  /** 自動移動の進行状況（所要時間と進み。検証用）。最中でなければ null。 */
+  get flightInfo(): FlightInfo | null {
+    return this.motion.flightInfo;
+  }
+
   // ---- 姿勢 ----
 
   setPose(position: Vector3, lookAt: Vector3): void {
@@ -298,14 +308,20 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
   }
 
   /**
-   * `target` を注視する位置へ自動移動する。カメラと `target` を結ぶ線上で、
-   * `target` から `distance` だけ手前に着く。既定は 600 ミリ秒、ease-out quartic。
+   * `target` を注視する位置へ自動移動する。カメラと `target` を結ぶ線上で、`target` から `distance` だけ手前に着く。
+   * 緩急は始めと終わりが緩やかで、速さの山が手前（`flightEase`）。基準の所要時間（既定 600 ミリ秒）は、移動の距離と
+   * `cloudRadius` に応じて 0.8〜1.8 倍に伸縮する。動いていたカメラ（キーを離したあとの滑走中など）の速度は引き継ぐ。
+   * 「動きを減らす」設定（`prefers-reduced-motion: reduce`）なら、所要時間は 0.5 倍で、速度は引き継がない。
    * 移動中にキー移動やドラッグ回転をすると中断する（ホイールは中断しない）。
    */
   flyTo(target: Vector3, options?: FlyToOptions): void {
     if (!this._enabled || this.disposed) return;
     this.inertia.stop();
-    this.motion.flyTo(target, options);
+    this.motion.flyTo(target, {
+      ...options,
+      cloudRadius: options?.cloudRadius ?? this.cloudRadius,
+      reducedMotion: options?.reducedMotion ?? prefersReducedMotion(this.win),
+    });
   }
 
   cancelFlyTo(): void {

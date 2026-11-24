@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { HomeFlight, interpolatePose, poseLookAt, smootherstep, type FlightPose } from './homeFlight';
+import { HomeFlight, homeFlightDuration, interpolatePose, poseLookAt, smootherstep, type FlightPose } from './homeFlight';
 
 const A: FlightPose = { position: [1, 0, 0], yaw: 0.2, pitch: 0.1 };
 const B: FlightPose = { position: [-1, 2, 4], yaw: -0.4, pitch: -0.3 };
@@ -88,5 +88,40 @@ describe('poseLookAt', () => {
     expect(poseLookAt({ position: [1, 2, 3], yaw: 0, pitch: 0 })).toEqual([1, 2, 2]);
     const up = poseLookAt({ position: [0, 0, 0], yaw: 0, pitch: Math.PI / 2 });
     expect(up[1]).toBeCloseTo(1, 12);
+  });
+});
+
+describe('homeFlightDuration', () => {
+  const near: FlightPose = { position: [0, 0, 0.05], yaw: 0, pitch: 0 };
+  const far: FlightPose = { position: [0, 0, 3], yaw: 0, pitch: 0 };
+  const origin: FlightPose = { position: [0, 0, 0], yaw: 0, pitch: 0 };
+
+  it('基準の所要時間を、移動の距離と点群の半径で 0.8〜1.8 倍に伸縮する', () => {
+    const R = 1;
+    const d = (to: FlightPose) => Math.hypot(...to.position);
+    for (const to of [near, far, B]) {
+      const want = Math.min(1.8, Math.max(0.8, 0.8 + 0.25 * Math.log2(1 + d(to) / (0.25 * R))));
+      expect(homeFlightDuration(origin, to, 1, R, false)).toBeCloseTo(want, 12);
+    }
+    expect(homeFlightDuration(origin, near, 1, R, false)).toBeLessThan(1);
+    expect(homeFlightDuration(origin, far, 1, R, false)).toBeGreaterThan(1.4);
+    expect(homeFlightDuration(origin, { ...far, position: [0, 0, 1e6] }, 0.6, R, false)).toBeCloseTo(0.6 * 1.8, 12);
+    expect(homeFlightDuration(origin, origin, 0.6, R, false)).toBeCloseTo(0.6 * 0.8, 12);
+  });
+
+  it('半径が使えなければ伸縮しない。動きを減らす設定なら 0.5 倍', () => {
+    expect(homeFlightDuration(origin, far, 1, undefined, false)).toBe(1);
+    expect(homeFlightDuration(origin, far, 1, 0, false)).toBe(1);
+    expect(homeFlightDuration(origin, far, 1, undefined, true)).toBe(0.5);
+    expect(homeFlightDuration(origin, far, 1, 1, true)).toBeCloseTo(0.5 * homeFlightDuration(origin, far, 1, 1, false), 12);
+  });
+
+  it('進み方は smootherstep のまま（所要時間が伸びても、進みの割合で同じ姿勢）', () => {
+    const a = new HomeFlight(A, B, 1);
+    const b = new HomeFlight(A, B, 1.7);
+    const pa = a.advance(0.3);
+    const pb = b.advance(0.3 * 1.7);
+    expect(pb.position[0]).toBeCloseTo(pa.position[0], 12);
+    expect(pb.yaw).toBeCloseTo(pa.yaw, 12);
   });
 });

@@ -28,7 +28,7 @@ const { execSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require('playwright');
-const { loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, add, mul, len, norm } = require('./lib.cjs');
+const { loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, add, mul, len, norm, waitFlightEnd, expectedFlightDuration } = require('./lib.cjs');
 
 const root = path.resolve(__dirname, '../..');
 const args = process.argv.slice(2);
@@ -78,8 +78,9 @@ async function waitFrames(page, fn, maxFrames = 20) {
   return { ...v, frames: maxFrames, ok: false };
 }
 
-/** カメラが動かなくなるまで待つ。 */
+/** 移動（ミニマップのクリック・ホームへの移動）が終わり（状態と模擬の時間で待つ）、カメラが動かなくなるまで待つ。 */
 async function waitStill(page, maxFrames = 40) {
+  await waitFlightEnd(page);
   let prev = await state(page);
   for (let k = 0; k < maxFrames; k++) {
     await frames(page, 1);
@@ -470,6 +471,14 @@ async function testClickAndSelection(page, views) {
     const ab = sub(b, a), t = dot(sub(x, a), ab) / dot(ab, ab);
     return { t, off: len(sub(x, add(a, mul(ab, t)))) };
   })();
+  // 所要時間は、基準 0.6 秒を、移動の距離（点群の半径との比）で伸縮した式のとおり
+  const R = global.__ds.manifest.bounds.radius;
+  const mDist = len(sub(expected, before.position));
+  const mWant = expectedFlightDuration(600, mDist, R);
+  const mFlight = moving.s && moving.s.flight;
+  console.log(`  [実測] 地図のクリック: 距離 ${mDist.toFixed(3)}（点群の半径 ${R.toFixed(3)} の ${(mDist / R).toFixed(2)} 倍）、所要時間 ${mFlight ? mFlight.durationMs.toFixed(0) : '?'}ms（基準 600ms）`);
+  check('地図のクリックの移動は、基準 0.6 秒を距離で伸縮した所要時間（0.8〜1.8 倍）', !!mFlight && mFlight.kind === 'home' && Math.abs(mFlight.durationMs - mWant) < 1,
+    `${mFlight ? mFlight.durationMs.toFixed(2) : 'なし'}ms、期待 ${mWant.toFixed(2)}ms`);
   check('地図のクリックで、クリックした位置（奥行きはそのまま）へ移動する', moving.ok && dPos < 1e-4 && near(m2.camera.x, target.x, 0.01) && near(m2.camera.y, target.y, 0.01),
     `着いた位置と期待の差 ${dPos.toExponential(2)}、印 (${m2.camera.x.toFixed(2)}, ${m2.camera.y.toFixed(2)})、クリック (${target.x}, ${target.y})`);
   check('移動は滑らか（途中の位置が線の上で、端でない）', midOnLine.t > 0 && midOnLine.t < 1 && midOnLine.off < 1e-4, `途中 t=${midOnLine.t.toFixed(3)}、線からのずれ ${midOnLine.off.toExponential(2)}`);

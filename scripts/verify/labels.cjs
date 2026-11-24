@@ -41,7 +41,7 @@ const { execSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require('playwright');
-const { loadDataset, waitForServer, startPreview, CHROMIUM_ARGS, sub, add, mul, len, norm } = require('./lib.cjs');
+const { loadDataset, waitForServer, startPreview, CHROMIUM_ARGS, sub, add, mul, len, norm, waitFlightEnd } = require('./lib.cjs');
 
 const root = path.resolve(__dirname, '../..');
 const args = process.argv.slice(2);
@@ -87,8 +87,9 @@ async function goTo(page, pos, look) {
   return settle(page);
 }
 
-/** カメラが動かなくなり、目印がそのカメラで更新されるまで待つ。 */
+/** 自動移動が終わり（状態と模擬の時間で待つ）、カメラが動かなくなり、目印がそのカメラで更新されるまで待つ。 */
 async function settle(page, maxFrames = 60) {
+  await waitFlightEnd(page);
   let prev = await state(page);
   for (let k = 0; k < maxFrames; k++) {
     await frames(page, 2);
