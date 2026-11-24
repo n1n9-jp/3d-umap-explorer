@@ -26,6 +26,8 @@ import type { EmbeddingHost, UmapFeatureState } from './compute/host';
 import type { UmapFeature, UmapOutcome } from './compute/umapFeature';
 import { embeddingStatusText, parseUrlParams, searchWithParams, type UmapParams } from './compute/params';
 import type { WordLabelsState } from './text/WordLabels';
+import { NeighborsShared } from './neighbors/shared';
+import type { NeighborViewState } from './neighbors/NeighborView';
 
 interface FrameStats { frames: number; meanMs: number; medianMs: number; p95Ms: number; maxMs: number }
 
@@ -66,6 +68,8 @@ declare global {
       interaction: {
         getState(): InteractionState;
         stopDistance(index: number): StopDistance;
+        /** 点を選択する（null で解除。クリックと同じく情報パネルと元のデータで近い点を更新する。移動はしない） */
+        select(index: number | null): void;
       };
       /** クラスタの目印と現在地（src/labels/）。クラスタのないデータセットでは available が false */
       labels: {
@@ -89,6 +93,16 @@ declare global {
         setEnabled(enabled: boolean): void;
         /** 点が新旧の位置の間を動いている間など、文字を止めているか */
         paused(): boolean;
+      };
+      /**
+       * 選択中の点の「元のデータで近い点」（src/neighbors/）。`getState()` は、元の空間での近傍・3 次元での近傍・一致の数・
+       * 一覧と地図の上の表示の状態（表示中のものがなければ null）。`setEnabled` は N キーと同じ切り替え。
+       * `back()` は一覧の「前の点へ戻る」と同じ
+       */
+      neighbors: {
+        getState(): NeighborViewState | null;
+        setEnabled(enabled: boolean): void;
+        back(): void;
       };
       /** 検証用の故障の注入（`src/app/faults.ts`）。次に起こす失敗の回数を書く */
       faults: Faults;
@@ -178,6 +192,8 @@ async function start(): Promise<void> {
   let wordsEnabled = true; // K キーの状態（データセットを切り替えても保つ）
   // 点が動いている間（文字を止めている間）は、DatasetView が止め終わったあとの状態として覚える
   const setWordsEnabled = (enabled: boolean) => { wordsEnabled = enabled; view?.setWordsEnabled(enabled); };
+  // 元のデータで近い点（src/neighbors/）。kNN グラフと選択の履歴はデータセットごと、N キーの状態はデータセットをまたいで保つ
+  const neighbors = new NeighborsShared();
 
   const switcher = new DatasetSwitcher(doc, catalog, (id) => { void switchTo(id, { pushHistory: true }); });
 
@@ -195,6 +211,7 @@ async function start(): Promise<void> {
       notice: view.notice ?? undefined,
       labels: view.clusterLabels.available, // L キー（クラスタのないデータセットでは使えない）
       words: view.words !== null, // K キー（単語のデータセットだけ）
+      neighbors: view.neighbors?.available ?? false, // N キー（kNN グラフのあるデータセットだけ）
       minimap: true, // M キー
     });
   };
@@ -212,11 +229,11 @@ async function start(): Promise<void> {
     prev?.dispose();
     view = null;
     try {
-      view = new DatasetView(ctx, data, { pointSize, words: wordsEnabled });
+      view = new DatasetView(ctx, data, { pointSize, words: wordsEnabled, neighbors });
     } catch (e) {
       // 作れなければ、前のデータで作り直して表示を保つ（視点はホーム）
       if (prev && prevTarget) {
-        view = new DatasetView(ctx, prev.data, { coloring: prev.coloring, words: wordsEnabled, spatialIndex: prev.spatialIndex });
+        view = new DatasetView(ctx, prev.data, { coloring: prev.coloring, words: wordsEnabled, spatialIndex: prev.spatialIndex, neighbors });
         view.controller.onChange(() => updateHud());
         view.controller.setView(view.homeView());
       }
@@ -225,6 +242,7 @@ async function start(): Promise<void> {
     target = next;
     if (prev && prev.data !== data) releaseLoadedDataset(prev.data);
     baseData = data;
+    neighbors.setDataset({ dir: data.dir, manifest: data.arrays.manifest }); // 前のデータセットの kNN グラフと選択の履歴を捨てる
     view.controller.onChange(() => updateHud()); // モードと速度の変化はすぐに見せる
     // URL の pos・look があればその視点、なければホームの視点から始める（切り替えでは常にホームの視点）
     view.controller.setView(search !== null ? parseView(search, view.homeView()) : view.homeView());
@@ -253,10 +271,10 @@ async function start(): Promise<void> {
     view = null;
     let next: DatasetView;
     try {
-      next = new DatasetView(ctx, data, { pointSize: ui.pointSize, coloring: options.coloring, words: wordsEnabled, spatialIndex: options.spatialIndex });
+      next = new DatasetView(ctx, data, { pointSize: ui.pointSize, coloring: options.coloring, words: wordsEnabled, spatialIndex: options.spatialIndex, neighbors });
     } catch (e) {
       // 作れなければ（作りかけのものは DatasetView が破棄している）、前のデータで作り直して表示を保つ
-      view = new DatasetView(ctx, prev.data, { pointSize: ui.pointSize, coloring: prev.coloring, words: wordsEnabled, spatialIndex: prev.spatialIndex });
+      view = new DatasetView(ctx, prev.data, { pointSize: ui.pointSize, coloring: prev.coloring, words: wordsEnabled, spatialIndex: prev.spatialIndex, neighbors });
       view.controller.onChange(() => updateHud());
       view.applyUiState(ui);
       throw e;
@@ -381,6 +399,7 @@ async function start(): Promise<void> {
   bindShortcut(window, 'KeyM', () => view?.minimap.toggle()); // M キーでミニマップの表示・非表示
   bindShortcut(window, 'KeyU', () => toggleUmapPanel(true)); // U キーで UMAP の再計算のパネルを開閉
   bindShortcut(window, 'KeyK', () => setWordsEnabled(!wordsEnabled)); // K キーで近くの単語の文字の表示・非表示
+  bindShortcut(window, 'KeyN', () => neighbors.setEnabled(!neighbors.enabled)); // N キーで元のデータで近い点の、地図の上の表示の入切
 
   // ---- 描画ループ ----
   let frameTimes: number[] | null = null;
@@ -437,6 +456,7 @@ async function start(): Promise<void> {
     interaction: {
       getState: () => v().interaction.getState(),
       stopDistance: (i) => v().interaction.stopDistance(i),
+      select: (i) => v().interaction.select(i),
     },
     labels: { getState: () => v().clusterLabels.getState() },
     setView: (spec) => v().controller.setView(spec),
@@ -488,6 +508,11 @@ async function start(): Promise<void> {
       getState: () => v().words?.getState() ?? null,
       setEnabled: (enabled) => setWordsEnabled(enabled),
       paused: () => v().wordsPaused,
+    },
+    neighbors: {
+      getState: () => view?.neighbors?.getState() ?? null,
+      setEnabled: (enabled) => neighbors.setEnabled(enabled),
+      back: () => view?.neighbors?.back(),
     },
     faults,
     notice: () => view?.notice ?? null,

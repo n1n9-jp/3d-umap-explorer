@@ -32,6 +32,8 @@ export interface HudInfo {
   minimap?: boolean;
   /** 近くの単語の文字の表示があるか（K キーの説明を操作説明に含める。単語のデータセットだけ）。省略時は含めない。 */
   words?: boolean;
+  /** 選択中の点の、元のデータで近い点の表示があるか（N キーの説明を操作説明に含める。kNN グラフのあるデータセットだけ）。省略時は含めない。 */
+  neighbors?: boolean;
   /** 利用者に知らせる文（単語の文字を作れず丸い点だけで表示しているときなど）。あれば 5 行目に出す。 */
   notice?: string;
 }
@@ -61,6 +63,7 @@ export function hudHelpItems(info: HudInfo): string[] {
   const items = [...HELP[info.mode]];
   if (info.labels) items.push('L 目印の表示');
   if (info.words) items.push('K 単語の文字');
+  if (info.neighbors) items.push('N 元のデータで近い点');
   if (info.minimap) items.push('M ミニマップ');
   return items;
 }
