@@ -1,5 +1,6 @@
 import type { CameraMode } from './cameraRig';
 
+/** モードの名前（左上のモードの表示と、操作説明で使う）。 */
 export const MODE_LABEL: Record<CameraMode, string> = { fly: '飛行', overview: '俯瞰' };
 
 /** モードごとの操作説明の項目。 */
@@ -73,7 +74,7 @@ export function formatHud(info: HudInfo): string {
   const auto = info.autoSpeed ? `  ${formatAutoSpeed(info.autoSpeed, info.mode)}` : '';
   const lines = [
     `${info.datasetName}  ${info.pointCount.toLocaleString()} 点  点の大きさ ${info.pointSize.toPrecision(3)}（[ ] で変更）`,
-    `モード ${MODE_LABEL[info.mode]}  飛行速度 ${formatSpeed(info.speed)}${auto}`,
+    `飛行速度 ${formatSpeed(info.speed)}${auto}`, // モード名は左上の表示（src/app/modeSwitch.ts）に出す
     hudHelpItems(info).join(HELP_SEPARATOR),
     `?${info.viewParams}`,
   ];

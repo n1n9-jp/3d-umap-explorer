@@ -81,6 +81,8 @@ const state = (page) => page.evaluate(() => window.__explorer.getState());
 const frames = (page, n) => page.evaluate((k) => window.__explorer.measureFrames(k), n);
 const setView = (page, pos, look) => page.evaluate((v) => window.__explorer.setView(v), { pos, look });
 const hudText = (page) => page.evaluate(() => document.getElementById('hud').innerText);
+/** 左上のカメラのモードの表示が示しているモード（src/app/modeSwitch.ts。aria-checked の付いたボタン） */
+const shownMode = (page) => page.evaluate(() => document.querySelector('#mode-switch [role="radio"][aria-checked="true"]')?.dataset.mode ?? null);
 
 /** 描画が `n` フレーム進む間、キーを押し続けて離し、滑走が止まる（移動の慣性が消える）まで待つ。 */
 async function holdKeys(page, keys, n) {
@@ -366,7 +368,7 @@ async function testModes(page, view, centerOf) {
   await setView(page, view.pos, view.look);
   await frames(page, 3);
   const f0 = await state(page);
-  check('始めは飛行モード', f0.mode === 'fly' && (await hudText(page)).includes('モード 飛行'));
+  check('始めは飛行モード（左上のモードの表示も飛行）', f0.mode === 'fly' && (await shownMode(page)) === 'fly');
 
   await page.keyboard.press('KeyO');
   await page.waitForFunction(() => window.__explorer.getState().mode === 'overview');
@@ -376,7 +378,7 @@ async function testModes(page, view, centerOf) {
     `位置の差 ${maxAbsDiff(f0.position, o0.position).toExponential(1)}, 向きの差 ${maxAbsDiff(f0.direction, o0.direction).toExponential(1)}`);
   check('俯瞰モードの回転の中心は点群の中心', o0.pivot && maxAbsDiff(o0.pivot, centerOf) < 1e-6, `pivot ${o0.pivot && fmt(o0.pivot)}`);
   const hudO = await hudText(page);
-  check('HUD が俯瞰モードの表示になる', hudO.includes('モード 俯瞰') && hudO.includes('O 飛行モードへ'));
+  check('左上のモードの表示と HUD の操作説明が俯瞰モードのものになる', (await shownMode(page)) === 'overview' && hudO.includes('O 飛行モードへ'));
 
   // 俯瞰モードでは飛行の入力に反応しない
   await holdKeys(page, ['KeyW'], 6);
@@ -408,7 +410,7 @@ async function testModes(page, view, centerOf) {
   const f1 = await state(page);
   check('O で飛行モードへ戻る。位置と向きが変わらない', maxAbsDiff(d2.position, f1.position) < 1e-6 && maxAbsDiff(d2.direction, f1.direction) < 1e-5,
     `位置の差 ${maxAbsDiff(d2.position, f1.position).toExponential(1)}, 向きの差 ${maxAbsDiff(d2.direction, f1.direction).toExponential(1)}`);
-  check('戻った後の HUD は飛行モード', (await hudText(page)).includes('モード 飛行'));
+  check('戻った後の左上のモードの表示と HUD の操作説明は飛行モード', (await shownMode(page)) === 'fly' && (await hudText(page)).includes('O 俯瞰モードへ'));
   await holdKeys(page, ['KeyW'], 6);
   await waitGlideEnd(page); // 移動の慣性が消えるまで待つ
   const f2 = await state(page);

@@ -1,5 +1,5 @@
 /**
- * データセットの選択欄（画面の左上）。要素は index.html にある（#dataset-select、#dataset-status）。
+ * データセットの選択欄（画面の右上）。要素は index.html にある（#dataset-select、#dataset-status）。
  * 選んだら `onSelect(id)` を呼ぶ。読み込み中は選択欄を無効にして「読み込み中…」を、失敗したらエラーを出す。
  */
 import type { DatasetCatalog } from '../data/catalog';

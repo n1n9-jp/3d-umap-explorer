@@ -36,10 +36,10 @@ import { NeighborView } from '../neighbors/NeighborView';
 import type { NeighborsShared } from '../neighbors/shared';
 
 /**
- * 画面の端の UI の要素（単語の文字をこの下に出さない）。HUD・データセットの選択欄・UMAP のパネル・現在地・
- * 情報パネル・ミニマップ。毎フレーム、要素の実際の矩形を読む（開閉や大きさの変化に追従する）。
+ * 画面の端の UI の要素（単語の文字をこの下に出さない）。HUD・左上のタイトルとカメラのモード・データセットの選択欄・UMAP のパネル・
+ * 現在地・情報パネル・ミニマップ。毎フレーム、要素の実際の矩形を読む（開閉や大きさの変化に追従する）。
  */
-export const WORD_OBSTACLE_IDS = ['hud', 'dataset-switcher', 'umap-panel', 'cluster-location', 'info', 'minimap'] as const;
+export const WORD_OBSTACLE_IDS = ['hud', 'title-mode', 'dataset-switcher', 'umap-panel', 'cluster-location', 'info', 'minimap'] as const;
 
 /** 読み込み済みのデータ（GPU の資源はまだ作らない）。 */
 export interface LoadedDataset {

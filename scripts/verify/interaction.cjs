@@ -33,7 +33,7 @@ const { execSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require('playwright');
-const { loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, len, sendPointer, pointerGesture, flickPoints, readInfoRect } = require('./lib.cjs');
+const { loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, len, sendPointer, pointerGesture, flickPoints, readInfoRect, readUiRects, inRects } = require('./lib.cjs');
 
 const root = path.resolve(__dirname, '../..');
 const args = process.argv.slice(2);
@@ -92,12 +92,13 @@ async function waitStill(page, maxFrames = 40) {
   return prev;
 }
 
-/** 情報パネルの矩形（`readInfoRect` で読んだもの。点を探す前に更新する） */
+/** 情報パネルの矩形（`readInfoRect` で読んだもの）と、上部の UI の矩形（`readUiRects`）。点を探す前に更新する */
 let infoRect = null;
+let uiRects = [];
 const inInfoRect = (x, y) => infoRect && x > infoRect.left - 12 && x < infoRect.right + 12 && y > infoRect.top - 12 && y < infoRect.bottom + 12;
 
-/** パネル（実際の矩形）・HUD・ホバーのラベルに重ならない位置か。 */
-const usable = (x, y) => x > 40 && y > 40 && x < width - 40 && y < height - 40 && !inInfoRect(x, y) && !(x < 640 && y > height - 200);
+/** パネル（実際の矩形）・上部の UI・HUD・ホバーのラベルに重ならない位置か。 */
+const usable = (x, y) => x > 40 && y > 40 && x < width - 40 && y < height - 40 && !inInfoRect(x, y) && !inRects(uiRects, x, y) && !(x < 640 && y > height - 200);
 
 /**
  * 画面に見えていて、投影した中心で pick するとその点が真下に返る点を探す（大きく見えるものから）。
@@ -105,10 +106,12 @@ const usable = (x, y) => x > 40 && y > 40 && x < width - 40 && y < height - 40 &
  */
 async function findVisiblePoint(page, { minPx = 6, exclude = [] } = {}) {
   const info = await readInfoRect(page);
-  return page.evaluate(async ({ minPx, exclude, w, h, info }) => {
+  const ui = await readUiRects(page); // 上部の UI（左上のタイトルとモード・右上の選択欄）の下の点は、マウスで触れない
+  return page.evaluate(async ({ minPx, exclude, w, h, info, ui }) => {
     const ex = window.__explorer;
     const inInfo = (x, y) => info && x > info.left - 12 && x < info.right + 12 && y > info.top - 12 && y < info.bottom + 12;
-    const ok = (x, y) => x > 40 && y > 40 && x < w - 40 && y < h - 40 && !inInfo(x, y) && !(x < 640 && y > h - 200);
+    const inUi = (x, y) => ui.some((r) => x > r.left - 12 && x < r.right + 12 && y > r.top - 12 && y < r.bottom + 12);
+    const ok = (x, y) => x > 40 && y > 40 && x < w - 40 && y < h - 40 && !inInfo(x, y) && !inUi(x, y) && !(x < 640 && y > h - 200);
     const cands = [];
     for (let i = 0; i < ex.picking.count; i++) {
       if (exclude.includes(i)) continue;
@@ -124,12 +127,13 @@ async function findVisiblePoint(page, { minPx = 6, exclude = [] } = {}) {
       if (r && r.index === c.i && r.pixelDistance === 0) return c;
     }
     return null;
-  }, { minPx, exclude, w: width, h: height, info });
+  }, { minPx, exclude, w: width, h: height, info, ui });
 }
 
 /** pick が null を返す（吸着の半径内にも点がない）位置を探す。 */
 async function findEmptySpot(page) {
   infoRect = await readInfoRect(page);
+  uiRects = await readUiRects(page);
   for (let y = 60; y < height - 60; y += 37) {
     for (let x = 60; x < width - 60; x += 41) {
       if (!usable(x, y)) continue;

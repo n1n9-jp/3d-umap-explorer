@@ -69,7 +69,7 @@ const INSIDE_BEFORE = { shown: 92, maxTextPx: 71.0 };
 /** 読める大きさ（文字の高さ、CSS ピクセル） */
 const READABLE_PX = 12;
 /** 単語の文字を重ねない UI の要素（src/app/datasetView.ts の WORD_OBSTACLE_IDS と同じ） */
-const UI_IDS = ['hud', 'dataset-switcher', 'umap-panel', 'cluster-location', 'info', 'minimap'];
+const UI_IDS = ['hud', 'title-mode', 'dataset-switcher', 'umap-panel', 'cluster-location', 'info', 'minimap'];
 const { views: libViews } = computeViews(w2v);
 const VIEWS = Object.fromEntries(libViews.map((v) => [v.name.replace(/^\d-/, ''), v]));
 
