@@ -315,8 +315,8 @@
         <div class="mode-row">
           <!-- カメラのモードの 2 択（src/app/modeSwitch.ts）。O キーでも切り替わる -->
           <div id="mode-switch" role="radiogroup" aria-label="カメラのモード" aria-describedby="mode-key-hint">
-            <button type="button" role="radio" class="mode-option" data-mode="overview" aria-checked="false"><span class="mode-name">俯瞰</span><span class="mode-desc">外から回して眺める</span></button>
-            <button type="button" role="radio" class="mode-option" data-mode="fly" aria-checked="true"><span class="mode-name">飛行</span><span class="mode-desc">中へ入って飛ぶ</span></button>
+            <button type="button" role="radio" class="mode-option" data-mode="overview" aria-checked="false" tabindex="-1"><span class="mode-name">俯瞰</span><span class="mode-desc">外から回して眺める</span></button>
+            <button type="button" role="radio" class="mode-option" data-mode="fly" aria-checked="true" tabindex="0"><span class="mode-name">飛行</span><span class="mode-desc">中へ入って飛ぶ</span></button>
           </div>
           <span id="mode-key-hint" class="mode-key"><kbd>O</kbd>で切り替え</span>
         </div>

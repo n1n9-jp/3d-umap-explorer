@@ -247,6 +247,8 @@ async function start(): Promise<void> {
         view = new DatasetView(ctx, prev.data, { coloring: prev.coloring, words: wordsEnabled, spatialIndex: prev.spatialIndex, neighbors });
         view.controller.onChange(() => updateHud());
         view.controller.setView(view.homeView());
+        // 新しいカメラは飛行モードから始まる。左上のモードの表示と HUD を、作り直した表示の実際のモードへ合わせる
+        updateHud();
       }
       throw e;
     }

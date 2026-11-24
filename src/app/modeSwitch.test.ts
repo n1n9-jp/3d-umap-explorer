@@ -13,6 +13,12 @@ describe('modeSwitchView', () => {
     expect(o.mode).toBe('overview');
   });
 
+  it('Tab の順に入るのは、選択中のボタンだけ（tabindex 0）。もう一方は外す（-1）', () => {
+    expect(modeSwitchView('fly').options.map((o) => o.tabIndex)).toEqual([-1, 0]);
+    expect(modeSwitchView('overview').options.map((o) => o.tabIndex)).toEqual([0, -1]);
+    for (const m of MODE_ORDER) expect(modeSwitchView(m).options.filter((o) => o.tabIndex === 0)).toHaveLength(1);
+  });
+
   it('それぞれのモードに、何をするものかの短い説明を添える', () => {
     const v = modeSwitchView('overview');
     expect(v.options.map((o) => o.description)).toEqual([MODE_DESCRIPTION.overview, MODE_DESCRIPTION.fly]);

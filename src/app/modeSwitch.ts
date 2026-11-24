@@ -4,6 +4,9 @@
  * 矢印キーで選択を移す（ラジオボタンの 2 択と同じ操作）。モードの持ち主は `CameraRig` で、この表示は
  * `set(mode)` で追従するだけ（O キー・クリック・点へ飛ぶ操作による自動の切り替えのすべてで、同じ経路を通る）。
  *
+ * Tab の順には、選択中のボタンだけを入れる（tabindex="0"。もう一方は -1）。ラジオグループと同じく、Tab で止まるのは 1 回で、
+ * 選択の移動は矢印キーで行う。
+ *
  * 切り替えのボタンにフォーカスがある間は、移動キー（WASD・E・Q・矢印）をカメラの操作へ渡さない
  * （入力欄にフォーカスがある間に移動キーが働かないのと同じ扱い。`src/app/keyEvents.ts`）。
  */
@@ -25,6 +28,11 @@ export interface ModeOptionView {
   description: string;
   /** いまのモードか（強調する・aria-checked） */
   checked: boolean;
+  /**
+   * ラジオグループの作法（roving tabindex）。選択中のボタンだけを Tab の順に入れ（0）、もう一方は外す（-1）。
+   * 移動は矢印キーで行う。
+   */
+  tabIndex: 0 | -1;
 }
 
 export interface ModeSwitchView {
@@ -43,7 +51,7 @@ export function modeAnnouncement(mode: CameraMode): string {
 export function modeSwitchView(mode: CameraMode): ModeSwitchView {
   return {
     mode,
-    options: MODE_ORDER.map((m) => ({ mode: m, label: MODE_LABEL[m], description: MODE_DESCRIPTION[m], checked: m === mode })),
+    options: MODE_ORDER.map((m) => ({ mode: m, label: MODE_LABEL[m], description: MODE_DESCRIPTION[m], checked: m === mode, tabIndex: m === mode ? 0 : -1 })),
     announcement: modeAnnouncement(mode),
   };
 }
@@ -84,6 +92,8 @@ export interface ModeSwitchState {
   mode: CameraMode | null;
   /** aria-checked が true のボタンのモード */
   checked: CameraMode[];
+  /** tabindex が 0（Tab の順に入っている）のボタンのモード */
+  tabStops: CameraMode[];
   /** 読み上げの領域の文（切り替わるまでは空） */
   announcement: string;
 }
@@ -123,6 +133,7 @@ export class ModeSwitch {
     for (const o of view.options) {
       const b = this.buttons.get(o.mode)!;
       b.setAttribute('aria-checked', String(o.checked));
+      b.tabIndex = o.tabIndex;
     }
     this.root.dataset.mode = mode;
     if (!first && this.live) this.live.textContent = view.announcement;
@@ -132,6 +143,7 @@ export class ModeSwitch {
     return {
       mode: this.shown,
       checked: MODE_ORDER.filter((m) => this.buttons.get(m)!.getAttribute('aria-checked') === 'true'),
+      tabStops: MODE_ORDER.filter((m) => this.buttons.get(m)!.tabIndex === 0),
       announcement: this.live?.textContent ?? '',
     };
   }
