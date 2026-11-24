@@ -2,7 +2,7 @@ import { Euler, Vector3 } from 'three';
 import type { PerspectiveCamera } from 'three';
 import { FlyCameraControls, type FlyToOptions } from '../controls/FlyCameraControls';
 import { viewAngles, type ViewAngles, type ViewSpec } from '../render/view';
-import { OverviewControls } from './overviewControls';
+import { OverviewControls, type OverviewZoomState } from './overviewControls';
 import type { AutoSpeed } from './autoSpeed';
 import { HOME_DURATION_SECONDS, HomeFlight, poseLookAt, type FlightPose } from './homeFlight';
 import { isFromEditable } from './keyEvents';
@@ -33,6 +33,8 @@ export interface CameraState {
   homing: boolean;
   /** ドラッグを離したあとの回転の慣性で回っている最中か（現在のモード）。 */
   rotating: boolean;
+  /** 俯瞰モードの中心までの距離の状態（目標の距離・実際の距離・寄っている途中か）。飛行モードでは null。 */
+  overview: OverviewZoomState | null;
 }
 
 /** 密度に応じた速度の自動調整の状態。 */
@@ -55,6 +57,11 @@ export interface CameraRigOptions {
    * 省略すると、時定数 0.3 秒で、「動きを減らす」設定（`prefers-reduced-motion: reduce`）なら無効。
    */
   rotationInertia?: RotationInertiaOptions;
+  /**
+   * 俯瞰モードで、距離が目標へ近づく速さの時定数（秒）。0 以下で、ホイールごとに距離が 1 度に動く。
+   * 省略すると、0.15 秒で、「動きを減らす」設定（`prefers-reduced-motion: reduce`）なら 0。
+   */
+  zoomTimeConstant?: number;
 }
 
 /** 飛行モードで、移動中のホーム復帰を中断させるキー（`FlyCameraControls` の移動キーと同じ）。 */
@@ -96,7 +103,10 @@ export class CameraRig {
     this.win = domElement.ownerDocument?.defaultView ?? window;
     this.center = center.clone();
     this.fly = new FlyCameraControls(camera, domElement, { rotationInertia: options.rotationInertia });
-    this.overview = new OverviewControls(camera, domElement, { rotationInertia: options.rotationInertia });
+    this.overview = new OverviewControls(camera, domElement, {
+      rotationInertia: options.rotationInertia,
+      zoomTimeConstant: options.zoomTimeConstant,
+    });
     this.overview.pivot.copy(this.center);
     this.fly.addEventListener('speedchange', this.notify);
     this.autoSpeed = options.autoSpeed ?? null;
@@ -181,6 +191,18 @@ export class CameraRig {
     this.overview.rotationTimeConstant = value;
   }
 
+  /**
+   * 俯瞰モードで、距離が目標へ近づく速さの時定数（秒）。0 以下で、ホイール・ピンチごとに距離が 1 度に動く。
+   * `null` を代入すると、既定（0.15 秒。「動きを減らす」設定なら 0）へ戻す。
+   */
+  get zoomTimeConstant(): number {
+    return this.overview.zoomTimeConstant;
+  }
+
+  set zoomTimeConstant(value: number | null) {
+    this.overview.zoomTimeConstant = value;
+  }
+
   /** 回転の慣性で回っている最中か（現在のモード）。 */
   get isRotatingByInertia(): boolean {
     return this._mode === 'fly' ? this.fly.isRotatingByInertia : this.overview.isRotatingByInertia;
@@ -194,7 +216,7 @@ export class CameraRig {
   /**
    * 現在の位置と向きから `view`（ホームの視点）へ、約 1 秒かけて滑らかに移動する。モードは変えない。
    * 位置と向きの両方を補間し、始まりと終わりを緩やかにする。移動中に操作（飛行モードでは移動キーとドラッグ、
-   * 俯瞰モードではドラッグとホイール）をするか、`setView` を呼ぶと中断してその場に留まる。
+   * 俯瞰モードではドラッグとホイール・ピンチ）をするか、`setView` を呼ぶと中断してその場に留まる。
    * 移動の間は、速度の自動調整は働かない（終わったあと、着いた位置から調整し直す）。
    */
   goHome(view: ViewSpec, durationSeconds: number = HOME_DURATION_SECONDS): void {
@@ -203,6 +225,7 @@ export class CameraRig {
     this.flying = false;
     // 回転の慣性も止める（ホームへの移動と重ねて回り続けない）
     this.stopRotationInertia();
+    this.overview.stopZoom(); // 寄っている途中の距離も止める（ホームへの移動と重ねて動かない）
     const from = this.currentPose();
     const to: FlightPose = { position: [...view.pos], ...viewAngles(view, from) };
     this.flight = new HomeFlight(from, to, durationSeconds);
@@ -272,6 +295,7 @@ export class CameraRig {
   setView(view: ViewSpec): void {
     this.cancelHome();
     this.stopRotationInertia();
+    this.overview.stopZoom();
     const pos = new Vector3(...view.pos);
     const look = new Vector3(...view.look);
     if (this._mode === 'fly') {
@@ -306,6 +330,7 @@ export class CameraRig {
       },
       homing: this.flight !== null,
       rotating: this.isRotatingByInertia,
+      overview: this._mode === 'overview' ? this.overview.zoomState() : null,
     };
   }
 
@@ -357,9 +382,12 @@ export class CameraRig {
     if (this.flight && e.button === 0) this.cancelHome();
   };
 
-  /** 俯瞰モードのホイールは距離を変える。飛行モードのホイールは速度を変えるだけなので、移動は続ける。 */
+  /**
+   * 俯瞰モードのホイールとピンチ（ctrlKey つきのホイール）は距離を変える。
+   * 飛行モードのホイールは速度を変えるだけなので、移動は続ける。
+   */
   private readonly onWheel = (e: WheelEvent): void => {
-    if (this.flight && this._mode === 'overview' && !e.ctrlKey && e.deltaY !== 0) this.cancelHome();
+    if (this.flight && this._mode === 'overview' && e.deltaY !== 0) this.cancelHome();
   };
 
   private readonly notify = (): void => {

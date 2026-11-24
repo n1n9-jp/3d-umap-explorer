@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import { Matrix4, PerspectiveCamera, Quaternion, Vector3 } from 'three';
-import { dollyPosition, orbitPose, OverviewControls, overviewGestureLimitNotches, OVERVIEW_MAX_PITCH } from './overviewControls';
+import {
+  approachLogDistance,
+  dollyPosition,
+  orbitPose,
+  OverviewControls,
+  overviewGestureLimitNotches,
+  OVERVIEW_MAX_DISTANCE,
+  OVERVIEW_MAX_PITCH,
+  OVERVIEW_MIN_DISTANCE,
+  OVERVIEW_ZOOM_TIME_CONSTANT,
+} from './overviewControls';
 
 function lookingAt(position: Vector3, target: Vector3): Quaternion {
   return new Quaternion().setFromRotationMatrix(new Matrix4().lookAt(position, target, new Vector3(0, 1, 0)));
@@ -119,6 +129,13 @@ describe('OverviewControls: ホイールの払い', () => {
     return { camera, el, controls, distance, send };
   }
 
+  /** 払いの上限の確認は、距離が追従するまでの時間を挟まずに読めるよう、時定数 0（1 度に動く）で行う。 */
+  function createJumpRig() {
+    const r = createRig();
+    r.controls.zoomTimeConstant = 0;
+    return r;
+  }
+
   /** タッチパッドの 2 本指スクロールを模した列（小さな値から立ち上がり、慣性で減衰する）。 */
   function touchpadFlick(total: number, count = 100, decay = 0.97, ramp = 10) {
     const raw = Array.from({ length: count }, (_, i) => decay ** i * Math.min(1, (i + 1) / ramp));
@@ -127,16 +144,16 @@ describe('OverviewControls: ホイールの払い', () => {
   }
 
   it('マウスのノッチ 1 つ（deltaY=100）で、距離が 1.15 倍（離れる）/ 1/1.15 倍（近づく）になる', () => {
-    const a = createRig();
+    const a = createJumpRig();
     a.send(100, 0);
     expect(a.distance()).toBeCloseTo(1.15, 9);
-    const b = createRig();
+    const b = createJumpRig();
     b.send(-100, 0);
     expect(b.distance()).toBeCloseTo(1 / 1.15, 9);
   });
 
   it('マウスのノッチだけを 50 ミリ秒間隔で続けても、制限されず 1.15^n 倍になる', () => {
-    const r = createRig();
+    const r = createJumpRig();
     for (let i = 0; i < 10; i++) r.send(-100, i * 50);
     expect(r.distance()).toBeCloseTo(1.15 ** -10, 9);
   });
@@ -144,25 +161,25 @@ describe('OverviewControls: ホイールの払い', () => {
   it('タッチパッド: 合計約 2000 ピクセルの払いでも、距離の変化は約 2 倍以内（離れる・近づく両方）', () => {
     const flick = touchpadFlick(2000);
     expect(flick.reduce((a, e) => a + e.deltaY, 0)).toBeCloseTo(2000, 9);
-    const out = createRig();
+    const out = createJumpRig();
     for (const e of flick) out.send(e.deltaY, e.timeStamp);
     expect(out.distance()).toBeLessThanOrEqual(2);
     expect(out.distance()).toBeGreaterThan(1.8); // 払いはちゃんと効く
-    const inn = createRig();
+    const inn = createJumpRig();
     for (const e of flick) inn.send(-e.deltaY, e.timeStamp);
     expect(1 / inn.distance()).toBeLessThanOrEqual(2);
     expect(1 / inn.distance()).toBeGreaterThan(1.8);
   });
 
   it('タッチパッド: 50 ピクセル以上のイベントで始まる払いも、払い全体で約 2 倍以内', () => {
-    const r = createRig();
+    const r = createJumpRig();
     for (let i = 0; i < 3; i++) r.send(150, i * 16);
     for (let i = 0; i < 150; i++) r.send(20, 48 + i * 16);
     expect(r.distance()).toBeLessThanOrEqual(2);
   });
 
   it('タッチパッド: 間をあけた別の払いは、それぞれ別に約 2 倍以内で効く', () => {
-    const r = createRig();
+    const r = createJumpRig();
     for (const e of touchpadFlick(2000)) r.send(e.deltaY, e.timeStamp);
     const first = r.distance();
     for (const e of touchpadFlick(2000)) r.send(e.deltaY, e.timeStamp + 5000);
@@ -177,18 +194,19 @@ describe('OverviewControls: ホイールの払い', () => {
     expect(overviewGestureLimitNotches(NaN)).toBe(7);
   });
 
-  it('ピンチ（ctrlKey つき）は距離を変えず、払いの累積にも数えず、ページのズームは止める', () => {
-    const r = createRig();
+  it('ピンチ（ctrlKey つき）はページのズームを止め、払いの累積に数えない', () => {
+    const r = createJumpRig();
     const ev = r.send(-100, 0, { ctrlKey: true });
     expect(ev.defaultPrevented).toBe(true);
-    for (const e of touchpadFlick(2000)) r.send(-e.deltaY, e.timeStamp + 1000, { ctrlKey: true });
-    expect(r.distance()).toBe(1);
-    r.send(100, 1000 + 100 * 16 + 20);
-    expect(r.distance()).toBeCloseTo(1.15, 9);
+    for (let i = 0; i < 100; i++) r.send(20, 1000 + i * 16, { ctrlKey: true, deltaY: 0.01 * (i % 2 ? 1 : -1) });
+    const pinched = r.distance();
+    // ピンチのあとのホイール 1 ノッチは、払いの上限に当たらず、そのまま 1.15 倍になる
+    r.send(100, 5000);
+    expect(r.distance() / pinched).toBeCloseTo(1.15, 9);
   });
 
   it('横方向だけのスクロール（deltaY=0）は距離を変えず、ページのスクロールは止める', () => {
-    const r = createRig();
+    const r = createJumpRig();
     for (let i = 0; i < 20; i++) {
       const ev = r.send(0, i * 16, { deltaX: 80 });
       expect(ev.defaultPrevented).toBe(true);
@@ -197,7 +215,7 @@ describe('OverviewControls: ホイールの払い', () => {
   });
 
   it('横方向のスクロールは、続いている払いを延ばさない', () => {
-    const r = createRig();
+    const r = createJumpRig();
     for (let i = 0; i < 100; i++) r.send(20, i * 16); // 上限（約 1.95 倍）まで使い切る
     const saturated = r.distance();
     expect(saturated).toBeCloseTo(1.1 ** 7, 6);
@@ -209,10 +227,309 @@ describe('OverviewControls: ホイールの払い', () => {
   });
 
   it('無効のときは何もしない（ページのスクロールも止めない）', () => {
-    const r = createRig();
+    const r = createJumpRig();
     r.controls.enabled = false;
     const ev = r.send(100, 0);
     expect(ev.defaultPrevented).toBe(false);
+    expect(r.distance()).toBe(1);
+  });
+});
+
+describe('approachLogDistance', () => {
+  it('差が (1 − exp(−dt/τ)) の割合だけ縮む。刻みを分けても結果は同じ', () => {
+    const one = approachLogDistance(0, 1, 0.15, 0.15);
+    expect(one.value).toBeCloseTo(1 - Math.exp(-1), 12);
+    expect(one.done).toBe(false);
+    let v = 0;
+    for (let i = 0; i < 3; i++) v = approachLogDistance(v, 1, 0.05, 0.15).value;
+    expect(v).toBeCloseTo(one.value, 12);
+  });
+
+  it('差が停止の閾値を下回ったら目標に一致させて done。τ ≤ 0 なら 1 度に目標へ', () => {
+    expect(approachLogDistance(0, 1, 100, 0.15)).toEqual({ value: 1, done: true });
+    expect(approachLogDistance(0.9995, 1, 0.001, 0.15)).toEqual({ value: 1, done: true });
+    expect(approachLogDistance(0, 1, 0.001, 0)).toEqual({ value: 1, done: true });
+    expect(approachLogDistance(0, 1, 0.001, -1)).toEqual({ value: 1, done: true });
+  });
+
+  it('dt が 0・負・有限でないときは動かさない', () => {
+    for (const dt of [0, -1, NaN, Infinity]) {
+      expect(approachLogDistance(0, 1, dt, 0.15)).toEqual({ value: 0, done: false });
+    }
+  });
+});
+
+describe('OverviewControls: 目標の距離への追従', () => {
+  const STEPS = [1 / 120, 1 / 60, 1 / 30, 0.1];
+
+  function createZoomRig(options: ConstructorParameters<typeof OverviewControls>[2] = {}, win?: object) {
+    const camera = new PerspectiveCamera(60, 1, 0.001, 20);
+    camera.position.set(0, 0, 1);
+    const el = new FakeTarget();
+    if (win) (el as unknown as { ownerDocument: unknown }).ownerDocument = { defaultView: win };
+    const controls = new OverviewControls(camera, el as unknown as HTMLElement, options);
+    controls.enabled = true;
+    let clock = 0;
+    const wheel = (deltaY: number, extra: object = {}) => {
+      clock += 1000; // 払いを区切る
+      return el.emit('wheel', { deltaY, deltaX: 0, deltaMode: 0, timeStamp: clock, ...extra });
+    };
+    /** 経過時間 `seconds` を、刻み `dt` で進める。 */
+    const run = (seconds: number, dt: number) => {
+      const n = Math.round(seconds / dt);
+      for (let i = 0; i < n; i++) controls.update(dt);
+    };
+    return { camera, el, controls, wheel, run, distance: () => controls.distance };
+  }
+
+  it('ホイールは目標の距離だけを動かし、実際の距離は動かさない（既定の時定数は 0.15 秒）', () => {
+    const r = createZoomRig();
+    expect(r.controls.zoomTimeConstant).toBe(OVERVIEW_ZOOM_TIME_CONSTANT);
+    expect(r.controls.zoomTimeConstant).toBe(0.15);
+    r.wheel(100);
+    expect(r.distance()).toBe(1);
+    expect(r.controls.targetDistance).toBeCloseTo(1.15, 12);
+    expect(r.controls.isZooming).toBe(true);
+    expect(r.controls.zoomState()).toEqual({ distance: 1, targetDistance: r.controls.targetDistance, zooming: true });
+  });
+
+  it('ln d が (1 − exp(−t/τ)) の割合で目標へ近づく。刻み幅（1/120・1/60・1/30・0.1 秒）によらず同じ', () => {
+    const lnTarget = Math.log(1.15);
+    const results = STEPS.map((dt) => {
+      const r = createZoomRig();
+      r.wheel(100);
+      r.run(0.3, dt);
+      return Math.log(r.distance());
+    });
+    for (const ln of results) {
+      expect(ln).toBeCloseTo(lnTarget * (1 - Math.exp(-0.3 / 0.15)), 9);
+      expect(ln).toBeCloseTo(results[0] as number, 9);
+    }
+  });
+
+  it('近づく間、距離は単調に変わり（離れる・近づく両方）、やがて目標に一致して止まる', () => {
+    for (const sign of [1, -1]) {
+      const r = createZoomRig();
+      r.wheel(100 * sign);
+      const target = r.controls.targetDistance;
+      let prev = r.distance();
+      let frames = 0;
+      while (r.controls.update(1 / 60)) {
+        const d = r.distance();
+        expect((d - prev) * sign).toBeGreaterThan(0);
+        expect((d - target) * sign).toBeLessThanOrEqual(1e-12);
+        prev = d;
+        frames++;
+        expect(frames).toBeLessThan(600);
+      }
+      expect(frames).toBeGreaterThan(20);
+      expect(r.distance()).toBe(target);
+      expect(r.controls.isZooming).toBe(false);
+      expect(r.controls.targetDistance).toBe(r.distance());
+      expect(r.controls.update(1 / 60)).toBe(false); // 止まったら、カメラは動かない
+    }
+  });
+
+  it('寄っている途中のホイールは、目標へ重ねて掛かる（現在の距離ではなく目標が基準）', () => {
+    const r = createZoomRig();
+    r.wheel(-100);
+    r.run(0.1, 1 / 60);
+    r.wheel(-100);
+    r.wheel(-100);
+    expect(r.controls.targetDistance).toBeCloseTo(1.15 ** -3, 12);
+    r.run(3, 1 / 60);
+    expect(r.distance()).toBeCloseTo(1.15 ** -3, 12);
+  });
+
+  it('寄る向きは中心から見たカメラの向きと視線を変えない', () => {
+    const r = createZoomRig();
+    r.camera.position.set(0.3, 0.4, 1.2);
+    r.camera.quaternion.copy(lookingAt(r.camera.position, new Vector3(0.1, 0, 0)));
+    const dir = r.camera.position.clone().sub(r.controls.pivot).normalize();
+    const q = r.camera.quaternion.clone();
+    r.wheel(100);
+    r.run(0.4, 1 / 60);
+    expect(r.camera.position.clone().sub(r.controls.pivot).normalize().distanceTo(dir)).toBeLessThan(1e-9);
+    expect(r.camera.quaternion.angleTo(q)).toBeLessThan(1e-6);
+  });
+
+  it('払いの上限と距離の範囲は保たれる', () => {
+    // 払いの上限: 約 2000 ピクセルの払いでも、目標は 1.95 倍（1.1^7）まで
+    const r = createZoomRig();
+    for (let i = 0; i < 100; i++) r.el.emit('wheel', { deltaY: 20, deltaX: 0, deltaMode: 0, timeStamp: i * 16 });
+    expect(r.controls.targetDistance).toBeCloseTo(1.1 ** 7, 6);
+    r.run(5, 1 / 60);
+    expect(r.distance()).toBeCloseTo(1.1 ** 7, 6);
+    // 距離の範囲: 目標も実際の距離も範囲の外へ出ない
+    const far = createZoomRig();
+    const near = createZoomRig();
+    for (let i = 0; i < 60; i++) {
+      far.wheel(100);
+      near.wheel(-100);
+      far.run(0.05, 1 / 60);
+      near.run(0.05, 1 / 60);
+      expect(far.distance()).toBeLessThanOrEqual(OVERVIEW_MAX_DISTANCE + 1e-12);
+      expect(near.distance()).toBeGreaterThanOrEqual(OVERVIEW_MIN_DISTANCE - 1e-12);
+    }
+    far.run(5, 1 / 60);
+    near.run(5, 1 / 60);
+    expect(far.distance()).toBeCloseTo(OVERVIEW_MAX_DISTANCE, 9);
+    expect(near.distance()).toBeCloseTo(OVERVIEW_MIN_DISTANCE, 9);
+    // 端で押し続けても、寄っている途中にはならない
+    far.wheel(100);
+    expect(far.controls.isZooming).toBe(false);
+  });
+
+  it('ピンチ（ctrlKey つき）で、factor = exp(deltaY × 0.01) だけ目標が動く（広げる = 近づく）。ページのズームは止める', () => {
+    const r = createZoomRig();
+    const ev = r.wheel(-30, { ctrlKey: true });
+    expect(ev.defaultPrevented).toBe(true);
+    expect(r.controls.targetDistance).toBeCloseTo(Math.exp(-0.3), 12);
+    r.wheel(10, { ctrlKey: true });
+    expect(r.controls.targetDistance).toBeCloseTo(Math.exp(-0.2), 12);
+    r.run(0.15, 1 / 60);
+    expect(Math.log(r.distance())).toBeCloseTo(-0.2 * (1 - Math.exp(-1)), 9);
+    r.run(5, 1 / 60);
+    expect(r.distance()).toBeCloseTo(Math.exp(-0.2), 12);
+    // deltaY が 0 のピンチは何もしない
+    const flat = createZoomRig();
+    flat.wheel(0, { ctrlKey: true });
+    expect(flat.controls.isZooming).toBe(false);
+  });
+
+  it('ピンチも払いの上限に掛からず、刻み幅によらず同じ結果になる', () => {
+    const results = STEPS.map((dt) => {
+      const r = createZoomRig();
+      r.wheel(80, { ctrlKey: true }); // exp(0.8) ≈ 2.2 倍（払いの上限 1.95 倍を超える）
+      r.run(0.2, dt);
+      return Math.log(r.distance());
+    });
+    expect(results[0]).toBeCloseTo(0.8 * (1 - Math.exp(-0.2 / 0.15)), 9);
+    for (const ln of results) expect(ln).toBeCloseTo(results[0] as number, 9);
+  });
+
+  it('ドラッグで回しながら寄っても、回転と距離の変化は両立する', () => {
+    const camera = new PerspectiveCamera(60, 1, 0.001, 20);
+    camera.position.set(0.3, 0.4, 2);
+    camera.quaternion.copy(lookingAt(camera.position, new Vector3()));
+    camera.updateMatrixWorld();
+    const el = new FakeTarget();
+    const controls = new OverviewControls(camera, el as unknown as HTMLElement);
+    controls.enabled = true;
+    const azimuth = () => Math.atan2(camera.position.x, camera.position.z);
+    const a0 = azimuth();
+    const d0 = controls.distance;
+    el.emit('wheel', { deltaY: -100, deltaMode: 0, timeStamp: 0 });
+    el.emit('wheel', { deltaY: -100, deltaMode: 0, timeStamp: 1000 });
+    const target = controls.targetDistance;
+    expect(target).toBeCloseTo(d0 / 1.15 ** 2, 12);
+    el.emit('pointerdown', { button: 0, pointerId: 1, clientX: 100, clientY: 100, timeStamp: 1000 });
+    for (let i = 1; i <= 10; i++) {
+      el.emit('pointermove', { pointerId: 1, clientX: 100 + 10 * i, clientY: 100, timeStamp: 1000 + 16 * i });
+      controls.update(1 / 60);
+      expect(controls.isZooming || controls.distance === target).toBe(true);
+    }
+    expect(Math.abs(azimuth() - a0)).toBeGreaterThan(0.3); // 回った（10 回 × 10px × 0.005 rad）
+    expect(controls.distance).toBeLessThan(d0); // 寄ってもいる
+    el.emit('pointerup', { pointerId: 1, clientX: 200, clientY: 100, timeStamp: 1000 + 16 * 10 + 300 });
+    for (let i = 0; i < 300; i++) controls.update(1 / 60);
+    expect(controls.distance).toBeCloseTo(target, 12);
+    expect(controls.isZooming).toBe(false);
+  });
+
+  it('時定数 0 では、ホイールごとに距離が 1 度に動く（オプションでも代入でも）。null で既定へ戻る', () => {
+    const a = createZoomRig({ zoomTimeConstant: 0 });
+    expect(a.controls.zoomTimeConstant).toBe(0);
+    a.wheel(100);
+    expect(a.distance()).toBeCloseTo(1.15, 12);
+    expect(a.controls.isZooming).toBe(false);
+    a.wheel(-30, { ctrlKey: true });
+    expect(a.distance()).toBeCloseTo(1.15 * Math.exp(-0.3), 12);
+    expect(a.controls.update(1 / 60)).toBe(false);
+
+    const b = createZoomRig();
+    b.controls.zoomTimeConstant = 0;
+    b.wheel(100);
+    expect(b.distance()).toBeCloseTo(1.15, 12);
+    b.controls.zoomTimeConstant = 0.5;
+    expect(b.controls.zoomTimeConstant).toBe(0.5);
+    b.controls.zoomTimeConstant = null;
+    expect(b.controls.zoomTimeConstant).toBe(0.15);
+    b.controls.zoomTimeConstant = NaN; // 無視する
+    expect(b.controls.zoomTimeConstant).toBe(0.15);
+  });
+
+  it('時定数を変えると近づく速さが変わる', () => {
+    const slow = createZoomRig({ zoomTimeConstant: 0.5 });
+    slow.wheel(100);
+    slow.run(0.5, 1 / 60);
+    expect(Math.log(slow.distance())).toBeCloseTo(Math.log(1.15) * (1 - Math.exp(-1)), 9);
+  });
+
+  it('「動きを減らす」設定のときは、既定で 1 度に動く。時定数を明示すればそちらに従う', () => {
+    const win = new FakeTarget() as FakeTarget & { matchMedia?: (q: string) => { matches: boolean } };
+    win.matchMedia = (q: string) => ({ matches: q.includes('prefers-reduced-motion: reduce') });
+    const r = createZoomRig({}, win);
+    expect(r.controls.zoomTimeConstant).toBe(0);
+    r.wheel(100);
+    expect(r.distance()).toBeCloseTo(1.15, 12);
+    expect(r.controls.isZooming).toBe(false);
+    r.controls.zoomTimeConstant = 0.15;
+    r.wheel(100);
+    expect(r.controls.isZooming).toBe(true);
+    r.controls.zoomTimeConstant = null;
+    expect(r.controls.zoomTimeConstant).toBe(0);
+  });
+
+  it('無効にすると寄っている途中の距離は止まり、再び有効にしても続きを動かない', () => {
+    const r = createZoomRig();
+    r.wheel(100);
+    r.run(0.1, 1 / 60);
+    const d = r.distance();
+    r.controls.enabled = false;
+    expect(r.controls.isZooming).toBe(false);
+    r.controls.enabled = true;
+    expect(r.controls.update(1 / 60)).toBe(false);
+    expect(r.distance()).toBe(d);
+  });
+
+  it('stopZoom で止まる（位置はそのまま、目標は今の距離になる）', () => {
+    const r = createZoomRig();
+    r.wheel(100);
+    r.run(0.1, 1 / 60);
+    const d = r.distance();
+    r.controls.stopZoom();
+    expect(r.controls.isZooming).toBe(false);
+    expect(r.controls.targetDistance).toBe(d);
+    r.run(1, 1 / 60);
+    expect(r.distance()).toBe(d);
+  });
+
+  it('範囲の外から始まっても、目標へ向かって跳ばずに寄る', () => {
+    const r = createZoomRig();
+    r.camera.position.set(0, 0, 20); // 最大の 8 を超えている
+    r.wheel(100); // 離れる向き: 目標は最大の 8
+    expect(r.controls.targetDistance).toBeCloseTo(OVERVIEW_MAX_DISTANCE, 12);
+    r.controls.update(1 / 60);
+    expect(r.distance()).toBeLessThan(20);
+    expect(r.distance()).toBeGreaterThan(OVERVIEW_MAX_DISTANCE + 0.1); // 1 フレームで 8 へ跳ばない
+  });
+
+  it('dt が 0 や負・有限でないフレームでは動かない', () => {
+    const r = createZoomRig();
+    r.wheel(100);
+    for (const dt of [0, -1, NaN]) {
+      expect(r.controls.update(dt)).toBe(false);
+      expect(r.distance()).toBe(1);
+    }
+    expect(r.controls.isZooming).toBe(true);
+  });
+
+  it('dispose のあと update は何もしない', () => {
+    const r = createZoomRig();
+    r.wheel(100);
+    r.controls.dispose();
+    expect(r.controls.update(1 / 60)).toBe(false);
     expect(r.distance()).toBe(1);
   });
 });

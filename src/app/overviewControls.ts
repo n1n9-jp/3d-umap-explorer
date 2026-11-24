@@ -1,7 +1,7 @@
 import { Quaternion, Vector3 } from 'three';
 import type { PerspectiveCamera } from 'three';
 import { DEFAULT_WHEEL_GESTURE_LIMIT_NOTCHES, isDiscreteWheelDelta, WheelGestureLimiter } from '../controls/WheelGesture';
-import { eventTimeMs, RotationInertia } from '../controls/RotationInertia';
+import { eventTimeMs, prefersReducedMotion, RotationInertia } from '../controls/RotationInertia';
 import type { RotationInertiaOptions } from '../controls/RotationInertia';
 
 /**
@@ -14,12 +14,20 @@ import type { RotationInertiaOptions } from '../controls/RotationInertia';
  * - ドラッグの上下: カメラの右軸まわりの回転。視線の仰角は ±MAX_PITCH に収める
  * どちらも視線の横傾き（roll）を生まないので、飛行モードへ戻しても視点は跳ばない。
  * ドラッグを離したあとは、離す直前の速さで中心のまわりを回り続けて減速する（慣性。`RotationInertia`）。
+ * ホイールとピンチは「目標の距離」だけを動かし、実際の距離は毎フレーム、対数の領域で目標へ近づく
+ * （`approachLogDistance`）。回転は中心までの距離を変えないので、ドラッグと寄り・離れは両立する。
  * 毎フレーム `update(dt)` を呼ぶこと。
  */
 
 export const OVERVIEW_MAX_PITCH = (89 * Math.PI) / 180;
 export const OVERVIEW_MIN_DISTANCE = 0.002;
 export const OVERVIEW_MAX_DISTANCE = 8;
+/** 実際の距離が目標へ近づく速さの時定数（秒）。`ln d` の目標との差が、この時間で 1/e になる。 */
+export const OVERVIEW_ZOOM_TIME_CONSTANT = 0.15;
+/** ピンチ（ctrlKey つきのホイール）の `deltaY` 1 あたりの、距離の倍率の対数（`factor = exp(deltaY × この値)`）。 */
+export const OVERVIEW_PINCH_RATE = 0.01;
+/** `ln d` の目標との差がこれを下回ったら、目標に一致させて止める（約 0.1%。時定数 0.15 秒で、約 0.7 秒後）。 */
+export const OVERVIEW_ZOOM_STOP_LN = 1e-3;
 
 const WORLD_UP = new Vector3(0, 1, 0);
 const WORLD_X = new Vector3(1, 0, 0);
@@ -80,6 +88,36 @@ export function dollyPosition(
   return pivot.clone().addScaledVector(dir, next);
 }
 
+/**
+ * 距離の対数 `current` を、目標 `target` へ `dtSeconds` だけ近づける:
+ * `current += (target − current) × (1 − exp(−dt/τ))`。解析解なので、刻み幅を分けても結果は同じ。
+ * 差が `stopLn` 未満になったら（または `tau` が 0 以下なら）目標に一致させ、`done` を true にする。
+ * `dtSeconds` が負・有限でないとき、0 のときは動かさない（`tau` が 0 以下なら、いつでも目標へ一致させる）。
+ */
+export function approachLogDistance(
+  current: number,
+  target: number,
+  dtSeconds: number,
+  tau: number,
+  stopLn = OVERVIEW_ZOOM_STOP_LN,
+): { value: number; done: boolean } {
+  if (!(tau > 0)) return { value: target, done: true };
+  if (!Number.isFinite(dtSeconds) || dtSeconds <= 0) return { value: current, done: Math.abs(target - current) < stopLn };
+  const next = current + (target - current) * (1 - Math.exp(-dtSeconds / tau));
+  if (Math.abs(target - next) < stopLn) return { value: target, done: true };
+  return { value: next, done: false };
+}
+
+/** 俯瞰モードの距離の状態（検証・表示用）。 */
+export interface OverviewZoomState {
+  /** 点群の中心（pivot）から、カメラまでの実際の距離。 */
+  distance: number;
+  /** ホイール・ピンチが決めた目標の距離。寄っている途中でなければ `distance` と同じ。 */
+  targetDistance: number;
+  /** 実際の距離が目標へ寄っている途中か。 */
+  zooming: boolean;
+}
+
 export interface OverviewControlsOptions {
   /** ドラッグ 1 ピクセルあたりの回転量（ラジアン）。 */
   rotateSpeed?: number;
@@ -90,9 +128,16 @@ export interface OverviewControlsOptions {
    * 省略すると、時定数 0.3 秒で、「動きを減らす」設定（`prefers-reduced-motion: reduce`）なら無効。
    */
   rotationInertia?: RotationInertiaOptions;
+  /**
+   * 距離が目標へ近づく速さの時定数（秒）。0 以下で、ホイール 1 回ごとに距離が 1 度に動く。
+   * 省略すると、0.15 秒で、「動きを減らす」設定（`prefers-reduced-motion: reduce`）なら 0。
+   */
+  zoomTimeConstant?: number;
 }
 
 const PIXELS_PER_NOTCH = 100;
+/** 対数を取るときの、距離の下限（中心と重なったカメラで `ln 0` にならないように）。 */
+const TINY_DISTANCE = 1e-9;
 const LINES_PER_NOTCH = 3;
 /** 飛行モードの速度の倍率（1 ノッチあたり）。払いの上限を、飛行モードと同じ倍率の変化に揃える基準。 */
 const FLY_WHEEL_FACTOR = 1.1;
@@ -122,6 +167,10 @@ export class OverviewControls {
   private readonly wheelGesture: WheelGestureLimiter;
   private readonly inertia: RotationInertia;
   private readonly win: Window | null;
+  /** 時定数を明示したときの値。null は自動（既定値。ただし「動きを減らす」設定なら 0）。 */
+  private explicitZoomTimeConstant: number | null;
+  /** 目標の距離の対数。寄っている途中でなければ null（その間、距離の持ち主はカメラの位置）。 */
+  private zoomTargetLn: number | null = null;
 
   constructor(camera: PerspectiveCamera, domElement: HTMLElement, options: OverviewControlsOptions = {}) {
     this.camera = camera;
@@ -131,6 +180,7 @@ export class OverviewControls {
     this.wheelGesture = new WheelGestureLimiter({ limitNotches: overviewGestureLimitNotches(this.wheelFactor) });
     this.win = domElement.ownerDocument?.defaultView ?? (typeof window !== 'undefined' ? window : null);
     this.inertia = new RotationInertia(options.rotationInertia, this.win);
+    this.explicitZoomTimeConstant = options.zoomTimeConstant ?? null;
     domElement.addEventListener('pointerdown', this.onPointerDown);
     domElement.addEventListener('pointermove', this.onPointerMove);
     domElement.addEventListener('pointerup', this.onPointerUp);
@@ -152,7 +202,46 @@ export class OverviewControls {
       this.inertia.cancelDrag();
       this.inertia.stop();
       this.wheelGesture.reset();
+      this.zoomTargetLn = null;
     }
+  }
+
+  /**
+   * 距離が目標へ近づく速さの時定数（秒）。0 以下で、ホイールもピンチも 1 度に距離を動かす。
+   * 代入しなければ既定の 0.15 秒（「動きを減らす」設定なら 0）。`null` を代入すると、その既定へ戻す。
+   */
+  get zoomTimeConstant(): number {
+    if (this.explicitZoomTimeConstant !== null) return this.explicitZoomTimeConstant;
+    return prefersReducedMotion(this.win) ? 0 : OVERVIEW_ZOOM_TIME_CONSTANT;
+  }
+
+  set zoomTimeConstant(value: number | null) {
+    if (value === null) this.explicitZoomTimeConstant = null;
+    else if (Number.isFinite(value)) this.explicitZoomTimeConstant = value;
+  }
+
+  /** 中心（pivot）からカメラまでの実際の距離。 */
+  get distance(): number {
+    return this.camera.position.distanceTo(this.pivot);
+  }
+
+  /** ホイール・ピンチが決めた目標の距離。寄っている途中でなければ、実際の距離と同じ。 */
+  get targetDistance(): number {
+    return this.zoomTargetLn !== null ? Math.exp(this.zoomTargetLn) : this.distance;
+  }
+
+  /** 実際の距離が目標へ寄っている途中なら true。 */
+  get isZooming(): boolean {
+    return this.zoomTargetLn !== null;
+  }
+
+  zoomState(): OverviewZoomState {
+    return { distance: this.distance, targetDistance: this.targetDistance, zooming: this.isZooming };
+  }
+
+  /** 寄っている途中の距離の変化を止める（位置と向きはそのまま。目標は今の距離になる）。 */
+  stopZoom(): void {
+    this.zoomTargetLn = null;
   }
 
   /**
@@ -187,19 +276,66 @@ export class OverviewControls {
   }
 
   /**
-   * `dtSeconds` だけ進める。慣性で回ってカメラが動いたら true。
+   * `dtSeconds` だけ進める。回転の慣性か、目標の距離への近づきでカメラが動いたら true。
    * 回転は点群の中心（pivot）のまわりで、中心までの距離は変わらない。仰角は ±89° に収まる。
+   * 距離は、中心から見たカメラの向きと視線の向きを変えずに、対数の領域で目標へ近づく。
    */
   update(dtSeconds: number): boolean {
+    if (!this._enabled || this.disposed) return false;
+    let moved = false;
     const inertia = this.inertia;
-    if (!this._enabled || this.disposed || !inertia.active) return false;
-    if (!inertia.step(dtSeconds)) return false;
-    const { dYaw, dPitch } = inertia;
-    const pitchBefore = this.pitch();
-    this.apply(orbitPose({ position: this.camera.position, quaternion: this.camera.quaternion }, this.pivot, dYaw, dPitch));
-    // 仰角が ±89° に当たったら、そのぶんの角速度は捨てる（上下の端で回り続けない）
-    if (dPitch !== 0 && Math.abs(this.pitch() - (pitchBefore + dPitch)) > 1e-12) inertia.blockPitch();
+    if (inertia.active && inertia.step(dtSeconds)) {
+      const { dYaw, dPitch } = inertia;
+      const pitchBefore = this.pitch();
+      this.apply(orbitPose({ position: this.camera.position, quaternion: this.camera.quaternion }, this.pivot, dYaw, dPitch));
+      // 仰角が ±89° に当たったら、そのぶんの角速度は捨てる（上下の端で回り続けない）
+      if (dPitch !== 0 && Math.abs(this.pitch() - (pitchBefore + dPitch)) > 1e-12) inertia.blockPitch();
+      moved = true;
+    }
+    if (this.zoomTargetLn !== null && this.stepZoom(dtSeconds)) moved = true;
+    return moved;
+  }
+
+  /** 実際の距離を目標へ `dtSeconds` だけ近づける。カメラが動いたら true。 */
+  private stepZoom(dtSeconds: number): boolean {
+    const target = this.zoomTargetLn;
+    if (target === null) return false;
+    const tau = this.zoomTimeConstant;
+    if (tau > 0 && !(Number.isFinite(dtSeconds) && dtSeconds > 0)) return false;
+    const current = Math.log(Math.max(this.distance, TINY_DISTANCE));
+    const { value, done } = approachLogDistance(current, target, dtSeconds, tau);
+    if (done) this.zoomTargetLn = null;
+    this.setDistance(Math.exp(value));
     return true;
+  }
+
+  /** 中心から見たカメラの向きと、視線の向きは変えずに、中心までの距離を `distance` にする。 */
+  private setDistance(distance: number): void {
+    const offset = this.camera.position.clone().sub(this.pivot);
+    const current = offset.length();
+    // 中心と重なっているときは、視線の反対側へ退く向きを使う。
+    const dir = current > 1e-9 ? offset.multiplyScalar(1 / current) : new Vector3(0, 0, 1).applyQuaternion(this.camera.quaternion);
+    this.camera.position.copy(this.pivot).addScaledVector(dir, distance);
+    this.camera.updateMatrixWorld();
+  }
+
+  /**
+   * 目標の距離を `factor` 倍にする。目標は、寄っている途中ならその目標、そうでなければ今の距離を基準にし、
+   * 距離の範囲（最小・最大）に収める。時定数が 0 以下なら、実際の距離も 1 度に動かす。
+   */
+  private zoomBy(factor: number): void {
+    if (!(factor > 0) || !Number.isFinite(factor)) return;
+    const base = this.zoomTargetLn !== null ? Math.exp(this.zoomTargetLn) : Math.max(this.distance, OVERVIEW_MIN_DISTANCE);
+    const target = Math.min(OVERVIEW_MAX_DISTANCE, Math.max(OVERVIEW_MIN_DISTANCE, base * factor));
+    if (!(this.zoomTimeConstant > 0)) {
+      this.zoomTargetLn = null;
+      this.setDistance(target);
+      return;
+    }
+    const targetLn = Math.log(target);
+    // 範囲の端で、すでに目標の距離にいるなら、寄っている途中にはしない
+    if (this.zoomTargetLn === null && Math.abs(targetLn - Math.log(Math.max(this.distance, TINY_DISTANCE))) < OVERVIEW_ZOOM_STOP_LN) return;
+    this.zoomTargetLn = targetLn;
   }
 
   private pitch(): number {
@@ -220,6 +356,7 @@ export class OverviewControls {
     this.endDrag();
     this.inertia.cancelDrag();
     this.inertia.stop();
+    this.zoomTargetLn = null;
   }
 
   private apply(pose: OverviewPose): void {
@@ -299,8 +436,13 @@ export class OverviewControls {
   private readonly onWheel = (e: WheelEvent): void => {
     if (!this._enabled) return;
     e.preventDefault();
-    // ピンチ操作（ctrlKey つきのホイール）はページのズームに当たる操作で、距離の変更ではない。
-    if (e.ctrlKey) return;
+    // ピンチ操作（ctrlKey つきのホイール）は、ページのズームは止めて、距離を変える。広げる（deltaY < 0）と近づく。
+    // 払いの上限（タッチパッドとマウスの判別）は、通常のホイールのためのもので、ピンチには掛けない。
+    if (e.ctrlKey) {
+      if (e.deltaY === 0 || !Number.isFinite(e.deltaY)) return;
+      this.zoomBy(Math.exp(e.deltaY * OVERVIEW_PINCH_RATE));
+      return;
+    }
     // 横方向だけのスクロールは、距離の変更ではなく、払いの継続にも数えない。
     if (e.deltaY === 0) return;
     let notches: number;
@@ -318,8 +460,6 @@ export class OverviewControls {
     const effective = this.wheelGesture.consume(notches, timeMs, isDiscreteWheelDelta(e.deltaMode, e.deltaY));
     if (effective === 0) return;
     // 下へ回す（正）と離れ、上へ回す（負）と近づく。
-    const position = dollyPosition(this.camera.position, this.camera.quaternion, this.pivot, Math.pow(this.wheelFactor, effective));
-    this.camera.position.copy(position);
-    this.camera.updateMatrixWorld();
+    this.zoomBy(Math.pow(this.wheelFactor, effective));
   };
 }

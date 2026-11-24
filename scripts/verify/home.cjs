@@ -58,6 +58,12 @@ const frames = (page, n) => page.evaluate((k) => window.__explorer.measureFrames
 const setView = (page, pos, look) => page.evaluate((v) => window.__explorer.setView(v), { pos, look });
 const waitForMode = (page, mode) => page.waitForFunction((m) => window.__explorer.getState().mode === m, mode);
 
+/** 描画の中央のキャンバスへ、ピンチ（ctrlKey つきのホイール）を 1 回送る。 */
+const pinch = (page, deltaY) => page.evaluate((dy) => {
+  const el = document.querySelector('#app canvas');
+  el.dispatchEvent(new WheelEvent('wheel', { deltaY: dy, deltaMode: 0, ctrlKey: true, bubbles: true, cancelable: true, clientX: 640, clientY: 400 }));
+}, deltaY);
+
 /** 描画のフレームごとに位置・向き・移動中かどうかを記録する。移動が終わる（または `limit` フレームに達する）まで。 */
 function sampleFlight(page, limit = 150) {
   return page.evaluate((max) => new Promise((resolve) => {
@@ -196,6 +202,37 @@ async function testHomeOverview(page, views) {
   check('O で飛行モードへ戻しても、位置と向きが跳ばない', maxAbsDiff(f.position, o.position) < 1e-6 && maxAbsDiff(f.direction, o.direction) < 1e-5);
 }
 
+async function testHomeOverviewInterrupt(page, views) {
+  console.log('\n[俯瞰モードの移動中に、ホイールとピンチで中断]');
+  const edge = views[1];
+  await page.keyboard.press('KeyO');
+  await waitForMode(page, 'overview');
+  const home = await homeView(page);
+  await page.mouse.move(640, 400);
+  for (const [name, send] of [
+    ['ホイール', () => page.mouse.wheel(0, 100)],
+    ['ピンチ（ctrlKey つきのホイール）', () => pinch(page, -50)],
+  ]) {
+    await setView(page, edge.pos, edge.look);
+    await frames(page, 3);
+    await page.keyboard.press('KeyH');
+    await frames(page, 2);
+    const mid = await state(page);
+    check(`${name}の前に、移動中である`, mid.mode === 'overview' && mid.homing && len(sub(mid.position, home.pos)) > 0.1, `ホームまで ${len(sub(mid.position, home.pos)).toFixed(3)}`);
+    await send();
+    await page.waitForFunction(() => !window.__explorer.getState().homing);
+    const cut = await state(page);
+    check(`俯瞰モードの移動中の${name}で、移動が中断される`, !cut.homing && cut.mode === 'overview');
+    await frames(page, 6);
+    const end = await state(page);
+    check(`中断後はホームへ向かわない（${name}）`, len(sub(end.position, home.pos)) > 0.1, `ホームまで ${len(sub(end.position, home.pos)).toFixed(3)}`);
+    // 寄る動きが終わるまで待ってから、次へ
+    await page.waitForFunction(() => { const o = window.__explorer.getState().overview; return o && !o.zooming; }, null, { timeout: 30000 });
+  }
+  await page.keyboard.press('KeyO');
+  await waitForMode(page, 'fly');
+}
+
 async function testInterrupt(page, views) {
   console.log('\n[移動中に W で中断]');
   const inside = views[2];
@@ -290,6 +327,7 @@ async function main() {
     await waitForMode(page, 'overview');
     await page.keyboard.press('KeyO');
     await waitForMode(page, 'fly');
+    await testHomeOverviewInterrupt(page, views);
     await testInterrupt(page, views);
     await page.close();
 

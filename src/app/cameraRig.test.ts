@@ -212,6 +212,83 @@ describe('CameraRig.goHome', () => {
     expect(rig.getState().homing).toBe(false);
   });
 
+  it('俯瞰モードでは、ピンチ（ctrlKey つきのホイール）でも中断する。deltaY が 0 のピンチと、飛行モードのピンチでは中断しない', () => {
+    const { el, rig } = createRig();
+    rig.setMode('overview');
+    rig.goHome(HOME);
+    el.emit('wheel', { deltaY: 0, deltaMode: 0, ctrlKey: true });
+    expect(rig.getState().homing).toBe(true);
+    el.emit('wheel', { deltaY: -5, deltaMode: 0, ctrlKey: true });
+    expect(rig.getState().homing).toBe(false);
+
+    const fly = createRig();
+    fly.rig.goHome(HOME);
+    fly.el.emit('wheel', { deltaY: -5, deltaMode: 0, ctrlKey: true });
+    expect(fly.rig.getState().homing).toBe(true);
+  });
+
+  it('寄っている途中でホームへの移動を始めると、寄りは止まり、着いたあとに再開しない', () => {
+    const { camera, el, rig } = createRig();
+    rig.setView({ pos: [1.5, 0.5, 1.5], look: [0, 0, 0] });
+    rig.setMode('overview');
+    el.emit('wheel', { deltaY: 100, deltaMode: 0, ctrlKey: false, timeStamp: 0 });
+    rig.update(1 / 60);
+    expect(rig.getState().overview?.zooming).toBe(true);
+    rig.goHome(HOME);
+    expect(rig.getState().overview?.zooming).toBe(false);
+    runFlight(rig);
+    expect(camera.position.toArray()).toEqual(HOME.pos);
+    rig.update(0.1);
+    expect(camera.position.toArray()).toEqual(HOME.pos);
+  });
+
+  it('寄っている途中の setView は、寄りを止めて指定の位置に留まる', () => {
+    const { camera, el, rig } = createRig();
+    rig.setView({ pos: [1.5, 0.5, 1.5], look: [0, 0, 0] });
+    rig.setMode('overview');
+    el.emit('wheel', { deltaY: 100, deltaMode: 0, ctrlKey: false, timeStamp: 0 });
+    rig.update(1 / 60);
+    rig.setView({ pos: [0, 0, 1], look: [0, 0, 0] });
+    rig.update(0.1);
+    expect(camera.position.toArray()).toEqual([0, 0, 1]);
+    expect(rig.getState().overview?.zooming).toBe(false);
+  });
+
+  it('getState の overview は、俯瞰モードの目標の距離・実際の距離・寄っている途中かを返す（飛行モードでは null）', () => {
+    const { el, rig } = createRig();
+    rig.setView({ pos: [0, 0, 2], look: [0, 0, 0] });
+    expect(rig.getState().overview).toBeNull();
+    rig.setMode('overview');
+    expect(rig.getState().overview).toEqual({ distance: 2, targetDistance: 2, zooming: false });
+    el.emit('wheel', { deltaY: -100, deltaMode: 0, ctrlKey: false, timeStamp: 0 });
+    const mid = rig.getState().overview;
+    expect(mid?.zooming).toBe(true);
+    expect(mid?.distance).toBe(2);
+    expect(mid?.targetDistance).toBeCloseTo(2 / 1.15, 12);
+    for (let i = 0; i < 300; i++) rig.update(1 / 60);
+    const end = rig.getState().overview;
+    expect(end?.zooming).toBe(false);
+    expect(end?.distance).toBeCloseTo(2 / 1.15, 12);
+    expect(end?.targetDistance).toBe(end?.distance);
+    rig.setMode('fly');
+    expect(rig.getState().overview).toBeNull();
+  });
+
+  it('zoomTimeConstant は、オプションでも代入でも設定でき、null で既定へ戻る。0 では 1 度に動く', () => {
+    const camera = new PerspectiveCamera(60, 1.6, 0.0005, 12);
+    const win = new FakeTarget();
+    const el = new FakeTarget();
+    el.ownerDocument = { defaultView: win };
+    const rig = new CameraRig(camera, el as unknown as HTMLElement, new Vector3(), { zoomTimeConstant: 0 });
+    expect(rig.zoomTimeConstant).toBe(0);
+    rig.setView({ pos: [0, 0, 2], look: [0, 0, 0] });
+    rig.setMode('overview');
+    el.emit('wheel', { deltaY: 100, deltaMode: 0, ctrlKey: false, timeStamp: 0 });
+    expect(camera.position.z).toBeCloseTo(2.3, 12);
+    rig.zoomTimeConstant = null;
+    expect(rig.zoomTimeConstant).toBe(0.15);
+  });
+
   it('setView で中断する', () => {
     const { camera, rig } = createRig();
     rig.goHome(HOME);
