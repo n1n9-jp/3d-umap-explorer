@@ -568,8 +568,8 @@ async function testToggleAndFrames(page) {
   const svgOff = await readSvg(page);
   const topOff = await page.evaluate(([x, y]) => document.elementFromPoint(x, y)?.tagName, [st.map.left + st.map.width / 2, st.map.top + st.map.height / 2]);
   check('M キーで消える（オーバーレイも隠れ、その位置の最前面は本体の canvas）', off.ok && svgOff.hidden && topOff === 'CANVAS', `最前面 ${topOff}`);
-  const hud = (await page.evaluate(() => document.getElementById('hud').innerText)).split('\n');
-  check('HUD の操作説明に M キーがある', hud[2].includes('M ミニマップ'), JSON.stringify(hud[2]));
+  const help = await page.evaluate(() => window.__explorer.hud.getState().detail[1]); // 操作説明の行（畳んでいても読める）
+  check('HUD の操作説明に M キーがある', help.includes('M ミニマップ'), JSON.stringify(help));
   // 消えている間は、その領域に本体の描画が見える: 実際の画面の画素が、本体だけを描いた画素と一致する
   const shotOff = await page.screenshot({ clip });
   const cmp = await page.evaluate(async ({ off, on, region }) => {

@@ -3,7 +3,7 @@ import { BACKGROUND_COLOR } from './render/palette';
 import { type ClipPlanes } from './render/clip';
 import { formatView, parsePositiveNumber, parseView, type ViewSpec } from './render/view';
 import type { CameraState } from './app/cameraRig';
-import { renderHud } from './app/hud';
+import { HudView, isHudToggleKey, showHudFailure, type HudState } from './app/hud';
 import { ModeSwitch, type ModeSwitchState } from './app/modeSwitch';
 import { TopLayout } from './app/topLayout';
 import type { PickResult } from './picking/GpuPicker';
@@ -55,6 +55,12 @@ declare global {
       homeView(): ViewSpec;
       /** 現在のモード・位置・注視点・速度・速度の自動調整の状態。 */
       getState(): CameraState;
+      /** 左下の HUD（src/app/hud.ts）。詳細の開閉の状態・文面（畳んでいても詳細の文面を読める）・高さ。`setExpanded` は利用者が操作したのと同じ（以後、画面の幅が変わっても保つ） */
+      hud: {
+        getState(): HudState;
+        setExpanded(expanded: boolean): void;
+        toggle(): void;
+      };
       /** 左上のカメラのモードの表示（src/app/modeSwitch.ts）。表示が示しているモード・選択中のボタン・読み上げの文 */
       modeSwitch: {
         getState(): ModeSwitchState;
@@ -206,12 +212,14 @@ async function start(): Promise<void> {
   const modeSwitch = new ModeSwitch(doc, (mode) => view?.controller.setMode(mode));
   // 画面の上部の高さ（右上の列が、HUD・現在地・ミニマップに重ならないように）
   const topLayout = new TopLayout(doc);
+  // 左下の HUD。詳細を開く・畳むのは、ボタンと ? キー。既定は画面の幅で決める（利用者が操作したあとは、その選択を保つ）
+  const hudView = new HudView(doc, () => window.innerWidth);
 
   const updateHud = () => {
     if (!view) return;
     const s = view.controller.getState();
     modeSwitch.set(s.mode); // O キー・クリック・点へ飛ぶ操作による自動の切り替えのどれでも、ここを通る（onChange）
-    renderHud(hud, {
+    hudView.render({
       datasetName: view.name,
       pointCount: view.arrays.manifest.count,
       pointSize: view.cloud.params.pointSize,
@@ -227,10 +235,7 @@ async function start(): Promise<void> {
     });
   };
 
-  const showHudError = (message: string) => {
-    hud.textContent = `読み込みに失敗しました: ${message}`;
-    hud.classList.add('error');
-  };
+  const showHudError = (message: string) => hudView.showFailure(message);
 
   /** 読み込んだデータで表示を作り直す。作れなければ前のデータで作り直して、エラーを投げる。 */
   const install = (data: LoadedDataset, next: DatasetTarget, search: string | null) => {
@@ -260,7 +265,7 @@ async function start(): Promise<void> {
     // URL の pos・look があればその視点、なければホームの視点から始める（切り替えでは常にホームの視点）
     view.controller.setView(search !== null ? parseView(search, view.homeView()) : view.homeView());
     view.updateCameraDependent();
-    hud.classList.remove('error');
+    hudView.clearFailure();
     state.current = {
       id: next.entry?.id ?? null, dir: next.dir, name: view.name, kind: view.arrays.manifest.kind, count: view.arrays.manifest.count,
     };
@@ -391,6 +396,7 @@ async function start(): Promise<void> {
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
     view?.resize();
+    hudView.resize();
   };
   window.addEventListener('resize', resize);
   resize();
@@ -413,6 +419,7 @@ async function start(): Promise<void> {
   bindShortcut(window, 'KeyM', () => view?.minimap.toggle()); // M キーでミニマップの表示・非表示
   bindShortcut(window, 'KeyU', () => toggleUmapPanel(true)); // U キーで UMAP の再計算のパネルを開閉
   bindShortcut(window, 'KeyK', () => setWordsEnabled(!wordsEnabled)); // K キーで近くの単語の文字の表示・非表示
+  window.addEventListener('keydown', (e) => { if (isHudToggleKey(e)) hudView.toggle(); }); // ? キーで HUD の詳細（操作説明など）の開閉
   bindShortcut(window, 'KeyN', () => neighbors.setEnabled(!neighbors.enabled)); // N キーで元のデータで近い点の、地図の上の表示の入切
 
   // ---- 描画ループ ----
@@ -478,6 +485,7 @@ async function start(): Promise<void> {
     homeView: () => v().homeView(),
     getState: () => v().controller.getState(),
     modeSwitch: { getState: () => modeSwitch.getState() },
+    hud: { getState: () => hudView.getState(), setExpanded: (expanded) => hudView.setExpanded(expanded), toggle: () => hudView.toggle() },
     measureFrames: (n) =>
       new Promise((resolve) => {
         frameTimes = [];
@@ -550,7 +558,6 @@ async function start(): Promise<void> {
 start().catch((err: unknown) => {
   const message = err instanceof Error ? err.message : String(err);
   console.error(err);
-  const hud = document.getElementById('hud');
-  if (hud) { hud.textContent = `読み込みに失敗しました: ${message}`; hud.classList.add('error'); }
+  showHudFailure(document, message);
   window.__explorer = { ready: false, error: message } as Window['__explorer'];
 });

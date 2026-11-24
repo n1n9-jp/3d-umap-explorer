@@ -555,7 +555,7 @@ async function testFarAndToggle(page) {
 
   await setView(page, VIEWS.inside);
   const before = await waitWords(page);
-  const hud = await page.evaluate(() => document.getElementById('hud').innerText.split('\n')[2]);
+  const hud = await page.evaluate(() => window.__explorer.hud.getState().detail[1]); // 操作説明の行（畳んでいても読める）
   check('HUD の操作説明に K キーがある', hud.includes('K 単語の文字'), hud);
   await page.keyboard.press('k');
   await frames(page, 3);
@@ -771,7 +771,7 @@ async function testSwitching(page) {
     const m = await mem();
     const mn = await page.evaluate(() => ({
       words: window.__explorer.words.getState(),
-      hud: document.getElementById('hud').innerText.split('\n')[2],
+      hud: window.__explorer.hud.getState().detail[1],
       dotsOnly: window.__explorer.pointCloud.dotsOnly,
       layers: window.__explorer.pointCloud.mesh.geometry.getAttribute('instanceDotScale') ? 1 : 0,
     }));

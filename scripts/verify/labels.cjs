@@ -437,9 +437,9 @@ async function testToggle(page) {
   const on = await labelState(page);
   const locOn = await locationText(page);
   check('既定は表示', on.enabled && on.labels.filter((l) => l.visible).length === 10 && !locOn.hidden);
-  const hud = await page.evaluate(() => document.getElementById('hud').innerText.split('\n'));
-  check('HUD の操作説明に L キーがある', hud[2].includes('L 目印の表示'), JSON.stringify(hud[2]));
-  check('HUD の最終行は視点のまま', hud[hud.length - 1].startsWith('?pos='), JSON.stringify(hud[hud.length - 1]));
+  const hud = await page.evaluate(() => window.__explorer.hud.getState().detail); // データセット・操作説明・視点の 3 行（畳んでいても読める）
+  check('HUD の操作説明に L キーがある', hud[1].includes('L 目印の表示'), JSON.stringify(hud[1]));
+  check('HUD の詳細の最終行は視点のまま', hud[hud.length - 1].startsWith('?pos='), JSON.stringify(hud[hud.length - 1]));
   await page.keyboard.press('KeyL');
   await frames(page, 3);
   const off = await labelState(page);
@@ -948,6 +948,9 @@ async function testResize(browser, base, clusters) {
     check(`${w}x${h}: ${n} 個の目印の位置（報告と要素の見た目）が独立の投影と一致する`, n > 0 && worst <= LABEL_PX_TOLERANCE + 0.5, `最大誤差 ${worst.toFixed(3)}px`);
     if (w === 600) {
       await page.screenshot({ path: path.join(outDir, '6-portrait.png') });
+      // 幅 600 では HUD の詳細は畳んだ状態で始まる。操作説明の折り返しを見るために、利用者の操作として開く
+      await page.evaluate(() => window.__explorer.hud.setExpanded(true));
+      await frames(page, 3);
       const hud = await page.evaluate(() => {
         const el = document.getElementById('hud');
         const r = el.getBoundingClientRect();
@@ -955,7 +958,7 @@ async function testResize(browser, base, clusters) {
         const lines = new Set(items.map((e) => Math.round(e.getBoundingClientRect().top)));
         const loc = document.getElementById('cluster-location').getBoundingClientRect();
         return {
-          right: r.right, left: r.left, innerWidth, help: el.innerText.split('\n')[2],
+          right: r.right, left: r.left, innerWidth, help: window.__explorer.hud.getState().detail[1],
           brokenItems: items.filter((e) => e.getClientRects().length !== 1).length, helpLines: lines.size, n: items.length,
           locBottom: loc.bottom, hudTop: r.top,
         };
@@ -990,7 +993,7 @@ async function testNoClusters(browser, base) {
       chips: document.querySelectorAll('.cluster-label').length,
       containerHidden: document.getElementById('cluster-labels').hidden,
       locationHidden: document.getElementById('cluster-location').hidden,
-      hud: document.getElementById('hud').innerText.split('\n')[2],
+      hud: window.__explorer.hud.getState().detail[1],
     }));
     check('目印の要素も現在地の表示も出ない。HUD に L キーの説明がなく、M キーの説明は残る', dom.chips === 0 && dom.containerHidden && dom.locationHidden && !dom.hud.includes('L 目印') && dom.hud.includes('M ミニマップ'), JSON.stringify(dom));
     await page.keyboard.press('KeyL');

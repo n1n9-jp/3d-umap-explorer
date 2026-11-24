@@ -8,18 +8,52 @@
       html, body { margin: 0; height: 100%; overflow: hidden; background: #07080c; }
       #app { position: fixed; inset: 0; }
       #app canvas { display: block; width: 100%; height: 100%; }
+      /* 左下の HUD。要約（常に出す）・詳細（開閉できる）・通知（畳んでいても出す）。src/app/hud.ts。
+         高さは詳細の開閉と内容で変わる（現在地の表示・上部の配置・単語の文字は、この矩形に追従する）。画面の高さの 45% を超える分は、詳細の中でスクロールする */
       #hud {
         position: fixed; left: 12px; bottom: 10px; z-index: 1;
         font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-        color: #b4bccb; pointer-events: none; white-space: pre-wrap; overflow-wrap: anywhere;
-        max-width: calc(100vw - 48px - var(--minimap-reserve, 0px)); padding: 6px 10px; border-radius: 6px;
+        color: #b4bccb; pointer-events: none; overflow-wrap: anywhere;
+        box-sizing: border-box; max-width: calc(100vw - 28px - var(--minimap-reserve, 0px)); max-height: 45vh;
+        display: flex; flex-direction: column; padding: 6px 10px; border-radius: 6px;
         background: rgba(7, 8, 12, 0.72);
         text-shadow: 0 0 4px #000;
       }
+      @supports (height: 1dvh) { #hud { max-height: 45dvh; } }
       #hud.error { color: #ff8080; }
+      #hud-bar { flex: none; display: flex; align-items: flex-start; gap: 4px 8px; }
+      #hud-summary { flex: 0 1 auto; min-width: 0; white-space: pre-wrap; }
+      #hud-summary:empty { display: none; }
+      #hud-detail { flex: 0 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; white-space: pre-wrap; }
+      #hud-detail[hidden], #hud-notice[hidden] { display: none; }
+      #hud-notice { flex: none; white-space: pre-wrap; }
       /* 操作説明の 1 項目。幅が足りないときは、項目の途中ではなく項目の切れ目で折り返す */
-      #hud .hud-item { white-space: nowrap; }
+      #hud .hud-item, #hud .hud-chip { white-space: nowrap; }
       #hud .hud-view { word-break: break-all; }
+      /* 開閉のボタン。要約の右に置く。マウスの操作を受けるのは、ボタンと（狭い画面の）詳細だけ */
+      #hud-toggle {
+        order: 2; flex: none; pointer-events: auto; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;
+        margin: 0; padding: 0 6px; font: inherit; line-height: 1.4; color: #e8ecf4; background: #141a26;
+        border: 1px solid rgba(180, 188, 203, 0.45); border-radius: 4px; text-shadow: none;
+      }
+      #hud-toggle::after { content: '▸'; font-size: 10px; color: #8a93a6; }
+      #hud-toggle[aria-expanded="true"] { border-color: #ffc233; }
+      #hud-toggle[aria-expanded="true"]::after { content: '▾'; color: #ffc233; }
+      #hud-toggle:hover { background: #1d2536; }
+      #hud-toggle:focus-visible { outline: 2px solid #ffc233; outline-offset: 1px; }
+      #hud-toggle kbd {
+        display: inline-block; min-width: 1.2em; padding: 0 3px; text-align: center; box-sizing: border-box;
+        border: 1px solid rgba(180, 188, 203, 0.55); border-bottom-width: 2px; border-radius: 3px; color: #e8ecf4; font: inherit; line-height: 1.25;
+      }
+      /* 幅の狭い画面: 文字を小さく詰めて、畳んだ HUD を 3 行・60px 以内に収める（要約は、ボタンの左で項目の切れ目で折り返す）。
+         開いたときの詳細は、HUD の高さの上限（画面の 45%）を超える分をスクロールする */
+      @media (max-width: 719px) {
+        #hud { font-size: 11px; line-height: 1.35; padding: 4px 8px; }
+        #hud-bar { flex-wrap: wrap; gap: 4px; }
+        #hud-toggle { padding: 0 4px; }
+        #hud-summary { flex: 1 1 0; min-width: min-content; }
+        #hud-detail { pointer-events: auto; margin-top: 3px; }
+      }
       #cluster-labels { position: fixed; inset: 0; z-index: 0; overflow: hidden; pointer-events: none; }
       #cluster-labels[hidden] { display: none; }
       .cluster-label {
@@ -41,7 +75,8 @@
       #cluster-location {
         position: fixed; left: 12px; bottom: calc(var(--hud-height, 96px) + 18px); z-index: 1;
         display: flex; align-items: center; gap: 8px; pointer-events: none;
-        max-width: calc(100vw - 48px); padding: 6px 12px; border-radius: 6px;
+        box-sizing: border-box; max-width: calc(100vw - 28px - var(--minimap-reserve, 0px)); /* 右下のミニマップに重ならない幅 */
+        padding: 6px 12px; border-radius: 6px;
         background: rgba(7, 8, 12, 0.82); color: #e8ecf4;
         font: 600 14px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
         text-shadow: 0 0 4px #000;
@@ -306,7 +341,6 @@
   </head>
   <body>
     <div id="app"></div>
-    <div id="hud">読み込み中…</div>
     <div id="cluster-location" hidden></div>
     <!-- 画面の上部。左上に作品タイトルとカメラのモード、右上にデータセットの選択欄・UMAP の再計算のパネル・情報パネル（src/app/topLayout.ts） -->
     <div id="top-bar">
@@ -388,6 +422,12 @@
           </section>
         </div>
       </div>
+    </div>
+    <!-- 左下の HUD（src/app/hud.ts）。Tab の順では、上部の UI のあと。位置は fixed なので、見た目の場所は DOM の順に依らない -->
+    <div id="hud" data-expanded="false">
+      <div id="hud-bar"><button id="hud-toggle" type="button" aria-expanded="false" aria-controls="hud-detail" aria-keyshortcuts="Shift+/" title="操作説明を開く（?）"><span class="hud-toggle-text">操作説明</span><kbd aria-hidden="true">?</kbd></button><span id="hud-summary">読み込み中…</span></div>
+      <div id="hud-detail" hidden></div>
+      <div id="hud-notice" role="status" hidden></div>
     </div>
     <div id="info-live" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
     <div id="info-neighbors-live" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>

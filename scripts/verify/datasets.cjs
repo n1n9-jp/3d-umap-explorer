@@ -165,7 +165,7 @@ async function testWord2vecDisplay(page) {
   const ui = await page.evaluate(() => ({
     select: document.getElementById('dataset-select').value,
     options: [...document.querySelectorAll('#dataset-select option')].map((o) => o.value),
-    hud: document.getElementById('hud').innerText.split('\n')[0],
+    hud: window.__explorer.hud.getState().detail[0],
     dotsOnly: window.__explorer.pointCloud.dotsOnly,
     pointSize: window.__explorer.pointCloud.params.pointSize,
     dotRadius: window.__explorer.pointCloud.params.dotRadius,
@@ -478,7 +478,7 @@ async function testSwitching(page, cdp) {
     `${JSON.stringify(r1.during)} → ${JSON.stringify(r1.after.current)}`);
   const m = await page.evaluate(() => ({
     url: location.search, dotsOnly: window.__explorer.pointCloud.dotsOnly, size: window.__explorer.pointCloud.params.pointSize,
-    hud: document.getElementById('hud').innerText.split('\n')[0], labels: window.__explorer.labels.getState().labels.length,
+    hud: window.__explorer.hud.getState().detail[0], labels: window.__explorer.labels.getState().labels.length,
     sel: window.__explorer.interaction.getState(), info: document.getElementById('info').hidden, ready: window.__explorer.ready,
     chips: document.querySelectorAll('.cluster-label').length, minimaps: document.querySelectorAll('#minimap').length,
     focus: document.activeElement?.id ?? document.activeElement?.tagName,

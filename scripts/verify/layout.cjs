@@ -13,6 +13,10 @@
  * - 1280×800、1280×480、360×740 の各ビューポートで、左上の要素・選択欄の行・UMAP のパネル（開いた状態）・情報パネル（点を選択した状態）・
  *   ミニマップ・HUD（と現在地）の矩形が、互いに重ならず、ビューポートの中に収まる
  * - 幅 900px と 1100px で、パネルを開いた状態の上部の高さ（--top-bar-height）が、60 フレームの間に変化しない
+ * - 左下の HUD は、要約（飛行速度と自動調整）と、開閉できる詳細（データセット・操作説明・視点）に分かれる。
+ *   幅 1280 では開いた状態で始まり（詳細の文面は従来どおり）、幅 360 では畳んだ状態（高さ 60px 以下、点群の見える範囲が画面の高さの 40% 以上）で始まる。
+ *   ボタンと ? キーで開閉でき（aria-expanded が追従、入力欄の中では働かない）、開いたときは画面の高さの 45% 以下で、中がスクロールする。
+ *   開閉のあとも、現在地の表示・上部の配置・単語の文字が避ける矩形が HUD に追従する。利用者の選択は、画面の幅が変わっても保つ
  * - コンソールエラーがない
  * 失敗があれば終了コード 1 で終わる。スクリーンショットを artifacts/layout-*.png に保存する。
  */
@@ -351,9 +355,10 @@ async function testTopBarStable(browser, base, width, height) {
 
 const LAYOUT_IDS = ['title-mode', 'dataset-switcher', 'umap-panel', 'info', 'minimap', 'hud', 'cluster-location'];
 
-async function testViewport(browser, base, { width, height, query = '', name }) {
-  console.log(`\n[${width}×${height}${query ? `（${query}）` : ''}: 配置]`);
+async function testViewport(browser, base, { width, height, query = '', name, hudOpen = false }) {
+  console.log(`\n[${width}×${height}${query ? `（${query}）` : ''}${hudOpen ? '、HUD を開く' : ''}: 配置]`);
   const page = await openPage(browser, base, { width, height, query });
+  if (hudOpen) await page.evaluate(() => window.__explorer.hud.setExpanded(true));
   await page.evaluate(() => window.__explorer.interaction.select(123));
   await page.evaluate(() => window.__explorer.umap.open());
   await page.waitForFunction(() => !document.getElementById('umap-panel').hidden && !document.getElementById('info').hidden, null, { timeout: 60000 });
@@ -408,6 +413,208 @@ async function testViewport(browser, base, { width, height, query = '', name }) 
   await page.close();
 }
 
+
+// ---------- 左下の HUD（要約と、開閉できる詳細）----------
+
+/** HUD まわりの、いまの状態と矩形。 */
+const readHudLayout = (page) => page.evaluate(() => {
+  const rect = (id) => {
+    const el = document.getElementById(id);
+    if (!el || el.hidden) return null;
+    const b = el.getBoundingClientRect();
+    return b.width > 0 && b.height > 0 ? { left: b.left, top: b.top, right: b.right, bottom: b.bottom, width: b.width, height: b.height } : null;
+  };
+  const detail = document.getElementById('hud-detail');
+  const dstyle = getComputedStyle(detail);
+  const topUi = ['title-mode', 'dataset-switcher', 'umap-panel', 'info'].map(rect).filter(Boolean);
+  return {
+    vw: innerWidth, vh: innerHeight,
+    state: window.__explorer.hud.getState(),
+    aria: document.getElementById('hud-toggle').getAttribute('aria-expanded'),
+    controls: document.getElementById('hud-toggle').getAttribute('aria-controls'),
+    detailHidden: detail.hidden, detailDisplay: dstyle.display, detailOverflowY: dstyle.overflowY, detailPointer: dstyle.pointerEvents,
+    detailScroll: { top: detail.scrollTop, height: detail.scrollHeight, client: detail.clientHeight },
+    hud: rect('hud'), loc: rect('cluster-location'), bar: rect('hud-bar'), topBar: rect('top-bar'), minimap: rect('minimap'),
+    locVar: document.getElementById('cluster-location').style.getPropertyValue('--hud-height'),
+    visibleText: document.getElementById('hud').innerText,
+    focus: document.activeElement ? document.activeElement.id || document.activeElement.tagName : null,
+    topUiBottom: Math.max(0, ...topUi.map((r) => r.bottom)),
+  };
+});
+
+const overlapsRect = (a, b) => !!a && !!b && a.left < b.right - 0.5 && b.left < a.right - 0.5 && a.top < b.bottom - 0.5 && b.top < a.bottom - 0.5;
+
+/** 開閉のあと、現在地の表示・上部の配置・HUD の高さの変数が HUD に追従しているか。 */
+function checkHudFollow(name, h) {
+  const hh = h.hud ? h.hud.height : 0;
+  check(`${name}: 現在地の表示が出ていて、HUD と重ならず、HUD の上にある`, !!h.loc && !overlapsRect(h.loc, h.hud) && h.loc.bottom <= h.hud.top + 0.5,
+    `現在地 ${h.loc && Math.round(h.loc.top)}–${h.loc && Math.round(h.loc.bottom)}、HUD の上端 ${h.hud && Math.round(h.hud.top)}`);
+  check(`${name}: 現在地の表示の --hud-height が、HUD の高さ（${hh.toFixed(1)}px）に追従する`, Math.abs(parseFloat(h.locVar) - Math.round(hh)) <= 1, `--hud-height ${h.locVar}`);
+  check(`${name}: 上部の領域（右上の列）が、HUD と現在地の上に収まる（TopLayout が追従する）`, !!h.topBar && h.topBar.bottom <= Math.min(h.hud.top, h.loc ? h.loc.top : Infinity) + 0.5,
+    `上部の下端 ${h.topBar && Math.round(h.topBar.bottom)}、HUD の上端 ${h.hud && Math.round(h.hud.top)}、現在地の上端 ${h.loc && Math.round(h.loc.top)}`);
+}
+
+/** 現在地の表示が出る視点（クラスタの縁）へ移す。 */
+async function showLocation(page) {
+  await page.evaluate((v) => window.__explorer.setView({ pos: v.pos, look: v.look }), EDGE_VIEW);
+  await page.waitForFunction(() => !document.getElementById('cluster-location').hidden, null, { timeout: 20000 }).catch(() => {});
+  await frames(page, 4);
+}
+
+async function testHudWide(browser, base) {
+  console.log('\n[HUD: 幅 1280×800（開いた状態で始まる）]');
+  const page = await openPage(browser, base, { width: 1280, height: 800 });
+  const h0 = await readHudLayout(page);
+  const d = h0.state.detail;
+  check('幅 1280 では、詳細を開いた状態で始まる（利用者の操作はまだない）。aria-expanded も開', h0.state.expanded && !h0.state.userChosen && h0.aria === 'true' && !h0.detailHidden && h0.controls === 'hud-detail', JSON.stringify({ e: h0.state.expanded, u: h0.state.userChosen, aria: h0.aria }));
+  check('詳細の文面は従来と同じ（データセットの名前・点の数・点の大きさ、操作説明、視点の URL パラメータ）',
+    /^MNIST.+ {2}10,000 点 {2}点の大きさ 0\.00400（\[ \] で変更）$/.test(d[0])
+    && d[1] === 'WASD 前後左右 / E Q 上下 / ドラッグ 視点 / ホイール 速度 / T 速度の自動調整 / H 全体へ戻る / O 俯瞰モードへ / L 目印の表示 / N 元のデータで近い点 / M ミニマップ'
+    && /^\?pos=-?[\d.]+,-?[\d.]+,-?[\d.]+&look=-?[\d.]+,-?[\d.]+,-?[\d.]+$/.test(d[2]), JSON.stringify(d));
+  const lines = h0.visibleText.split('\n').filter((x) => x.trim());
+  const at = (t) => lines.findIndex((x) => x === t);
+  check('画面に見える文面は、要約・データセット・操作説明・視点の順で、最終行は視点（ボタンの名前を除く）', lines.some((x) => x === h0.state.summary) && at(d[0]) > at(h0.state.summary) && at(d[1]) === at(d[0]) + 1 && at(d[2]) === lines.length - 1 && lines[0].startsWith('操作説明'), JSON.stringify(lines.slice(0, 2)));
+  check('要約は飛行速度と自動調整の状態（1 行）', /^飛行速度 \d\.\d+ {2}自動調整 入 {2}実速度 \d/.test(h0.state.summary) && !h0.state.summary.includes('\n'), JSON.stringify(h0.state.summary));
+  check('通知はない（通知の行は出ていない）', h0.state.notice === null && !(await page.evaluate(() => !document.getElementById('hud-notice').hidden)));
+  await page.screenshot({ path: path.join(outDir, 'layout-1280x800-hud-open.png') });
+
+  // ボタンで畳む。文面は DOM に残る
+  await page.click('#hud-toggle');
+  await frames(page, 3);
+  const h1 = await readHudLayout(page);
+  check('ボタンで畳める。aria-expanded が閉に変わり、詳細は表示されない（要素と文面は DOM に残る）', !h1.state.expanded && h1.state.userChosen && h1.aria === 'false' && h1.detailHidden && h1.detailDisplay === 'none'
+    && h1.state.detail.join('|') === d.join('|') && !h1.visibleText.includes('O 俯瞰モードへ'), JSON.stringify({ e: h1.state.expanded, aria: h1.aria, display: h1.detailDisplay }));
+  check('畳むと HUD が低くなる。要約は見えたまま', h1.hud.height < h0.hud.height / 2 && h1.visibleText.includes(h1.state.summary), `${Math.round(h0.hud.height)}px → ${Math.round(h1.hud.height)}px`);
+  check('マウスで押したあとは、ボタンにフォーカスを残さない（移動キーがすぐに効く）', h1.focus !== 'hud-toggle', `フォーカス ${h1.focus}`);
+  // ? キー（Shift + /）
+  await page.keyboard.press('Shift+Slash');
+  await frames(page, 3);
+  const h2 = await readHudLayout(page);
+  check('? キー（Shift + /）で開く。aria-expanded が追従する', h2.state.expanded && h2.aria === 'true' && !h2.detailHidden && h2.visibleText.includes('O 俯瞰モードへ'), JSON.stringify({ e: h2.state.expanded, aria: h2.aria }));
+  await page.keyboard.press('Slash'); // 修飾キーなしの / では働かない
+  await frames(page, 2);
+  check('修飾キーなしの / では開閉しない', (await readHudLayout(page)).state.expanded === true);
+  await page.focus('#dataset-select');
+  await page.keyboard.press('Shift+Slash'); // 入力欄（select）の中では働かない
+  await frames(page, 2);
+  check('入力欄（データセットの選択欄）にフォーカスがあるときは、? キーで開閉しない', (await readHudLayout(page)).state.expanded === true);
+  await page.evaluate(() => document.activeElement && document.activeElement.blur());
+  await page.keyboard.press('Shift+Slash');
+  await frames(page, 2);
+  const h3 = await readHudLayout(page);
+  check('? キーでもう一度押すと畳む', !h3.state.expanded && h3.aria === 'false');
+  // 検証用の入口
+  await page.evaluate(() => window.__explorer.hud.toggle());
+  await frames(page, 2);
+  check('検証用の入口（__explorer.hud）で、状態を読み、切り替えられる', (await readHudLayout(page)).state.expanded === true);
+  await page.evaluate(() => window.__explorer.hud.setExpanded(false));
+  await frames(page, 2);
+  check('__explorer.hud.setExpanded(false) で畳める', (await readHudLayout(page)).aria === 'false');
+  // 利用者が選んだあとは、画面の幅が変わっても選択を保つ（既定なら幅 360 は畳む）
+  await page.evaluate(() => window.__explorer.hud.setExpanded(true));
+  await page.setViewportSize({ width: 360, height: 740 });
+  await frames(page, 4);
+  const h4 = await readHudLayout(page);
+  check('利用者が開いたあとは、幅が 360 に変わっても開いたまま（利用者の選択を優先）', h4.state.expanded && h4.state.userChosen && h4.aria === 'true' && !h4.detailHidden, JSON.stringify({ e: h4.state.expanded, vw: h4.vw }));
+  await page.close();
+}
+
+async function testHudNarrow(browser, base) {
+  console.log('\n[HUD: 幅 360×740（畳んだ状態で始まる）]');
+  const page = await openPage(browser, base, { width: 360, height: 740 });
+  const h0 = await readHudLayout(page);
+  check('幅 360 では、詳細を畳んだ状態で始まる（利用者の操作はまだない）。aria-expanded も閉', !h0.state.expanded && !h0.state.userChosen && h0.aria === 'false' && h0.detailHidden && h0.detailDisplay === 'none', JSON.stringify({ e: h0.state.expanded, aria: h0.aria }));
+  check('畳んだ HUD の高さが 60px 以下', h0.hud.height <= 60, `${h0.hud.height.toFixed(1)}px`);
+  const cloud = h0.hud.top - h0.topUiBottom;
+  check('点群の描かれる範囲（上部の UI の下端から HUD の上端）が、画面の高さの 40% 以上', cloud >= h0.vh * 0.4, `${Math.round(h0.topUiBottom)}〜${Math.round(h0.hud.top)} = ${Math.round(cloud)}px（${(cloud / h0.vh * 100).toFixed(1)}%）`);
+  check('要約（飛行速度・自動調整・実速度）は畳んでいても読める。詳細は画面に出ない', /飛行速度/.test(h0.visibleText) && /自動調整 入/.test(h0.visibleText) && /実速度/.test(h0.visibleText) && !h0.visibleText.includes('WASD') && !h0.visibleText.includes('?pos='), JSON.stringify(h0.visibleText));
+  check('畳んでいても、詳細の文面を検証用の入口から読める（要素は DOM に残る）', h0.state.detail.length === 3 && h0.state.detail[1].includes('H 全体へ戻る') && h0.state.detail[2].startsWith('?pos='), JSON.stringify(h0.state.detail.map((x) => x.slice(0, 30))));
+  const btn = await page.evaluate(() => { const b = document.getElementById('hud-toggle'); const r = b.getBoundingClientRect(); return { text: b.innerText.replace(/\s+/g, ' ').trim(), title: b.title, w: r.width, h: r.height }; });
+  check('開閉のボタンに「操作説明」の名前と ? のキーの表示がある', /^操作説明 \?/.test(btn.text) && btn.w > 40 && btn.h >= 16, JSON.stringify(btn));
+  await showLocation(page);
+  const hl = await readHudLayout(page);
+  checkHudFollow('360×740（畳んだ状態）', hl);
+  await page.screenshot({ path: path.join(outDir, 'layout-360x740-hud-collapsed.png') });
+
+  // ボタンで開く
+  await page.click('#hud-toggle');
+  await frames(page, 4);
+  const h1 = await readHudLayout(page);
+  check('ボタンで開ける。aria-expanded が開に変わり、詳細（操作説明）が見える', h1.state.expanded && h1.aria === 'true' && !h1.detailHidden && h1.visibleText.includes('O 俯瞰モードへ') && h1.visibleText.includes('?pos='), JSON.stringify({ e: h1.state.expanded, aria: h1.aria }));
+  check('開いた HUD の高さが、画面の高さの 45% 以下', h1.hud.height <= h1.vh * 0.45 + 0.5, `${h1.hud.height.toFixed(1)}px / ${(h1.vh * 0.45).toFixed(0)}px`);
+  check('開いたとき、詳細は HUD の中でスクロールできる設定（overflow-y: auto。マウスの操作を受ける）', h1.detailOverflowY === 'auto' && h1.detailPointer === 'auto', JSON.stringify({ o: h1.detailOverflowY, p: h1.detailPointer }));
+  checkHudFollow('360×740（開いた状態）', h1);
+  const cloud1 = h1.hud.top - h1.topUiBottom;
+  console.log(`      開いたとき: HUD ${Math.round(h1.hud.height)}px、点群の見える範囲 ${Math.round(cloud1)}px（${(cloud1 / h1.vh * 100).toFixed(1)}%）`);
+  await page.screenshot({ path: path.join(outDir, 'layout-360x740-hud-open.png') });
+
+  // ? キーで畳む → もう一度開く。そのたびに追従する
+  await page.keyboard.press('Shift+Slash');
+  await frames(page, 4);
+  const h2 = await readHudLayout(page);
+  check('? キーで畳める。aria-expanded が閉に変わる', !h2.state.expanded && h2.aria === 'false' && h2.hud.height <= 60, `${h2.hud.height.toFixed(1)}px`);
+  checkHudFollow('360×740（? キーで畳んだあと）', h2);
+  await page.keyboard.press('Shift+Slash');
+  await frames(page, 4);
+  const h3 = await readHudLayout(page);
+  check('? キーで開ける', h3.state.expanded && h3.aria === 'true');
+  checkHudFollow('360×740（? キーで開いたあと）', h3);
+  await page.close();
+
+  // 利用者が操作するまでは、画面の幅の既定に従う
+  const wide = await openPage(browser, base, { width: 1280, height: 800 });
+  await wide.setViewportSize({ width: 360, height: 740 });
+  await frames(wide, 4);
+  const w1 = await readHudLayout(wide);
+  check('利用者が操作するまでは、画面の幅が 360 に変わると畳む', !w1.state.expanded && !w1.state.userChosen && w1.aria === 'false', JSON.stringify({ e: w1.state.expanded }));
+  await wide.setViewportSize({ width: 720, height: 740 });
+  await frames(wide, 4);
+  check('幅が 720px になると開く（720px 以上が既定で開く）', (await readHudLayout(wide)).state.expanded === true);
+  await wide.setViewportSize({ width: 719, height: 740 });
+  await frames(wide, 4);
+  check('幅が 719px では畳む', (await readHudLayout(wide)).state.expanded === false);
+  await wide.close();
+}
+
+async function testHudScroll(browser, base) {
+  console.log('\n[HUD: 縦の短い狭い画面（360×400）で開く]');
+  const page = await openPage(browser, base, { width: 360, height: 400 });
+  await page.keyboard.press('Shift+Slash');
+  await frames(page, 4);
+  const h = await readHudLayout(page);
+  check('開いた HUD の高さが、画面の高さの 45% 以下（詳細の高さの上限）', h.state.expanded && h.hud.height <= h.vh * 0.45 + 0.5, `${h.hud.height.toFixed(1)}px / ${(h.vh * 0.45).toFixed(0)}px`);
+  check('詳細が上限を超える分は、HUD の中でスクロールできる（内容が見えている高さより長い）', h.detailScroll.height > h.detailScroll.client + 1, JSON.stringify(h.detailScroll));
+  const before = await page.evaluate(() => ({ speed: window.__explorer.getState().speed, barTop: document.getElementById('hud-bar').getBoundingClientRect().top }));
+  const box = await page.evaluate(() => { const r = document.getElementById('hud-detail').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; });
+  await page.mouse.move(box.x, box.y);
+  await page.mouse.wheel(0, 80);
+  await frames(page, 4);
+  const after = await page.evaluate(() => ({ top: document.getElementById('hud-detail').scrollTop, speed: window.__explorer.getState().speed, barTop: document.getElementById('hud-bar').getBoundingClientRect().top }));
+  check('詳細の上でホイールを回すと詳細がスクロールし（飛行速度は変わらず）、要約の行は動かない', after.top > 0 && after.speed === before.speed && Math.abs(after.barTop - before.barTop) < 0.5, JSON.stringify({ before, after }));
+  await page.screenshot({ path: path.join(outDir, 'layout-360x400-hud-open.png') });
+  await page.close();
+}
+
+async function testHudWords(browser, base) {
+  console.log('\n[HUD: 単語の文字が避ける矩形（word2vec、360×740）]');
+  const page = await openPage(browser, base, { width: 360, height: 740, query: 'data=word2vec-10k' });
+  const obstacle = (hud) => page.evaluate((hud) => {
+    const st = window.__explorer.words.getState();
+    if (!st) return null;
+    const r = document.getElementById('hud').getBoundingClientRect();
+    return { hud: { x: r.left + r.width / 2, y: r.top + r.height / 2, width: r.width, height: r.height },
+      found: st.obstacles.some((o) => Math.abs(o.x - (r.left + r.width / 2)) < 1.5 && Math.abs(o.y - (r.top + r.height / 2)) < 1.5 && Math.abs(o.width - r.width) < 1.5 && Math.abs(o.height - r.height) < 1.5) };
+  }, hud);
+  await frames(page, 6);
+  const a = await obstacle();
+  check('畳んだ状態: 単語の文字が避ける矩形に、HUD の矩形が入っている', a && a.found, JSON.stringify(a));
+  await page.keyboard.press('Shift+Slash');
+  await frames(page, 6);
+  const b = await obstacle();
+  check('開いた状態: 避ける矩形が、開いた HUD の矩形に追従する', b && b.found && b.hud.height > (a ? a.hud.height : 0) * 2, JSON.stringify(b));
+  await page.close();
+}
+
 async function main() {
   if (!args.includes('--no-build')) {
     console.log('ビルド中…');
@@ -427,6 +634,11 @@ async function main() {
     await testViewport(browser, base, { width: 1280, height: 480, name: '1280x480' });
     await testViewport(browser, base, { width: 360, height: 740, name: '360x740' });
     for (const [w, h] of [[900, 700], [1100, 700], [900, 420], [1100, 420]]) await testTopBarStable(browser, base, w, h);
+    await testViewport(browser, base, { width: 360, height: 740, name: '360x740-hud-open', hudOpen: true });
+    await testHudWide(browser, base);
+    await testHudNarrow(browser, base);
+    await testHudScroll(browser, base);
+    await testHudWords(browser, base);
   } finally {
     if (browser) await browser.close();
     stop();
