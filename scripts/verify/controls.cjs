@@ -978,26 +978,59 @@ async function testInertiaFly(page, inside) {
 
   // ホバー: 慣性で回っている間は止まり、止まると再開する（カーソルの位置は動かさない）
   console.log('\n[慣性とホバー]');
-  let hoverOk = false, detail = '候補の位置が見つからない';
-  // 慣性の総回転量は時定数で変わる（飛行モード 0.35 秒）。止まったあとのカーソルの下に点がある位置を、候補から探す
-  const candidates = [];
-  for (const dx of [150, 100]) for (const y0 of [cy, cy - 120, cy + 120, cy - 220, cy + 220, cy - 60, cy + 60]) candidates.push([dx, y0]);
-  for (const [dx, y0] of candidates) {
-    await setView(page, inside.pos, inside.look);
+  // 止まったあとのカーソルの下に点がある状況を、実行環境に依らず作る。
+  //  1. 払いを、速さが慣性の上限（RotationInertia の maxSpeed）に達する速さで行う。慣性の初速は上限の値で決まり、
+  //     イベントの時刻の測り方（実行環境）に依らない。止まるまでの回転量（ドラッグ + 慣性）も、払いごとに同じになる。
+  //  2. 同じ払いを 1 度試して、回転量（ヨーの変化）を測る。
+  //  3. 止まる向きが「カーソルの位置に点がある向き」になるように、逆算した向きから払いを始める。
+  //     視点は払いの前にしか設定しない（止まったあとは動かさない）ので、止まったあとの再開は、カーソルを動かさずに起きる。
+  const hoverDx = 100, hoverDur = 20; // 5000 px/s × 0.0025 rad/px = 12.5 rad/s（上限 4 rad/s の 3 倍）
+  const hoverX0 = cx - hoverDx / 2, hoverX1 = cx + hoverDx / 2;
+  const hoverFlick = () => pointerGesture(page, flickPoints(hoverX0, cy, hoverDx, 0, hoverDur), 1);
+  const dirFromYaw = (yaw, pitch) => [-Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw) * Math.cos(pitch)];
+  const viewFrom = (pos, yaw, pitch) => setView(page, pos, add(pos, dirFromYaw(yaw, pitch)));
+  const pickAt = (x, y) => page.evaluate(([px, py]) => window.__explorer.pick(px, py).then((r) => (r ? r.index : null)), [x, y]);
+
+  // 2. 回転量の測定（ヨーの変化 Δ）
+  const hoverPos = inside.pos;
+  const dir0 = norm(sub(inside.look, inside.pos));
+  const pitch0 = pitchOf(dir0), yaw0 = yawOf(dir0);
+  await viewFrom(hoverPos, yaw0, pitch0);
+  await frames(page, 2);
+  await hoverFlick();
+  const cal = await sampleUntil(page, (x) => !x.rotating);
+  const calEnd = cal[cal.length - 1];
+  const turn = wrapPi(yawOf(calEnd.direction) - yaw0);
+  const turnPitch = pitchOf(calEnd.direction) - pitch0;
+  await frames(page, 2);
+
+  // 3. 止まる向き（ヨー）の候補。それぞれ、カーソルの位置（離す位置）に点が見える向きかを、視点を置いて調べる
+  const tried = [];
+  let hoverOk = false, detail = '';
+  const offsets = [0, 0.3, -0.3, 0.6, -0.6, 0.9, -0.9, 1.2, -1.2];
+  for (const off of offsets) {
+    const endYaw = yaw0 + off;
+    await viewFrom(hoverPos, endYaw, pitch0);
     await frames(page, 2);
-    await pointerGesture(page, flickPoints(cx - dx / 2, y0, dx, 0), 1);
+    if ((await pickAt(hoverX1, cy)) === null) { tried.push(`ヨー ${endYaw.toFixed(2)}: 点なし`); continue; }
+    // 払う前の向き = 止まる向きから、測った回転量を引いた向き
+    await viewFrom(hoverPos, endYaw - turn, pitch0);
+    await frames(page, 2);
+    await hoverFlick();
     const q = await sampleUntil(page, (x) => !x.rotating);
     await frames(page, 2);
+    const stop = q[q.length - 1];
     const rotatingSamples = q.slice(1).filter((x) => x.rotating);
     const hoverDuring = rotatingSamples.map((x) => x.hovered);
-    // 止まったあとのカーソルの位置（離した位置）に見える点
-    const want = await page.evaluate(([x, y]) => window.__explorer.pick(x, y).then((r) => (r ? r.index : null)), [cx + dx / 2, y0]);
-    if (want === null) { detail = `位置 y=${y0} に点がない`; continue; }
+    const stopErr = angleBetween(stop.direction, dirFromYaw(endYaw, pitch0));
+    const want = await pickAt(hoverX1, cy); // 止まったあとのカーソルの位置（離した位置）に見える点
+    if (want === null) { tried.push(`ヨー ${endYaw.toFixed(2)}: 止まった向き ${fmt(stop.direction)}（予測とのずれ ${stopErr.toFixed(3)} rad）で、カーソル (${hoverX1}, ${cy}) に点がない`); continue; }
     const h = await waitFrames(page, async () => ({ ok: (await page.evaluate(() => window.__explorer.interaction.getState().hovered)) === want }), 6);
     hoverOk = rotatingSamples.length > 0 && hoverDuring.every((x) => x === null) && h.ok;
-    detail = `慣性の間のホバー [${hoverDuring.join(',')}]、止まったあと ${want} へ戻るまで ${h.frames} フレーム`;
+    detail = `慣性の間のホバー [${hoverDuring.join(',')}]、止まったあと ${want} へ戻るまで ${h.frames} フレーム（止まる向きの予測とのずれ ${stopErr.toFixed(3)} rad、試した向き ${tried.length + 1} 通り）`;
     break;
   }
+  if (!hoverOk && detail === '') detail = `カーソルの位置に点が見える向きがない（試した ${tried.length} 通り、払いの回転量 ${turn.toFixed(3)} rad、ピッチの変化 ${turnPitch.toFixed(4)} rad）: ${tried.join(' / ')}`;
   check('慣性で回っている間はホバーが止まり、止まるとカーソルの下の点へ再開する', hoverOk, detail);
   await setView(page, [0, 0, 0], [0, 0, -1]);
   await frames(page, 2);
