@@ -44,8 +44,9 @@ const port = Number(opt('port', '4340'));
 const width = 1280, height = 800;
 
 /** 変更の前（ブラウザ内の UMAP を入れる前、コミット 191dc27）の主のチャンクの大きさ（バイト） */
-// 近くの単語の文字表示（src/text/）を取り込んだあとの、この機能を除いた主のチャンクの大きさ（666745 − この機能の増分 8750）
-const MAIN_CHUNK_BEFORE = 657995;
+// 近くの単語の文字表示（src/text/）を取り込んだあとの、この機能を除いた主のチャンクの大きさ（666745 − この機能の増分 8750）に、
+// 縁から見たときの丸い点・目印の調整（src/labels/budget.ts・src/text/clearance.ts）の増分 2235（673540 → 675775）を足したもの
+const MAIN_CHUNK_BEFORE = 657995 + 2235;
 /** 主のチャンクの増加の許容（この機能のための窓口・キー・パネルの開閉の分） */
 const MAIN_CHUNK_ALLOWED_GROWTH = 16 * 1024;
 /** 事前計算（umap-learn）の 3 次元の 10 近傍の同ラベル率（scripts/spike/umap-bench/README.md） */
