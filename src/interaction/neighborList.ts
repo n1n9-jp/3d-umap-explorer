@@ -98,7 +98,10 @@ export class NeighborList {
     const total = state.items.length;
     this.summaryEl.textContent = `${summaryCountText(state.matches, total)}。`;
     this.hintEl.textContent = summaryHintText(state.matches, total);
+    // 一覧の項目を押して選び直したとき、フォーカスを新しい一覧の先頭へ移す（キーボードで近傍をたどり続けられるように）
+    const hadFocus = this.listEl.contains(this.doc.activeElement);
     this.listEl.replaceChildren(...state.items.map((it, k) => this.item(it, k)));
+    if (hadFocus) this.listEl.querySelector<HTMLButtonElement>('button.nb-item')?.focus({ preventScroll: true });
     this.liveEl.textContent = summaryText(state.matches, total);
   }
 

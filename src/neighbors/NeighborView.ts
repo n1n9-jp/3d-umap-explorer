@@ -34,6 +34,11 @@ export interface NeighborViewDeps {
   info: PointInfoSource;
   /** 点を選択して、その点の手前へ飛ぶ */
   selectAndFly(index: number): void;
+  /**
+   * 単語の文字を出している点の、点の中心から見た文字の矩形（CSS ピクセル）。近傍の輪を文字に重ねず、文字を囲む矩形にするのに使う。
+   * 単語のデータセットでなければ省略
+   */
+  wordBoxes?(): Map<number, { dx: number; dy: number; hw: number; hh: number }>;
 }
 
 /** 検証用の状態（`window.__explorer.neighbors.getState()`）。 */
@@ -198,6 +203,8 @@ export class NeighborView {
       this.endBuf[3 * k] = pos[3 * j]!; this.endBuf[3 * k + 1] = pos[3 * j + 1]!; this.endBuf[3 * k + 2] = pos[3 * j + 2]!;
     }
     this.overlay.setPositions(this.startBuf, this.endBuf.subarray(0, 3 * n));
+    const boxes = this.deps.wordBoxes?.();
+    this.overlay.setWordBoxes((k) => (boxes ? boxes.get(this.original[k]!) ?? null : null));
     this.updateEdges(width, height);
   }
 

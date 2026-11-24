@@ -425,6 +425,8 @@ async function testListInteraction(page, q, w2v, knn) {
   check('Enter キーで、その項目の点を選択する', !!kbSel);
   await waitStill(page, 80);
   await waitFor(page, () => window.__explorer.neighbors.getState().list.state === 'ready', 10);
+  const focusAfter = await page.evaluate(() => { const a = document.activeElement; return a && a.classList.contains('nb-item') ? Number(a.dataset.rank) : null; });
+  check('選び直したあと、フォーカスは新しい一覧の先頭へ移る（キーボードでたどり続けられる）', focusAfter === 0, `${focusAfter}`);
   const snap = await page.locator('#info-neighbors').ariaSnapshot();
   const first = (await nb(page)).original[0];
   const firstName = w2v.text[first];

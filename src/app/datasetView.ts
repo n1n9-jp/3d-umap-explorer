@@ -287,6 +287,17 @@ export class DatasetView {
             this.interaction.select(i);
             this.interaction.flyToPoint(i);
           },
+          // 単語の文字を出している近傍は、文字を囲む矩形で示す（文字の位置は最後に選び直したときのもの。点からのずれとして使う）
+          wordBoxes: () => {
+            const out = new Map<number, { dx: number; dy: number; hw: number; hh: number }>();
+            const w = this.words;
+            if (!w || !w.isEnabled() || this.wordsSuspended) return out;
+            for (const s of w.getState().shown) {
+              if (s.opacity < 0.5) continue;
+              out.set(s.index, { dx: s.rect.x - s.anchorX, dy: s.rect.y - s.anchorY, hw: s.rect.width / 2, hh: s.rect.height / 2 });
+            }
+            return out;
+          },
         });
         (this as { neighbors: NeighborView | null }).neighbors = neighbors;
         this.root.add(neighbors.overlay.group);

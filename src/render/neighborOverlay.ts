@@ -39,6 +39,7 @@ precision highp float;
 in vec3 aEnd;
 in float aRank;
 in float aId;
+in vec4 aBox;             // 単語を囲む形（輪の頂点シェーダと同じ）。x が 0 なら輪
 uniform vec3 uStart;
 uniform vec2 uViewport;
 uniform float uWidth;
@@ -72,6 +73,8 @@ void main() {
   float da = a.z + a.w, db = b.z + b.w;
   if (da <= 0.0 && db <= 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
   vec2 gap = vec2(max(uGap.x, shownRadius(a.w) + 6.0), max(uGap.y, shownRadius(b.w) + 4.0));
+  // 単語を出している近傍は、単語を囲む形の外側まで線を描かない
+  if (aBox.x > 0.0) gap.y = max(gap.y, length(aBox.xy) + length(aBox.zw) + 2.0);
   if (da < 0.0) { a = mix(a, b, da / (da - db)); gap.x = 0.0; }
   else if (db < 0.0) { b = mix(b, a, db / (db - da)); gap.y = 0.0; }
   vec2 sa = (a.xy / a.w * 0.5 + 0.5) * uViewport;
@@ -119,6 +122,7 @@ in vec3 aCenter;
 in float aRank;
 in float aId;
 in float aInMap;
+in vec4 aBox;             // 単語を出している近傍の、単語を囲む形 xy: 半分の幅と高さ, zw: 中心のずれ（描画バッファのピクセル、上が正）。x が 0 なら輪
 uniform float uPointSize;
 uniform float uMinPixelSize;
 uniform float uViewportHeight;
@@ -131,6 +135,7 @@ out float vRadius;
 out float vAlpha;
 out float vDashed;
 out float vLine;
+out vec2 vHalf;
 void main() {
   vec4 mv = modelViewMatrix * vec4(aCenter, 1.0);
   float depth = -mv.z;
@@ -145,12 +150,24 @@ void main() {
 #endif
   radius *= 1.0 + 0.45 * focus;
   float line = uRing.y * (1.0 + 0.5 * focus);
-  float halfPx = radius + 0.5 * line + uRing.z + 2.0;
-  vPx = position.xy * 2.0 * halfPx;
-  vRadius = radius;
   vLine = line;
   vAlpha = focus > 0.5 ? 1.0 : mix(uAlpha.x, uAlpha.y, aRank);
   vDashed = aInMap > 0.5 ? 0.0 : 1.0;
+  if (aBox.x > 0.0) {
+    // 単語の文字を囲む角の丸い矩形（文字の上に輪を重ねない）
+    vec2 halfSz = aBox.xy + vec2(0.5 * line + 2.0 + 2.0 * focus);
+    vec2 ext = halfSz + vec2(0.5 * line + uRing.z + 2.0);
+    vPx = position.xy * 2.0 * ext;
+    vHalf = halfSz;
+    vRadius = 0.0;
+    mv.xy += (aBox.zw + vPx) / pxPerUnit;
+    gl_Position = projectionMatrix * mv;
+    return;
+  }
+  float halfPx = radius + 0.5 * line + uRing.z + 2.0;
+  vPx = position.xy * 2.0 * halfPx;
+  vRadius = radius;
+  vHalf = vec2(0.0);
   mv.xy += vPx / pxPerUnit;
   gl_Position = projectionMatrix * mv;
 }
@@ -166,15 +183,23 @@ in float vRadius;
 in float vAlpha;
 in float vDashed;
 in float vLine;
+in vec2 vHalf;
 out vec4 fragColor;
 void main() {
-  float d = abs(length(vPx) - vRadius);
+  float d;
+  if (vHalf.x > 0.0) {
+    float r = min(5.0, min(vHalf.x, vHalf.y));
+    vec2 q = abs(vPx) - vHalf + vec2(r);
+    d = abs(length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r);
+  } else {
+    d = abs(length(vPx) - vRadius);
+  }
   float halfLine = 0.5 * vLine;
   float body = clamp(halfLine + 0.5 - d, 0.0, 1.0);
   float alpha = clamp(halfLine + uRing.z + 0.5 - d, 0.0, 1.0);
   if (vDashed > 0.5) {
-    // 地図では離れている近傍は破線（8 つの切れ目）
-    float t = fract(atan(vPx.y, vPx.x) / 6.2831853 * 8.0);
+    // 地図では離れている近傍は破線（輪は 8 つ、単語を囲む矩形は 16 の切れ目）
+    float t = fract(atan(vPx.y, vPx.x) / 6.2831853 * (vHalf.x > 0.0 ? 16.0 : 8.0));
     if (t > 0.6) discard;
   }
   alpha *= vAlpha;
@@ -192,6 +217,7 @@ export class NeighborOverlay {
   private readonly ends: THREE.InstancedBufferAttribute;
   private readonly centers: THREE.InstancedBufferAttribute;
   private readonly inMapAttr: THREE.InstancedBufferAttribute;
+  private readonly boxes: THREE.InstancedBufferAttribute;
   private readonly ranks: Float32Array;
   private count = 0;
   private pixelRatio = 1;
@@ -206,7 +232,8 @@ export class NeighborOverlay {
     this.ends = new THREE.InstancedBufferAttribute(new Float32Array(3 * n), 3);
     this.centers = new THREE.InstancedBufferAttribute(new Float32Array(3 * n), 3);
     this.inMapAttr = new THREE.InstancedBufferAttribute(new Float32Array(n), 1);
-    for (const a of [this.ends, this.centers, this.inMapAttr]) a.setUsage(THREE.DynamicDrawUsage);
+    this.boxes = new THREE.InstancedBufferAttribute(new Float32Array(4 * n), 4);
+    for (const a of [this.ends, this.centers, this.inMapAttr, this.boxes]) a.setUsage(THREE.DynamicDrawUsage);
     const rankAttr = new THREE.InstancedBufferAttribute(this.ranks, 1);
 
     // 線: 長さの方向に x ∈ [0, 1]、太さの方向に y ∈ [-1, 1] の四角形
@@ -219,6 +246,7 @@ export class NeighborOverlay {
     lg.setAttribute('aEnd', this.ends);
     lg.setAttribute('aRank', rankAttr);
     lg.setAttribute('aId', new THREE.InstancedBufferAttribute(ids, 1));
+    lg.setAttribute('aBox', this.boxes);
     lg.instanceCount = 0;
     const cu = cloud.mesh.material.uniforms;
     const defines: Record<string, string> = cloud.dotsOnly ? { DOTS_ONLY: '' } : {};
@@ -257,6 +285,7 @@ export class NeighborOverlay {
     rg.setAttribute('aRank', rankAttr);
     rg.setAttribute('aId', new THREE.InstancedBufferAttribute(ids.slice(), 1));
     rg.setAttribute('aInMap', this.inMapAttr);
+    rg.setAttribute('aBox', this.boxes);
     rg.instanceCount = 0;
     this.ringMesh = new THREE.Mesh(rg, new THREE.ShaderMaterial({
       glslVersion: THREE.GLSL3,
@@ -317,6 +346,21 @@ export class NeighborOverlay {
       if (e[k] !== v) { e[k] = v; c[k] = v; changed = true; }
     }
     if (changed) { this.ends.needsUpdate = true; this.centers.needsUpdate = true; }
+  }
+
+  /**
+   * 単語の文字を出している近傍を、輪の代わりに単語を囲む矩形にする。`box(k)` は k 番目の近傍の、点の中心から見た単語の矩形
+   * （CSS ピクセル。中心のずれ dx・dy は右・下が正、半分の幅と高さ）。単語を出していなければ null。値が変わったときだけ GPU へ送る。
+   */
+  setWordBoxes(box: (rank: number) => { dx: number; dy: number; hw: number; hh: number } | null): void {
+    const a = this.boxes.array as Float32Array, r = this.pixelRatio;
+    let changed = false;
+    for (let k = 0; k < this.capacity; k++) {
+      const b = k < this.count ? box(k) : null;
+      const v = b ? [Math.fround(b.hw * r), Math.fround(b.hh * r), Math.fround(b.dx * r), Math.fround(-b.dy * r)] : [0, 0, 0, 0];
+      for (let c = 0; c < 4; c++) if (a[4 * k + c] !== v[c]) { a[4 * k + c] = v[c]!; changed = true; }
+    }
+    if (changed) this.boxes.needsUpdate = true;
   }
 
   /** 一覧の項目にカーソルを重ねた近傍（順位の番号 0 から。-1 でなし）を目立たせる。 */
