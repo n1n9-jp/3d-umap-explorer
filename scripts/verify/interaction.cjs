@@ -920,13 +920,17 @@ async function testFastGlideFlyTo(page, ds) {
     const n = sub(p, c).map((v) => v / best);
     return { p, n };
   })();
-  const startPos = P.p.map((v, k) => v + P.n[k] * 3);
+  const startPos = P.p.map((v, k) => v + P.n[k] * 4);
   await setView(page, startPos, P.p);
   await waitStill(page);
   await page.mouse.move(cx, cy);
-  const RELEASE_AT = 1.1; // 離すときの、P までの距離（離したあとの滑走 v·τ ≈ 0.9 より遠い）
+  // 速度の自動調整で係数が上限近くまで上がり、P に近づいて下がり始めた瞬間に離す（速いまま、前方の近い点へ飛ぶ）
+  let peakScale = 0;
   await page.keyboard.down('KeyW');
-  const run = await sampleUntil(page, (s) => len(sub(s.position, P.p)) <= RELEASE_AT, 6);
+  const run = await sampleUntil(page, (s) => {
+    peakScale = Math.max(peakScale, s.speedScale);
+    return (peakScale >= 3 && s.speedScale < peakScale * 0.97) || len(sub(s.position, P.p)) <= 0.6;
+  }, 8);
   await startFrameLog(page);
   await page.keyboard.up('KeyW');
   await page.mouse.dblclick(cx, cy); // 前方の P（画面の中央）
@@ -938,8 +942,8 @@ async function testFastGlideFlyTo(page, ds) {
   const end = await state(page);
   const pressed = run[run.length - 1];
   const target = (await ix(page)).selected;
-  check('（前提）何もない場所で W を押し続け、速度の自動調整で速くなってから離した', !run.timedOut && pressed.speedScale >= 2,
-    `係数 ${pressed.speedScale.toFixed(2)}、実速度 ${pressed.effectiveSpeed.toFixed(3)}、P までの距離 ${len(sub(pressed.position, P.p)).toFixed(3)}`);
+  check('（前提）何もない場所で W を押し続け、速度の自動調整で速くなってから離した', !run.timedOut && pressed.speedScale >= 2.5,
+    `係数 ${pressed.speedScale.toFixed(2)}（最大 ${peakScale.toFixed(2)}）、実速度 ${pressed.effectiveSpeed.toFixed(3)}、P までの距離 ${len(sub(pressed.position, P.p)).toFixed(3)}`);
   if (!started || target === null) { check('前方の点へ飛ぶ移動が始まる', false, `flight ${JSON.stringify(started && started.flight)}、選択 ${target}`); return; }
   const Q = [ds.positions[3 * target], ds.positions[3 * target + 1], ds.positions[3 * target + 2]];
   const stop = (await page.evaluate((i) => window.__explorer.interaction.stopDistance(i), target)).distance;
