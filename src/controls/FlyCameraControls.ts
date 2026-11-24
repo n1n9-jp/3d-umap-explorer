@@ -9,7 +9,7 @@ import {
 } from './FlyMotion';
 import type { FlyMotionOptions, FlyPose, FlyToOptions, MoveInput } from './FlyMotion';
 import { isDiscreteWheelDelta, WheelGestureLimiter } from './WheelGesture';
-import { eventTimeMs, prefersReducedMotion, RotationInertia } from './RotationInertia';
+import { eventTimeMs, FLY_INERTIA_TIME_CONSTANT, prefersReducedMotion, RotationInertia } from './RotationInertia';
 import type { RotationInertiaOptions } from './RotationInertia';
 
 export type { FlyPose, FlyToOptions } from './FlyMotion';
@@ -27,7 +27,7 @@ export interface FlyCameraControlsOptions extends Omit<FlyMotionOptions, 'accelT
   rotateSpeed?: number;
   /**
    * ドラッグを離したあとの回転の慣性。`timeConstant` を 0 以下にすると無効。
-   * 省略すると、時定数 0.3 秒で、「動きを減らす」設定（`prefers-reduced-motion: reduce`）なら無効。
+   * 省略すると、時定数 0.35 秒で、「動きを減らす」設定（`prefers-reduced-motion: reduce`）なら無効。
    */
   rotationInertia?: RotationInertiaOptions;
   /**
@@ -35,6 +35,16 @@ export interface FlyCameraControlsOptions extends Omit<FlyMotionOptions, 'accelT
    * （`prefers-reduced-motion: reduce`）なら、どちらも 0.12 秒（キーを離すとすぐ止まる）。
    */
   moveInertia?: MoveInertiaOptions;
+}
+
+/** 残っている動き（`getResidualMotion`）。 */
+export interface FlyResidualMotion {
+  /** ワールド座標系の移動速度（単位/秒）。 */
+  velocity: Vector3;
+  /** 回転の慣性のヨーの角速度（ラジアン/秒。正で左）。 */
+  yawRate: number;
+  /** 回転の慣性のピッチの角速度（ラジアン/秒。正で上）。 */
+  pitchRate: number;
 }
 
 export interface FlyCameraControlsEventMap {
@@ -117,6 +127,7 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
   private readonly win: Window;
   private readonly euler = new Euler(0, 0, 0, 'YXZ');
   private readonly dirTmp = new Vector3();
+  private readonly posTmp = new Vector3();
   private readonly wheelGesture = new WheelGestureLimiter();
   private readonly inertia: RotationInertia;
   /** 明示した移動の慣性の時定数。null は自動（既定値。ただし「動きを減らす」設定なら 0.12 秒）。 */
@@ -140,7 +151,7 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
     this.explicitAccel = finiteOrNull(options.moveInertia?.accelTimeConstant);
     this.explicitGlide = finiteOrNull(options.moveInertia?.glideTimeConstant);
     this.syncMoveInertia();
-    this.inertia = new RotationInertia(options.rotationInertia, this.win);
+    this.inertia = new RotationInertia({ defaultTimeConstant: FLY_INERTIA_TIME_CONSTANT, ...options.rotationInertia }, this.win);
 
     camera.updateMatrixWorld();
     this.motion.position.copy(camera.getWorldPosition(new Vector3()));
@@ -250,7 +261,7 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
 
   /**
    * ドラッグを離したあとの回転の慣性の時定数（秒）。0 以下で無効。
-   * 代入しなければ既定の 0.3 秒（「動きを減らす」設定なら無効）。`null` を代入すると、その既定へ戻す。
+   * 代入しなければ既定の 0.35 秒（「動きを減らす」設定なら無効）。`null` を代入すると、その既定へ戻す。
    */
   get rotationTimeConstant(): number {
     return this.inertia.timeConstant;
@@ -277,6 +288,30 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
   /** 回転の慣性を止める（向きはそのまま）。 */
   stopRotationInertia(): void {
     this.inertia.stop();
+  }
+
+  /**
+   * いま残っている動き（移動の速度と、回転の慣性の角速度）。モードの切り替えで無効にする前に読み、
+   * 呼び出し側が減衰させ続けるために使う。何も残っていなければ 0。
+   */
+  getResidualMotion(): FlyResidualMotion {
+    const active = this.inertia.active;
+    return {
+      velocity: this.motion.velocity.clone(),
+      yawRate: active ? this.inertia.yawRate : 0,
+      pitchRate: active ? this.inertia.pitchRate : 0,
+    };
+  }
+
+  /**
+   * カメラの現在の位置と向きを、飛行操作の状態へ取り込む。移動の速度・回転の慣性・キーの入力は保つ
+   * （`setPose` はこれらを捨てる）。外部がカメラを少し動かしたあと、操作を続けるときに使う。
+   */
+  syncFromCamera(): void {
+    if (!this._enabled || this.disposed) return;
+    this.camera.updateMatrixWorld();
+    this.motion.position.copy(this.camera.getWorldPosition(this.posTmp));
+    this.motion.setDirection(this.camera.getWorldDirection(this.dirTmp));
   }
 
   /** 自動移動の最中なら true。 */

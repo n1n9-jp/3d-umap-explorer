@@ -1,7 +1,7 @@
 import { Quaternion, Vector3 } from 'three';
 import type { PerspectiveCamera } from 'three';
 import { DEFAULT_WHEEL_GESTURE_LIMIT_NOTCHES, isDiscreteWheelDelta, WheelGestureLimiter } from '../controls/WheelGesture';
-import { eventTimeMs, prefersReducedMotion, RotationInertia } from '../controls/RotationInertia';
+import { eventTimeMs, OVERVIEW_INERTIA_TIME_CONSTANT, prefersReducedMotion, RotationInertia } from '../controls/RotationInertia';
 import type { RotationInertiaOptions } from '../controls/RotationInertia';
 
 /**
@@ -26,6 +26,12 @@ export const OVERVIEW_MAX_DISTANCE = 8;
 export const OVERVIEW_ZOOM_TIME_CONSTANT = 0.15;
 /** ピンチ（ctrlKey つきのホイール）の `deltaY` 1 あたりの、距離の倍率の対数（`factor = exp(deltaY × この値)`）。 */
 export const OVERVIEW_PINCH_RATE = 0.01;
+/**
+ * ピンチ 1 回のイベントで距離を変える倍率の上限（ホイール 1 ノッチの 1.15 倍の 3 つぶん）。マウスで Ctrl を押しながら
+ * ホイールを回すと、1 ノッチ（deltaY = 100）で約 2.7 倍と強く動くので、それを抑える。トラックパッドのピンチは
+ * 小さな deltaY（1 回あたり数〜十数）が連続して届くので、この上限には掛からず、手応えは変わらない。
+ */
+export const OVERVIEW_PINCH_MAX_FACTOR = 1.15 ** 3;
 /** `ln d` の目標との差がこれを下回ったら、目標に一致させて止める（約 0.1%。時定数 0.15 秒で、約 0.7 秒後）。 */
 export const OVERVIEW_ZOOM_STOP_LN = 1e-3;
 
@@ -125,7 +131,7 @@ export interface OverviewControlsOptions {
   wheelFactor?: number;
   /**
    * ドラッグを離したあとの回転の慣性。`timeConstant` を 0 以下にすると無効。
-   * 省略すると、時定数 0.3 秒で、「動きを減らす」設定（`prefers-reduced-motion: reduce`）なら無効。
+   * 省略すると、時定数 0.45 秒で、「動きを減らす」設定（`prefers-reduced-motion: reduce`）なら無効。
    */
   rotationInertia?: RotationInertiaOptions;
   /**
@@ -179,7 +185,7 @@ export class OverviewControls {
     this.wheelFactor = options.wheelFactor ?? 1.15;
     this.wheelGesture = new WheelGestureLimiter({ limitNotches: overviewGestureLimitNotches(this.wheelFactor) });
     this.win = domElement.ownerDocument?.defaultView ?? (typeof window !== 'undefined' ? window : null);
-    this.inertia = new RotationInertia(options.rotationInertia, this.win);
+    this.inertia = new RotationInertia({ defaultTimeConstant: OVERVIEW_INERTIA_TIME_CONSTANT, ...options.rotationInertia }, this.win);
     this.explicitZoomTimeConstant = options.zoomTimeConstant ?? null;
     domElement.addEventListener('pointerdown', this.onPointerDown);
     domElement.addEventListener('pointermove', this.onPointerMove);
@@ -246,7 +252,7 @@ export class OverviewControls {
 
   /**
    * ドラッグを離したあとの回転の慣性の時定数（秒）。0 以下で無効。
-   * 代入しなければ既定の 0.3 秒（「動きを減らす」設定なら無効）。`null` を代入すると、その既定へ戻す。
+   * 代入しなければ既定の 0.45 秒（「動きを減らす」設定なら無効）。`null` を代入すると、その既定へ戻す。
    */
   get rotationTimeConstant(): number {
     return this.inertia.timeConstant;
@@ -259,6 +265,15 @@ export class OverviewControls {
   /** 回転の慣性で回っている最中なら true。 */
   get isRotatingByInertia(): boolean {
     return this.inertia.active;
+  }
+
+  /**
+   * 慣性で回っている角速度（ラジアン/秒）。ヨーは正で反時計回り、ピッチは正で視線が上を向く向き（`orbitPose` の符号）。
+   * モードの切り替えで無効にする前に読み、呼び出し側が減衰させ続けるために使う。回っていなければ 0。
+   */
+  getResidualRotation(): { yawRate: number; pitchRate: number } {
+    const active = this.inertia.active;
+    return { yawRate: active ? this.inertia.yawRate : 0, pitchRate: active ? this.inertia.pitchRate : 0 };
   }
 
   /**
@@ -440,7 +455,7 @@ export class OverviewControls {
     // 払いの上限（タッチパッドとマウスの判別）は、通常のホイールのためのもので、ピンチには掛けない。
     if (e.ctrlKey) {
       if (e.deltaY === 0 || !Number.isFinite(e.deltaY)) return;
-      this.zoomBy(Math.exp(e.deltaY * OVERVIEW_PINCH_RATE));
+      this.zoomBy(Math.exp(clampPinchLn(e.deltaY * OVERVIEW_PINCH_RATE)));
       return;
     }
     // 横方向だけのスクロールは、距離の変更ではなく、払いの継続にも数えない。
@@ -462,4 +477,10 @@ export class OverviewControls {
     // 下へ回す（正）と離れ、上へ回す（負）と近づく。
     this.zoomBy(Math.pow(this.wheelFactor, effective));
   };
+}
+
+/** ピンチ 1 回のイベントの倍率の対数を、`±ln(OVERVIEW_PINCH_MAX_FACTOR)` に収める。 */
+function clampPinchLn(ln: number): number {
+  const max = Math.log(OVERVIEW_PINCH_MAX_FACTOR);
+  return Math.min(max, Math.max(-max, ln));
 }

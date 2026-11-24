@@ -11,9 +11,13 @@
  *   ということを防ぐ）。
  */
 
-/** 減速の時定数（秒）。0 以下で慣性なし。 */
+/** 減速の時定数（秒）。0 以下で慣性なし。モードごとの既定値を指定しないときの値。 */
 export const DEFAULT_INERTIA_TIME_CONSTANT = 0.3;
-/** 慣性の最初の角速度の上限（ラジアン/秒）。時定数 0.3 秒で、最大でも約 69°（1.2 ラジアン）しか回らない。 */
+/** 飛行モードの既定の時定数（秒）。 */
+export const FLY_INERTIA_TIME_CONSTANT = 0.35;
+/** 俯瞰モードの既定の時定数（秒）。点群の全体を回すので、飛行モードより少し長く漂う。 */
+export const OVERVIEW_INERTIA_TIME_CONSTANT = 0.45;
+/** 慣性の最初の角速度の上限（ラジアン/秒）。時定数 0.35 秒で、最大でも約 80°（1.4 ラジアン）しか回らない。 */
 export const DEFAULT_INERTIA_MAX_SPEED = 4;
 /** 角速度がこれを下回ったら完全に止める（ラジアン/秒。約 1.1°/秒）。 */
 export const DEFAULT_INERTIA_STOP_SPEED = 0.02;
@@ -25,8 +29,13 @@ export const DEFAULT_MIN_RELEASE_SPEED_PX = 80;
 export const DEFAULT_INERTIA_DRAG_THRESHOLD_PX = 4;
 
 export interface RotationInertiaOptions {
-  /** 減速の時定数（秒）。0 以下で無効。省略すると、`prefers-reduced-motion: reduce` なら無効、そうでなければ 0.3。 */
+  /**
+   * 減速の時定数（秒）。0 以下で無効。省略すると、`prefers-reduced-motion: reduce` なら無効、そうでなければ
+   * 操作ごとの既定値（`defaultTimeConstant`。飛行モード 0.35 秒、俯瞰モード 0.45 秒）。
+   */
   timeConstant?: number;
+  /** `timeConstant` を省略したときの時定数（秒）。操作（飛行・俯瞰）が自分の既定値を渡す。省略すると 0.3。 */
+  defaultTimeConstant?: number;
   /** 慣性の最初の角速度の上限（ラジアン/秒）。 */
   maxSpeed?: number;
   /** 角速度がこれを下回ったら完全に止める（ラジアン/秒）。 */
@@ -162,6 +171,7 @@ export class DragVelocityTracker {
 export class RotationInertia {
   /** 時定数を明示したときの値。null は自動（既定値。ただし「動きを減らす」設定なら無効）。 */
   private explicitTimeConstant: number | null;
+  private readonly defaultTimeConstant: number;
   maxSpeed: number;
   stopSpeed: number;
   minReleaseSpeedPx: number;
@@ -179,6 +189,8 @@ export class RotationInertia {
 
   constructor(options: RotationInertiaOptions = {}, win: Pick<Window, 'matchMedia'> | null = null) {
     this.explicitTimeConstant = options.timeConstant ?? null;
+    const fallback = options.defaultTimeConstant;
+    this.defaultTimeConstant = typeof fallback === 'number' && Number.isFinite(fallback) ? fallback : DEFAULT_INERTIA_TIME_CONSTANT;
     this.maxSpeed = options.maxSpeed ?? DEFAULT_INERTIA_MAX_SPEED;
     this.stopSpeed = options.stopSpeed ?? DEFAULT_INERTIA_STOP_SPEED;
     this.minReleaseSpeedPx = options.minReleaseSpeedPx ?? DEFAULT_MIN_RELEASE_SPEED_PX;
@@ -189,7 +201,7 @@ export class RotationInertia {
   /** 実際に使う時定数（秒）。0 以下は無効。省略したときは、「動きを減らす」設定なら 0、そうでなければ既定値。 */
   get timeConstant(): number {
     if (this.explicitTimeConstant !== null) return this.explicitTimeConstant;
-    return prefersReducedMotion(this.win) ? 0 : DEFAULT_INERTIA_TIME_CONSTANT;
+    return prefersReducedMotion(this.win) ? 0 : this.defaultTimeConstant;
   }
 
   /** 時定数を決める。0 以下で無効。null で自動（既定値、「動きを減らす」設定なら無効）に戻す。NaN は無視する。 */
@@ -211,6 +223,16 @@ export class RotationInertia {
   /** 現在の角速度（ラジアン/秒）。 */
   get speed(): number {
     return Math.hypot(this.vYaw, this.vPitch);
+  }
+
+  /** 現在のヨーの角速度（ラジアン/秒。正で左）。回っていなければ 0。 */
+  get yawRate(): number {
+    return this.vYaw;
+  }
+
+  /** 現在のピッチの角速度（ラジアン/秒。正で上）。回っていなければ 0。 */
+  get pitchRate(): number {
+    return this.vPitch;
   }
 
   // ---- ドラッグ ----

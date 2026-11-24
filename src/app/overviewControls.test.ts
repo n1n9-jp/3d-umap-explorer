@@ -9,6 +9,7 @@ import {
   OVERVIEW_MAX_DISTANCE,
   OVERVIEW_MAX_PITCH,
   OVERVIEW_MIN_DISTANCE,
+  OVERVIEW_PINCH_MAX_FACTOR,
   OVERVIEW_ZOOM_TIME_CONSTANT,
 } from './overviewControls';
 
@@ -397,10 +398,30 @@ describe('OverviewControls: 目標の距離への追従', () => {
     expect(flat.controls.isZooming).toBe(false);
   });
 
+  it('ピンチ 1 回のイベントの倍率は 1.15³ まで（マウスの Ctrl + ホイール 1 ノッチで約 2.7 倍にならない）。小さな deltaY の連続は上限に掛からない', () => {
+    expect(OVERVIEW_PINCH_MAX_FACTOR).toBeCloseTo(1.15 ** 3, 12);
+    const mouse = createZoomRig();
+    mouse.wheel(100, { ctrlKey: true }); // exp(1.0) ≈ 2.7 倍のところを 1.15³ ≈ 1.52 倍に収める
+    expect(mouse.controls.targetDistance).toBeCloseTo(1.15 ** 3, 12);
+    mouse.wheel(-100, { ctrlKey: true });
+    mouse.wheel(-100, { ctrlKey: true });
+    expect(mouse.controls.targetDistance).toBeCloseTo(1.15 ** -3, 12);
+    // ちょうど上限の大きさ（deltaY ≈ 41.9）までは exp(deltaY × 0.01) のまま
+    const edge = createZoomRig();
+    edge.wheel(40, { ctrlKey: true });
+    expect(edge.controls.targetDistance).toBeCloseTo(Math.exp(0.4), 12);
+    // トラックパッドのピンチ: 小さな deltaY が続けて届く。合計 deltaY 120 で exp(1.2) 倍（上限に掛からない）
+    const pad = createZoomRig();
+    for (let i = 0; i < 40; i++) pad.wheel(3, { ctrlKey: true });
+    expect(pad.controls.targetDistance).toBeCloseTo(Math.exp(1.2), 9);
+  });
+
   it('ピンチも払いの上限に掛からず、刻み幅によらず同じ結果になる', () => {
     const results = STEPS.map((dt) => {
       const r = createZoomRig();
-      r.wheel(80, { ctrlKey: true }); // exp(0.8) ≈ 2.2 倍（払いの上限 1.95 倍を超える）
+      // 合わせて exp(0.8) ≈ 2.2 倍（払いの上限 1.95 倍を超える）。1 回あたりはピンチの上限 1.15³ に収まる大きさで 2 回
+      r.wheel(40, { ctrlKey: true });
+      r.wheel(40, { ctrlKey: true });
       r.run(0.2, dt);
       return Math.log(r.distance());
     });
@@ -585,7 +606,7 @@ describe('OverviewControls: 回転の慣性', () => {
     }
     expect(moved).toBeGreaterThan(30);
     expect(r.controls.isRotatingByInertia).toBe(false);
-    expect(Math.abs(r.wrap(r.azimuth() - a0))).toBeGreaterThan(0.5); // 総回転量は約 2.5 × 0.3 rad
+    expect(Math.abs(r.wrap(r.azimuth() - a0))).toBeGreaterThan(0.5); // 総回転量は約 2.5 × 0.45 rad
     expect(r.controls.update(1 / 60)).toBe(false);
   });
 
@@ -666,8 +687,8 @@ describe('OverviewControls: 回転の慣性', () => {
     const a0 = r.azimuth();
     for (let i = 0; i < 600; i++) r.controls.update(1 / 60);
     const turned = Math.abs(r.wrap(r.azimuth() - a0));
-    expect(turned).toBeLessThan(4 * 0.3 + 1e-6);
-    expect(turned).toBeGreaterThan(4 * 0.3 * 0.95);
+    expect(turned).toBeLessThan(4 * 0.45 + 1e-6);
+    expect(turned).toBeGreaterThan(4 * 0.45 * 0.95);
   });
 
   it('仰角は慣性の間も ±89° に収まり、端で回り続けない', () => {
@@ -728,8 +749,13 @@ describe('OverviewControls: 回転の慣性', () => {
     expect(r.controls.isRotatingByInertia).toBe(true);
   });
 
-  it('時定数 0 で無効（オプションでも代入でも）。既定は 0.3 秒', () => {
-    expect(createInertiaRig().controls.rotationTimeConstant).toBe(0.3);
+  it('時定数 0 で無効（オプションでも代入でも）。既定は 0.45 秒で、null で既定へ戻る', () => {
+    expect(createInertiaRig().controls.rotationTimeConstant).toBe(0.45);
+    const c = createInertiaRig();
+    c.controls.rotationTimeConstant = 0.9;
+    expect(c.controls.rotationTimeConstant).toBe(0.9);
+    c.controls.rotationTimeConstant = null;
+    expect(c.controls.rotationTimeConstant).toBe(0.45);
     const a = createInertiaRig({ rotationInertia: { timeConstant: 0 } });
     a.drag(16);
     a.up();
@@ -739,6 +765,19 @@ describe('OverviewControls: 回転の慣性', () => {
     b.drag(16);
     b.up();
     expect(b.controls.isRotatingByInertia).toBe(false);
+  });
+
+  it('getResidualRotation: 慣性で回っている間の角速度（右へ払うと、ヨーは負）。止まれば 0', () => {
+    const r = createInertiaRig();
+    expect(r.controls.getResidualRotation()).toEqual({ yawRate: 0, pitchRate: 0 });
+    r.drag(8);
+    r.up();
+    expect(r.controls.isRotatingByInertia).toBe(true);
+    const rot = r.controls.getResidualRotation();
+    expect(rot.yawRate).toBeLessThan(-0.5);
+    expect(rot.pitchRate).toBeCloseTo(0, 9);
+    r.controls.stopRotationInertia();
+    expect(r.controls.getResidualRotation()).toEqual({ yawRate: 0, pitchRate: 0 });
   });
 
   it('「動きを減らす」設定のときは、既定で慣性が無効', () => {
