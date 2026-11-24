@@ -199,10 +199,16 @@ async function testHomeFly(page, ds, views) {
   const turns = dirs.slice(1).map((d, i) => angleBetween(d, dirs[i]));
   check('向きも滑らかに変わる（フレーム間の回転が全回転量の 30% 以下）', totalTurn < 0.05 || Math.max(...turns) < totalTurn * 0.3,
     `全回転 ${totalTurn.toFixed(3)} rad, 最大 ${Math.max(...turns).toFixed(3)} rad`);
-  const firstSteps = steps.slice(0, 2), lastSteps = steps.slice(-2);
-  const peak = Math.max(...steps);
-  check('始まりと終わりが緩やか（最初と最後のフレームの移動量が最大の半分以下）', steps[0] < peak * 0.5 && steps[steps.length - 1] < peak * 0.5,
-    `最初 ${(firstSteps[0] / peak).toFixed(2)}, 最後 ${(lastSteps[lastSteps.length - 1] / peak).toFixed(2)}（最大に対する比）`);
+  // 始まりと終わりの緩やかさは、区間ごとの平均の速さ（進んだ割合 / 進みの差）で比べる。H を押す前の状態から最初の標本までは
+  // 複数のフレームが進むことがあるので、移動量そのものではなく、進みで割って比べる
+  const prog = [0, ...samples.map((x) => (x.flight ? x.flight.progress : 1))];
+  const fracs = pts.map((p) => 1 - len(sub(p, home.pos)) / total);
+  const segSpeeds = prog.slice(1).map((q, i) => (q - prog[i] > 1e-9 ? (fracs[i + 1] - fracs[i]) / (q - prog[i]) : null)).filter((v) => v !== null);
+  const peak = Math.max(...segSpeeds);
+  const firstSpeed = segSpeeds[0], lastSpeed = segSpeeds[segSpeeds.length - 1];
+  check('始まりと終わりが緩やか（最初と最後の区間の平均の速さが、最大の 6 割未満・半分未満。速さの山は進みの 1/3 のあたり）',
+    firstSpeed < peak * 0.6 && lastSpeed < peak * 0.5,
+    `最初の区間（進み 0〜${prog[1].toFixed(3)}）${(firstSpeed / peak).toFixed(2)}、最後 ${(lastSpeed / peak).toFixed(2)}（最大 ${peak.toFixed(2)} に対する比）`);
   checkHomeTiming('飛行モードの H', s0, home, samples, ds.manifest.bounds.radius);
   const after = await state(page);
   check('着いたあと、速度の係数が有限の正の値（自動調整が壊れていない）', Number.isFinite(after.speedScale) && after.speedScale > 0, `係数 ${after.speedScale.toFixed(3)}`);
