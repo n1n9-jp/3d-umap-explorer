@@ -1,14 +1,28 @@
 import { EventDispatcher, Euler, Vector3 } from 'three';
 import type { PerspectiveCamera } from 'three';
-import { FlyMotion, createMoveInput } from './FlyMotion';
+import {
+  DEFAULT_ACCEL_TIME_CONSTANT,
+  DEFAULT_GLIDE_TIME_CONSTANT,
+  FlyMotion,
+  REDUCED_MOTION_TIME_CONSTANT,
+  createMoveInput,
+} from './FlyMotion';
 import type { FlyMotionOptions, FlyPose, FlyToOptions, MoveInput } from './FlyMotion';
 import { isDiscreteWheelDelta, WheelGestureLimiter } from './WheelGesture';
-import { eventTimeMs, RotationInertia } from './RotationInertia';
+import { eventTimeMs, prefersReducedMotion, RotationInertia } from './RotationInertia';
 import type { RotationInertiaOptions } from './RotationInertia';
 
 export type { FlyPose, FlyToOptions } from './FlyMotion';
 
-export interface FlyCameraControlsOptions extends FlyMotionOptions {
+/** キーを押したとき・離したときの移動の慣性。 */
+export interface MoveInertiaOptions {
+  /** 入力があるとき（逆向きのキーで止めるときも）の時定数（秒）。0 以下で慣性なし。省略すると 0.15（「動きを減らす」設定なら 0.12）。 */
+  accelTimeConstant?: number;
+  /** キーを離したあと、残った速度が減る時定数（秒）。0 以下で滑らずに止まる。省略すると 0.5（「動きを減らす」設定なら 0.12）。 */
+  glideTimeConstant?: number;
+}
+
+export interface FlyCameraControlsOptions extends Omit<FlyMotionOptions, 'accelTimeConstant' | 'glideTimeConstant'> {
   /** ドラッグ 1 ピクセルあたりの回転量（ラジアン）。 */
   rotateSpeed?: number;
   /**
@@ -16,6 +30,11 @@ export interface FlyCameraControlsOptions extends FlyMotionOptions {
    * 省略すると、時定数 0.3 秒で、「動きを減らす」設定（`prefers-reduced-motion: reduce`）なら無効。
    */
   rotationInertia?: RotationInertiaOptions;
+  /**
+   * 移動の慣性。省略した項目は既定（加速 0.15 秒・滑走 0.5 秒）で、「動きを減らす」設定
+   * （`prefers-reduced-motion: reduce`）なら、どちらも 0.12 秒（キーを離すとすぐ止まる）。
+   */
+  moveInertia?: MoveInertiaOptions;
 }
 
 export interface FlyCameraControlsEventMap {
@@ -53,6 +72,11 @@ const KEY_MAP: Record<string, keyof MoveInput | undefined> = {
 function eventOrigin(e: Event): EventTarget | null {
   const path = typeof e.composedPath === 'function' ? e.composedPath() : [];
   return path[0] ?? e.target ?? null;
+}
+
+/** 有限の数ならそのまま、そうでなければ null（自動）。 */
+function finiteOrNull(value: number | null | undefined): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
 function isMetaKey(e: KeyboardEvent): boolean {
@@ -95,6 +119,9 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
   private readonly dirTmp = new Vector3();
   private readonly wheelGesture = new WheelGestureLimiter();
   private readonly inertia: RotationInertia;
+  /** 明示した移動の慣性の時定数。null は自動（既定値。ただし「動きを減らす」設定なら 0.12 秒）。 */
+  private explicitAccel: number | null;
+  private explicitGlide: number | null;
 
   private _enabled = true;
   private dragPointerId: number | null = null;
@@ -110,6 +137,9 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
     this.rotateSpeed = options.rotateSpeed ?? 0.0025;
     this.motion = new FlyMotion(options);
     this.win = domElement.ownerDocument?.defaultView ?? window;
+    this.explicitAccel = finiteOrNull(options.moveInertia?.accelTimeConstant);
+    this.explicitGlide = finiteOrNull(options.moveInertia?.glideTimeConstant);
+    this.syncMoveInertia();
     this.inertia = new RotationInertia(options.rotationInertia, this.win);
 
     camera.updateMatrixWorld();
@@ -187,13 +217,35 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
     this.speed = this.motion.speed;
   }
 
-  /** 目標速度へ近づく指数応答の時定数（秒）。 */
-  get timeConstant(): number {
-    return this.motion.timeConstant;
+  /**
+   * 移動キーを押しているとき（逆向きのキーで止めるときも）に、目標速度へ近づく指数応答の時定数（秒）。0 以下で慣性なし。
+   * 代入しなければ既定の 0.15 秒（「動きを減らす」設定なら 0.12 秒）。`null` を代入すると、その既定へ戻す。
+   */
+  get accelTimeConstant(): number {
+    return this.explicitAccel ?? (prefersReducedMotion(this.win) ? REDUCED_MOTION_TIME_CONSTANT : DEFAULT_ACCEL_TIME_CONSTANT);
   }
 
-  set timeConstant(value: number) {
-    this.motion.timeConstant = value;
+  set accelTimeConstant(value: number | null) {
+    this.explicitAccel = finiteOrNull(value);
+    this.syncMoveInertia();
+  }
+
+  /**
+   * キーを離したあと、残った速度が減る指数応答の時定数（秒）。0 以下で滑らずに止まる。
+   * 代入しなければ既定の 0.5 秒（「動きを減らす」設定なら 0.12 秒）。`null` を代入すると、その既定へ戻す。
+   */
+  get glideTimeConstant(): number {
+    return this.explicitGlide ?? (prefersReducedMotion(this.win) ? REDUCED_MOTION_TIME_CONSTANT : DEFAULT_GLIDE_TIME_CONSTANT);
+  }
+
+  set glideTimeConstant(value: number | null) {
+    this.explicitGlide = finiteOrNull(value);
+    this.syncMoveInertia();
+  }
+
+  /** キーを離したあと、残った速度で滑っている最中なら true。 */
+  get isGliding(): boolean {
+    return this.motion.isGliding;
   }
 
   /**
@@ -268,6 +320,7 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
    */
   update(dtSeconds: number): boolean {
     if (!this._enabled || this.disposed) return false;
+    this.syncMoveInertia(); // 「動きを減らす」設定は実行中に変わりうる
     this.stepInertia(dtSeconds);
     const moved = this.motion.step(dtSeconds, this.input);
     if (moved) {
@@ -309,6 +362,12 @@ export class FlyCameraControls extends EventDispatcher<FlyCameraControlsEventMap
     this.motion.rotateBy(inertia.dYaw, inertia.dPitch);
     // ピッチが ±89° に当たったら、そのぶんの角速度は捨てる（上下の端で回り続けない）
     if (inertia.dPitch !== 0 && Math.abs(this.motion.pitch - (pitchBefore + inertia.dPitch)) > 1e-12) inertia.blockPitch();
+  }
+
+  /** 実際に使う移動の時定数を、運動の積分へ渡す。 */
+  private syncMoveInertia(): void {
+    this.motion.accelTimeConstant = this.accelTimeConstant;
+    this.motion.glideTimeConstant = this.glideTimeConstant;
   }
 
   private syncCamera(): void {

@@ -1,6 +1,6 @@
 import { Euler, Vector3 } from 'three';
 import type { PerspectiveCamera } from 'three';
-import { FlyCameraControls, type FlyToOptions } from '../controls/FlyCameraControls';
+import { FlyCameraControls, type FlyToOptions, type MoveInertiaOptions } from '../controls/FlyCameraControls';
 import { viewAngles, type ViewAngles, type ViewSpec } from '../render/view';
 import { OverviewControls } from './overviewControls';
 import type { AutoSpeed } from './autoSpeed';
@@ -33,6 +33,8 @@ export interface CameraState {
   homing: boolean;
   /** ドラッグを離したあとの回転の慣性で回っている最中か（現在のモード）。 */
   rotating: boolean;
+  /** 飛行モードの移動の慣性（`fly.accelTimeConstant`・`fly.glideTimeConstant`）と、滑走中か（キーを離したあと、残った速度で進んでいる）。 */
+  moveInertia: { accelTimeConstant: number; glideTimeConstant: number; gliding: boolean };
 }
 
 /** 密度に応じた速度の自動調整の状態。 */
@@ -55,6 +57,11 @@ export interface CameraRigOptions {
    * 省略すると、時定数 0.3 秒で、「動きを減らす」設定（`prefers-reduced-motion: reduce`）なら無効。
    */
   rotationInertia?: RotationInertiaOptions;
+  /**
+   * 飛行モードの移動の慣性（加速 0.15 秒・滑走 0.5 秒）。省略した項目は既定で、
+   * 「動きを減らす」設定（`prefers-reduced-motion: reduce`）なら、どちらも 0.12 秒（キーを離すとすぐ止まる）。
+   */
+  moveInertia?: MoveInertiaOptions;
 }
 
 /** 飛行モードで、移動中のホーム復帰を中断させるキー（`FlyCameraControls` の移動キーと同じ）。 */
@@ -95,7 +102,7 @@ export class CameraRig {
     this.domElement = domElement;
     this.win = domElement.ownerDocument?.defaultView ?? window;
     this.center = center.clone();
-    this.fly = new FlyCameraControls(camera, domElement, { rotationInertia: options.rotationInertia });
+    this.fly = new FlyCameraControls(camera, domElement, { rotationInertia: options.rotationInertia, moveInertia: options.moveInertia });
     this.overview = new OverviewControls(camera, domElement, { rotationInertia: options.rotationInertia });
     this.overview.pivot.copy(this.center);
     this.fly.addEventListener('speedchange', this.notify);
@@ -306,6 +313,11 @@ export class CameraRig {
       },
       homing: this.flight !== null,
       rotating: this.isRotatingByInertia,
+      moveInertia: {
+        accelTimeConstant: this.fly.accelTimeConstant,
+        glideTimeConstant: this.fly.glideTimeConstant,
+        gliding: this._mode === 'fly' && this.fly.isGliding,
+      },
     };
   }
 

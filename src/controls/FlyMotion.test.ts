@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { Vector3 } from 'three';
-import { FlyMotion, MAX_PITCH, createMoveInput, easeOutQuart } from './FlyMotion';
+import {
+  DEFAULT_ACCEL_TIME_CONSTANT,
+  DEFAULT_GLIDE_TIME_CONSTANT,
+  FlyMotion,
+  GLIDE_STOP_RATIO,
+  MAX_PITCH,
+  createMoveInput,
+  easeOutQuart,
+} from './FlyMotion';
 import type { MoveInput } from './FlyMotion';
 
 const deg = (d: number) => (d * Math.PI) / 180;
@@ -71,8 +79,8 @@ describe('FlyMotion: 移動', () => {
   });
 
   it('斜め移動は速くならない', () => {
-    const a = new FlyMotion({ timeConstant: 0 });
-    const b = new FlyMotion({ timeConstant: 0 });
+    const a = new FlyMotion({ accelTimeConstant: 0, glideTimeConstant: 0 });
+    const b = new FlyMotion({ accelTimeConstant: 0, glideTimeConstant: 0 });
     run(a, 1, 1 / 60, input({ forward: true }));
     run(b, 1, 1 / 60, input({ forward: true, right: true }));
     expect(b.position.length()).toBeCloseTo(a.position.length(), 9);
@@ -85,7 +93,7 @@ describe('FlyMotion: 移動', () => {
   });
 
   it('定常速度は speed（既定 0.45）で、加速の入力や倍率オプションは持たない', () => {
-    const m = new FlyMotion({ timeConstant: 0 });
+    const m = new FlyMotion({ accelTimeConstant: 0, glideTimeConstant: 0 });
     run(m, 1, 1 / 60, input({ forward: true }));
     expect(m.position.length()).toBeCloseTo(0.45, 9);
     expect(Object.keys(createMoveInput()).sort()).toEqual(['backward', 'down', 'forward', 'left', 'right', 'up']);
@@ -93,7 +101,7 @@ describe('FlyMotion: 移動', () => {
   });
 
   it('速度は時定数 τ で目標へ指数的に近づく', () => {
-    const m = new FlyMotion({ speed: 0.15, timeConstant: 0.12 });
+    const m = new FlyMotion({ speed: 0.15, accelTimeConstant: 0.12, glideTimeConstant: 0.12 });
     run(m, 0.12, 0.01, input({ forward: true }));
     // 1τ 後は目標の 1 - 1/e ≈ 63.2%
     expect(m.velocity.length() / 0.15).toBeCloseTo(1 - Math.exp(-1), 6);
@@ -416,7 +424,7 @@ describe('FlyMotion: step の戻り値', () => {
 });
 
 describe('FlyMotion: speedScale', () => {
-  const noInertia = (o: object = {}) => new FlyMotion({ timeConstant: 0, ...o });
+  const noInertia = (o: object = {}) => new FlyMotion({ accelTimeConstant: 0, glideTimeConstant: 0, ...o });
 
   it('既定は 1（係数なしと同じ動き）', () => {
     expect(new FlyMotion().speedScale).toBe(1);
@@ -465,7 +473,7 @@ describe('FlyMotion: speedScale', () => {
   });
 
   it('慣性ありのとき、係数の変更は速度へ指数的に反映される', () => {
-    const m = new FlyMotion({ timeConstant: 0.12 });
+    const m = new FlyMotion({ accelTimeConstant: 0.12, glideTimeConstant: 0.12 });
     run(m, 2, 1 / 60, input({ forward: true }));
     expect(m.velocity.length()).toBeCloseTo(0.45, 6);
     m.speedScale = 2;
@@ -530,5 +538,213 @@ describe('FlyMotion: 不正な dt', () => {
     const m = new FlyMotion();
     m.rotateBy(0.2, 0);
     expect(m.step(0, createMoveInput())).toBe(true);
+  });
+});
+
+describe('FlyMotion: 滑走（加速と滑走の時定数）', () => {
+  const S = 0.45;
+  const TAU_A = DEFAULT_ACCEL_TIME_CONSTANT;
+  const TAU_R = DEFAULT_GLIDE_TIME_CONSTANT;
+  const DTS = [1 / 120, 1 / 60, 1 / 30, 0.1];
+
+  /** 最高速（基準速度 × speedScale）に達してから離す。位置は離した点を原点とする。 */
+  function cruising(options: ConstructorParameters<typeof FlyMotion>[0] = {}): FlyMotion {
+    const m = new FlyMotion(options);
+    run(m, 4, 1 / 60, input({ forward: true }));
+    expect(m.velocity.length()).toBeCloseTo(m.speed * m.speedScale, 9);
+    m.position.set(0, 0, 0);
+    return m;
+  }
+
+  it('既定の時定数は、加速 0.15 秒・滑走 0.5 秒', () => {
+    const m = new FlyMotion();
+    expect(m.accelTimeConstant).toBe(0.15);
+    expect(m.glideTimeConstant).toBe(0.5);
+  });
+
+  it('入力があるときは τa で目標速度へ近づく', () => {
+    const m = new FlyMotion();
+    run(m, TAU_A, 1 / 120, input({ forward: true }));
+    expect(m.velocity.length() / S).toBeCloseTo(1 - Math.exp(-1), 6);
+  });
+
+  it('キーを離すと τr で減り、滑る距離は解析解（v·τr·(1 − e^(−t/τr))）に一致する', () => {
+    const m = cruising();
+    run(m, TAU_R, 1 / 120, createMoveInput());
+    expect(m.velocity.length() / S).toBeCloseTo(Math.exp(-1), 6);
+    expect(-m.position.z).toBeCloseTo(S * TAU_R * (1 - Math.exp(-1)), 6);
+    expect(m.isGliding).toBe(true);
+  });
+
+  it('止まるまでの総距離は v·τr から、止まる閾値の分（v·0.03·τr）を引いた値', () => {
+    const m = cruising();
+    run(m, 3, 1 / 60, createMoveInput());
+    expect(m.velocity.length()).toBe(0);
+    expect(-m.position.z).toBeCloseTo(S * TAU_R * (1 - GLIDE_STOP_RATIO), 9);
+    // v·τr（滑り切ったときの距離）の 97%
+    expect(-m.position.z / (S * TAU_R)).toBeGreaterThan(0.96);
+    expect(-m.position.z / (S * TAU_R)).toBeLessThan(1);
+  });
+
+  it('刻み幅（1/120・1/60・1/30・0.1 秒）に依らず、滑る位置・停止の位置が同じ', () => {
+    const midway = DTS.map((dt) => {
+      const m = cruising();
+      run(m, 0.5, dt, createMoveInput());
+      return m.position.clone();
+    });
+    const final = DTS.map((dt) => {
+      const m = cruising();
+      run(m, 3, dt, createMoveInput());
+      return m.position.clone();
+    });
+    for (const p of midway) expectClose(p, midway[0]!, 1e-9);
+    for (const p of final) expectClose(p, final[0]!, 1e-9);
+  });
+
+  it('加速から滑走までを通しても、刻み幅に依らず同じ位置・同じ停止', () => {
+    const run1 = (dt: number) => {
+      const m = new FlyMotion();
+      run(m, 0.6, dt, input({ forward: true }));
+      run(m, 0.3, dt, createMoveInput());
+      run(m, 0.4, dt, input({ right: true }));
+      run(m, 3, dt, createMoveInput());
+      return m;
+    };
+    const ref = run1(1 / 120);
+    for (const dt of DTS) {
+      const m = run1(dt);
+      expectClose(m.position, ref.position, 1e-9);
+      expect(m.velocity.length()).toBe(0);
+    }
+  });
+
+  it('逆向きのキーでは τa で止まる（滑走より早い）', () => {
+    const rev = cruising();
+    // 前進（−Z）の最高速から後退へ。v_z(t) = S − 2S·e^(−t/τa)。τa のとき S·(1 − 2/e)
+    run(rev, TAU_A, 1 / 120, input({ backward: true }));
+    expect(rev.velocity.z / S).toBeCloseTo(1 - 2 / Math.E, 6);
+    // 速度が 0 を横切る時刻は τa·ln2 ≈ 0.104 秒
+    const m = cruising();
+    let t = 0;
+    while (m.velocity.z <= 0 && t < 1) {
+      m.step(1 / 600, input({ backward: true }));
+      t += 1 / 600;
+    }
+    expect(t).toBeCloseTo(TAU_A * Math.LN2, 2);
+    // 同じ時間で、キーを離しただけの滑走はまだ最高速の 80% 以上で進んでいる
+    const glide = cruising();
+    run(glide, TAU_A * Math.LN2, 1 / 600, createMoveInput());
+    expect(glide.velocity.length() / S).toBeGreaterThan(0.8);
+  });
+
+  it('滑走中に別のキーを押すと、そこから τa で新しい向きへ近づく', () => {
+    const m = cruising();
+    run(m, 0.2, 1 / 60, createMoveInput());
+    const v0 = m.velocity.clone();
+    m.step(1 / 60, input({ right: true }));
+    expect(m.isGliding).toBe(false);
+    expect(m.velocity.x).toBeGreaterThan(0);
+    expect(Math.abs(m.velocity.z)).toBeLessThan(Math.abs(v0.z)); // 前進の速度は τa で目標（0）へ向かう
+  });
+
+  it('滑走は、最高速から約 2 秒以内に止まる', () => {
+    for (const dt of DTS) {
+      const m = cruising();
+      let t = 0;
+      while (m.velocity.lengthSq() > 0 && t < 5) {
+        m.step(dt, createMoveInput());
+        t += dt;
+      }
+      expect(t, `dt ${dt}`).toBeLessThanOrEqual(2 + dt);
+      expect(t, `dt ${dt}`).toBeGreaterThan(1.5);
+      expect(m.velocity.length()).toBe(0);
+      expect(m.isGliding).toBe(false);
+      expect(m.step(dt, createMoveInput())).toBe(false);
+    }
+  });
+
+  it('停止の閾値は、基準速度 × speedScale × 0.03', () => {
+    const m = cruising({ speed: 0.2, speedScale: 0.5 }); // 実効 0.1。閾値 0.003
+    let last = 0;
+    while (m.velocity.lengthSq() > 0) {
+      last = m.velocity.length();
+      m.step(1 / 600, createMoveInput());
+    }
+    expect(last).toBeGreaterThanOrEqual(0.1 * GLIDE_STOP_RATIO);
+    expect(last).toBeLessThan(0.1 * GLIDE_STOP_RATIO * 1.02);
+  });
+
+  it('入力がないとき speedScale が下がると、残りの速度も同じ割合で下がる', () => {
+    const m = cruising();
+    const before = m.velocity.length();
+    m.speedScale = 0.25;
+    m.step(0, createMoveInput());
+    expect(m.velocity.length() / before).toBeCloseTo(0.25, 12);
+    // さらに 0.25 → 0.1 は 0.4 倍
+    m.speedScale = 0.1;
+    m.step(0, createMoveInput());
+    expect(m.velocity.length() / before).toBeCloseTo(0.1, 12);
+  });
+
+  it('speedScale が段階的に下がっても、割合の積は同じ（一度に下げた場合と同じ）', () => {
+    const a = cruising();
+    const b = cruising();
+    a.speedScale = 0.2;
+    a.step(0, createMoveInput());
+    for (const sc of [0.8, 0.5, 0.3, 0.2]) {
+      b.speedScale = sc;
+      b.step(0, createMoveInput());
+    }
+    expect(b.velocity.length()).toBeCloseTo(a.velocity.length(), 12);
+  });
+
+  it('speedScale が上がっても残りの速度は増えない。入力があるときは速度を直接は変えない（τa で近づく）', () => {
+    const m = cruising();
+    const before = m.velocity.length();
+    m.speedScale = 4;
+    m.step(0, createMoveInput());
+    expect(m.velocity.length()).toBe(before);
+
+    const k = cruising();
+    k.speedScale = 0.25;
+    k.step(0, input({ forward: true }));
+    expect(k.velocity.length()).toBeCloseTo(S, 9);
+    run(k, 1, 1 / 60, input({ forward: true }));
+    expect(k.velocity.length()).toBeCloseTo(S * 0.25, 2);
+  });
+
+  it('滑走中に下がった speedScale の分、滑る距離も縮む', () => {
+    const plain = cruising();
+    run(plain, 3, 1 / 60, createMoveInput());
+    const slowed = cruising();
+    slowed.speedScale = 0.5;
+    run(slowed, 3, 1 / 60, createMoveInput());
+    // 速度が半分、閾値も半分なので、総距離も半分
+    expect(slowed.position.length() / plain.position.length()).toBeCloseTo(0.5, 9);
+  });
+
+  it('時定数 0 以下は慣性なし（キーを離すと滑らずに止まる）', () => {
+    const m = cruising({ glideTimeConstant: 0 });
+    m.step(1 / 60, createMoveInput());
+    expect(m.velocity.length()).toBe(0);
+    expect(m.position.length()).toBe(0);
+    expect(m.isGliding).toBe(false);
+  });
+
+  it('flyTo・setPose・stop は滑走を終える', () => {
+    const a = cruising();
+    a.step(1 / 60, createMoveInput());
+    expect(a.isGliding).toBe(true);
+    a.setPose(new Vector3(), new Vector3(0, 0, -1));
+    expect(a.isGliding).toBe(false);
+    const b = cruising();
+    b.step(1 / 60, createMoveInput());
+    b.stop();
+    expect(b.isGliding).toBe(false);
+    expect(b.velocity.length()).toBe(0);
+    const c = cruising();
+    c.step(1 / 60, createMoveInput());
+    c.flyTo(new Vector3(0, 0, -1));
+    expect(c.isGliding).toBe(false);
   });
 });

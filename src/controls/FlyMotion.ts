@@ -33,8 +33,10 @@ export interface FlyMotionOptions {
   speedScale?: number;
   minSpeed?: number;
   maxSpeed?: number;
-  /** 目標速度へ近づく指数応答の時定数（秒）。0 以下で慣性なし。 */
-  timeConstant?: number;
+  /** 移動キーの入力があるときに目標速度へ近づく指数応答の時定数（秒。逆向きのキーで止めるときも同じ）。0 以下で慣性なし。既定 0.15。 */
+  accelTimeConstant?: number;
+  /** 移動キーの入力がないときに、残った速度が減る指数応答の時定数（秒）。0 以下で滑らずに止まる。既定 0.5。 */
+  glideTimeConstant?: number;
   /** ホイール 1 ノッチあたりの速度倍率。 */
   wheelFactor?: number;
   /** 1 回の update で積分する時間の上限（秒）。タブ復帰時の跳躍を防ぐ。 */
@@ -59,8 +61,20 @@ export const DEFAULT_FLY_TO_DISTANCE = 0.03;
 export const DEFAULT_FLY_TO_DURATION_MS = 600;
 export const MAX_PITCH = (89 * Math.PI) / 180;
 
-/** 速度がこれ未満で入力が無ければ停止とみなす（単位/秒）。 */
+/** 移動の慣性の時定数の既定値（秒）。加速（入力があるとき。逆向きのキーで止めるときも）。 */
+export const DEFAULT_ACCEL_TIME_CONSTANT = 0.15;
+/** 移動の慣性の時定数の既定値（秒）。滑走（入力がないとき）。 */
+export const DEFAULT_GLIDE_TIME_CONSTANT = 0.5;
+/** 「動きを減らす」設定（`prefers-reduced-motion: reduce`）での、加速・滑走の時定数（秒）。キーを離すとすぐ止まる。 */
+export const REDUCED_MOTION_TIME_CONSTANT = 0.12;
+/**
+ * 入力がないとき、残っている速さが「基準速度 × speedScale × この値」を下回ったら 0 にして停止とする。
+ * 最高速からの滑走が、時定数 0.5 秒で約 1.75 秒（ln(1/0.03) × 0.5）で止まる。
+ */
+export const GLIDE_STOP_RATIO = 0.03;
+/** 速度がこれ未満で入力が無ければ停止とみなす下限（単位/秒）。 */
 const STOP_SPEED = 1e-5;
+const ZERO = new Vector3();
 /** 1 回のホイールイベントで反映するノッチ数の上限。 */
 const MAX_WHEEL_NOTCHES = MAX_WHEEL_EVENT_NOTCHES;
 
@@ -101,12 +115,19 @@ export class FlyMotion {
 
   minSpeed: number;
   maxSpeed: number;
-  timeConstant: number;
+  /** 入力があるときの時定数（秒）。 */
+  accelTimeConstant: number;
+  /** 入力がないときの時定数（秒）。 */
+  glideTimeConstant: number;
   wheelFactor: number;
   maxDeltaTime: number;
 
   private _speed: number;
   private _speedScale = 1;
+  /** 直近の `step` で見た `speedScale`（滑走中に下がったぶんを、残りの速度へ反映するため）。 */
+  private lastStepScale = 1;
+  /** 直近の `step` が、入力がないまま残りの速度で進んだか（滑走中か）。 */
+  private _gliding = false;
   private flight: FlightState | null = null;
   /** rotateBy / setPose による未報告の姿勢変化。次の step で moved として返す。 */
   private dirty = false;
@@ -118,11 +139,13 @@ export class FlyMotion {
   constructor(options: FlyMotionOptions = {}) {
     this.minSpeed = options.minSpeed ?? 0.005;
     this.maxSpeed = options.maxSpeed ?? 2;
-    this.timeConstant = options.timeConstant ?? 0.12;
+    this.accelTimeConstant = options.accelTimeConstant ?? DEFAULT_ACCEL_TIME_CONSTANT;
+    this.glideTimeConstant = options.glideTimeConstant ?? DEFAULT_GLIDE_TIME_CONSTANT;
     this.wheelFactor = options.wheelFactor ?? 1.1;
     this.maxDeltaTime = options.maxDeltaTime ?? 0.1;
     this._speed = clamp(options.speed ?? 0.45, this.minSpeed, this.maxSpeed);
     this.speedScale = options.speedScale ?? 1;
+    this.lastStepScale = this._speedScale;
   }
 
   get speed(): number {
@@ -146,6 +169,11 @@ export class FlyMotion {
     return this.flight !== null;
   }
 
+  /** 移動キーの入力がないまま、残った速度で滑っている最中か（直近の `step` の結果）。 */
+  get isGliding(): boolean {
+    return this._gliding;
+  }
+
   /** 現在の視線方向（単位ベクトル）を `out` に書く。 */
   getDirection(out: Vector3): Vector3 {
     const cp = Math.cos(this.pitch);
@@ -165,6 +193,7 @@ export class FlyMotion {
   setPose(position: Vector3, lookAt: Vector3): void {
     this.flight = null;
     this.velocity.set(0, 0, 0);
+    this._gliding = false;
     this.position.copy(position);
     this.lookTowards(lookAt.x - position.x, lookAt.y - position.y, lookAt.z - position.z);
     this.dirty = true;
@@ -215,6 +244,7 @@ export class FlyMotion {
     const endPitch = clamp(Math.asin(clamp(-offset.y, -1, 1)), -MAX_PITCH, MAX_PITCH);
 
     this.velocity.set(0, 0, 0);
+    this._gliding = false;
     this.flight = {
       startPosition: this.position.clone(),
       endPosition: end,
@@ -236,12 +266,16 @@ export class FlyMotion {
   stop(): void {
     this.flight = null;
     this.velocity.set(0, 0, 0);
+    this._gliding = false;
   }
 
   /**
    * `dtSeconds` だけ時間を進める。入力は区間内で一定とみなす。
    * 速度は目標速度へ指数的に近づき、位置はその解析解で積分するので、
-   * 同じ入力なら刻み幅によらず同じ位置に着く。
+   * 同じ入力なら刻み幅によらず同じ位置に着く。時定数は、入力があるとき（逆向きのキーで止めるときも）は
+   * `accelTimeConstant`、入力がないとき（滑走）は `glideTimeConstant`。
+   * 入力がない間は、`speedScale` が下がったぶん（下がった割合）を残りの速度へ掛け、残りの速さが
+   * 「基準速度 × speedScale × `GLIDE_STOP_RATIO`」を下回る時点で止まる（その時刻までを解析解で進める）。
    * 位置または向きが変わったら true。
    * `dtSeconds` が NaN・負・無限大のときは、状態を変えずに false を返す。
    */
@@ -253,6 +287,17 @@ export class FlyMotion {
 
     this.computeTargetVelocity(input, this.target);
     const hasMoveInput = this.target.lengthSq() > 0;
+    const v = this.velocity;
+
+    // 入力がない間に speedScale が下がったら、残っている速度も同じ割合で下げる（速い速度のまま密な所へ滑り込まない）。
+    // 係数は前回の step との比で見るので、いくつの step に分けて下がっても、積は同じ。
+    const scale = this._speedScale;
+    const prevScale = this.lastStepScale;
+    this.lastStepScale = scale;
+    if (!hasMoveInput && scale < prevScale && v.lengthSq() > 0) {
+      v.multiplyScalar(Math.min(1, scale / prevScale));
+      moved = true;
+    }
 
     if (this.flight) {
       if (hasMoveInput) {
@@ -265,29 +310,52 @@ export class FlyMotion {
 
     if (dt === 0) return moved;
 
-    const v = this.velocity;
-    const tau = this.timeConstant;
-    if (tau <= 0) {
-      v.copy(this.target);
-      this.position.addScaledVector(v, dt);
-    } else {
-      const decay = Math.exp(-dt / tau);
-      // x(t) = target·dt + (v0 − target)·τ·(1 − e^(−dt/τ))、v(t) = target + (v0 − target)·e^(−dt/τ)
-      const gain = tau * (1 - decay);
-      this.position.x += this.target.x * dt + (v.x - this.target.x) * gain;
-      this.position.y += this.target.y * dt + (v.y - this.target.y) * gain;
-      this.position.z += this.target.z * dt + (v.z - this.target.z) * gain;
-      v.x = this.target.x + (v.x - this.target.x) * decay;
-      v.y = this.target.y + (v.y - this.target.y) * decay;
-      v.z = this.target.z + (v.z - this.target.z) * decay;
-    }
+    if (hasMoveInput) this.integrate(dt, this.accelTimeConstant, this.target);
+    else this.glide(dt);
 
-    if (!hasMoveInput && v.lengthSq() < STOP_SPEED * STOP_SPEED) {
-      if (v.lengthSq() > 0) moved = true;
-      v.set(0, 0, 0);
-    }
+    this._gliding = !hasMoveInput && v.lengthSq() > 0;
     if (v.lengthSq() > 0 || hasMoveInput) moved = true;
     return moved;
+  }
+
+  /** 速度を目標速度へ時定数 `tau` で近づけ、その解析解で位置を進める。 */
+  private integrate(dt: number, tau: number, target: Vector3): void {
+    const v = this.velocity;
+    if (tau <= 0) {
+      v.copy(target);
+      this.position.addScaledVector(v, dt);
+      return;
+    }
+    const decay = Math.exp(-dt / tau);
+    // x(t) = target·dt + (v0 − target)·τ·(1 − e^(−dt/τ))、v(t) = target + (v0 − target)·e^(−dt/τ)
+    const gain = tau * (1 - decay);
+    this.position.x += target.x * dt + (v.x - target.x) * gain;
+    this.position.y += target.y * dt + (v.y - target.y) * gain;
+    this.position.z += target.z * dt + (v.z - target.z) * gain;
+    v.x = target.x + (v.x - target.x) * decay;
+    v.y = target.y + (v.y - target.y) * decay;
+    v.z = target.z + (v.z - target.z) * decay;
+  }
+
+  /** 入力がないときの 1 区間。残りの速さが停止の閾値を下回る時刻までを解析解で進めて止める。 */
+  private glide(dt: number): void {
+    const v = this.velocity;
+    const speed = v.length();
+    if (speed === 0) return;
+    const threshold = Math.max(STOP_SPEED, this._speed * this._speedScale * GLIDE_STOP_RATIO);
+    const tau = this.glideTimeConstant;
+    if (tau <= 0 || speed <= threshold) {
+      v.set(0, 0, 0); // 滑らずに止まる（慣性なし）。閾値以下の速度は、そこで止める
+      return;
+    }
+    // 閾値に達する時刻 tc = τ·ln(speed / threshold)。この区間内なら、tc まで進めて止める。
+    const tc = tau * Math.log(speed / threshold);
+    if (tc <= dt) {
+      this.position.addScaledVector(v, (tau * (speed - threshold)) / speed);
+      v.set(0, 0, 0);
+      return;
+    }
+    this.integrate(dt, tau, ZERO);
   }
 
   private computeTargetVelocity(input: MoveInput, out: Vector3): Vector3 {
