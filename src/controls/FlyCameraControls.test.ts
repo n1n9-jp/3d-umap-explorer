@@ -1331,3 +1331,83 @@ describe('FlyCameraControls: 回転の慣性', () => {
     expect(r.controls.update(1 / 60)).toBe(false);
   });
 });
+
+describe('FlyCameraControls: 慣性で回る最中の前進', () => {
+  /** 水平面内の向きの角（ラジアン）。視線は水平のまま回るので、2 つの向きの角度差はこの差の絶対値になる。 */
+  const bearing = (v: Vector3) => Math.atan2(v.x, v.z);
+  const angleBetween = (a: Vector3, b: Vector3) => {
+    const d = bearing(a) - bearing(b);
+    return Math.abs(Math.atan2(Math.sin(d), Math.cos(d)));
+  };
+
+  interface Frame {
+    /** そのフレームの視線（単位ベクトル）。 */
+    dir: Vector3;
+    /** W を押した時点の位置からの変位。 */
+    disp: Vector3;
+  }
+
+  /**
+   * 右へ払って離し、慣性で回り始めてから `pressAfter` 秒後に W を押して、`holdSeconds` 秒進む。
+   * 一定の `dt` で update し、W を押したあとの毎フレームの状態と、W を押した時点の視線を返す。
+   */
+  function flyWhileSpinning(dt: number, pressAfter: number, holdSeconds: number) {
+    const r = createRig();
+    let t = 1000;
+    const emit = (type: string, extra: object) => r.el.emit(type, { pointerId: 1, timeStamp: t, ...extra });
+    emit('pointerdown', { button: 0, clientX: 100, clientY: 100 });
+    for (let i = 0; i < 10; i++) {
+      t += 16;
+      emit('pointermove', { clientX: 100 + 15 * (i + 1), clientY: 100 }); // 937 px/s ≈ 2.3 rad/s
+    }
+    emit('pointerup', { clientX: 250, clientY: 100 });
+    for (let i = 0; i < Math.round(pressAfter / dt); i++) r.controls.update(dt);
+    expect(r.controls.isRotatingByInertia).toBe(true);
+    const pressDir = viewDirection(r.camera).clone();
+    const pressPos = r.camera.position.clone();
+    keydown(r, 'KeyW');
+    const frames: Frame[] = [];
+    for (let i = 0; i < Math.round(holdSeconds / dt); i++) {
+      r.controls.update(dt);
+      frames.push({ dir: viewDirection(r.camera).clone(), disp: r.camera.position.clone().sub(pressPos) });
+    }
+    return { frames, pressDir };
+  }
+
+  // 速度は目標速度へ指数的に近づく（時定数 0.12 秒）ので、進む向きは視線より少し遅れて曲がる。
+  // 刻み幅を細かくするほど、その遅れが見える（極限で、最小の比が約 0.4）
+  for (const dt of [1 / 120, 1 / 60, 1 / 30, 0.1]) {
+    for (const pressAfter of [0.1, 0.3]) {
+      it(`慣性で回りながら W を押すと、進む向きは押した時点の視線に固定されず、回っていく視線に沿って曲がる（dt = ${dt.toFixed(3)} 秒、慣性の開始から ${pressAfter} 秒後に押す）`, () => {
+        const { frames, pressDir } = flyWhileSpinning(dt, pressAfter, 1.3);
+        const last = frames[frames.length - 1];
+        // 視線は押した時点から 0.2 rad 以上回る（回らないと、何も確かめられない）
+        expect(angleBetween(last.dir, pressDir)).toBeGreaterThan(0.2);
+        for (const f of frames) {
+          const turned = angleBetween(f.dir, pressDir); // 視線が押した時点から回った量
+          const bent = angleBetween(f.disp, pressDir); // 変位の向きが押した時点の視線から曲がった量
+          if (turned < 1e-6) continue;
+          // 視線に追従して曲がる。押した時点の向きで進み続ける実装では bent が 0 になる
+          expect(bent).toBeGreaterThan(0.2 * turned);
+          // 変位の向きは、押した時点から今の視線までの間に収まる（視線が回った量を超えて曲がらない）
+          expect(bent).toBeLessThanOrEqual(turned + 1e-9);
+        }
+        // フレームが進むあいだも、変位の向きは視線に追従して曲がり続ける（押した直後の向きで固定する実装では増えない）
+        const first = frames.find((f) => angleBetween(f.dir, pressDir) > 1e-6)!;
+        const dTurned = angleBetween(last.dir, pressDir) - angleBetween(first.dir, pressDir);
+        const dBent = angleBetween(last.disp, pressDir) - angleBetween(first.disp, pressDir);
+        expect(dBent).toBeGreaterThan(0.2 * dTurned);
+        // 十分進んだあとは、押した時点の視線よりも、いまの視線のほうに近い向きへ進んでいる
+        expect(angleBetween(last.disp, last.dir)).toBeLessThan(angleBetween(last.disp, pressDir));
+      });
+    }
+  }
+
+  it('回りながら進んでも、慣性が止まれば、最後の視線の向きへ向かって進み続ける', () => {
+    const { frames } = flyWhileSpinning(1 / 60, 0.1, 4);
+    const a = frames[frames.length - 61]; // 1 秒前
+    const b = frames[frames.length - 1];
+    const step = b.disp.clone().sub(a.disp);
+    expect(angleBetween(step, b.dir)).toBeLessThan(0.01);
+  });
+});

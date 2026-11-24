@@ -90,6 +90,8 @@ const pitchOf = (d) => Math.asin(Math.max(-1, Math.min(1, d[1])));
 const wrapPi = (a) => Math.atan2(Math.sin(a), Math.cos(a));
 // 同じ向きどうしでも誤差が出ないように、acos ではなく atan2(|外積|, 内積) で求める
 const angleBetween = (a, b) => Math.atan2(len(cross(a, b)), dot(a, b));
+// 慣性の最初の角速度の上限 4 rad/s と時定数 0.3 秒から決まる、慣性だけの総回転量の上限（RotationInertia の既定値）
+const INERTIA_MAX_TOTAL = 4 * 0.3;
 
 /**
  * 1 フレームずつ進めて状態を記録する。`until(s, samples)` が true になるか `max` フレームで終わる。
@@ -160,7 +162,7 @@ async function testDrag(page) {
     const turn1 = cross(s0.direction, s1.direction)[1]; // 負で右へ回った（上から見て時計回り）
     const turn2 = cross(s1.direction, s2.direction)[1]; // 正で左へ回った
     const ang1 = Math.acos(Math.min(1, dot(s0.direction, s1.direction)));
-    check(`右ドラッグで右を向く（${name}）`, turn1 < 0 && ang1 > 0.3 && ang1 < 0.45, `回転 ${ang1.toFixed(3)} rad（150px × 0.0025 = 0.375 の見込み）`);
+    check(`右ドラッグで右を向く（${name}）`, turn1 < 0 && Math.abs(ang1 - 150 * 0.0025) < 0.01, `回転 ${ang1.toFixed(3)} rad（150px × 0.0025 = 0.375 の見込み）`);
     check(`左ドラッグで左を向く（${name}）`, turn2 > 0, `外積の y ${turn2.toFixed(4)}`);
     check(`ドラッグでは位置が動かない（${name}）`, maxAbsDiff(s0.position, s2.position) < 1e-9);
   }
@@ -194,7 +196,7 @@ async function testWheel(page) {
   await page.mouse.wheel(0, 100);
   await frames(page, 2);
   const s2 = (await state(page)).speed;
-  check('ホイールを下へ回すと速度が下がる', s2 < s1 * 0.8, `${s1.toFixed(4)} → ${s2.toFixed(4)}`);
+  check('ホイールを下へ回すと速度が下がる（3 ノッチ ≈ 1.1 の 3 乗分の 1）', Math.abs(s2 / s1 - 1.1 ** -3) < 0.03, `${s1.toFixed(4)} → ${s2.toFixed(4)}（${(s2 / s1).toFixed(3)} 倍、見込み ${(1.1 ** -3).toFixed(3)}）`);
   const hud2 = await hudText(page);
   check('HUD の飛行速度が下がった値に更新される', hud2.includes(`飛行速度 ${s2.toPrecision(3)}`), JSON.stringify(hud2.split('\n')[1]));
 }
@@ -315,7 +317,7 @@ async function testInertiaFly(page, inside) {
     `回転のあった標本 ${afterRelease}、1 フレームごとの回転量 ${steps.map((d) => d.toFixed(3)).join(' ')}`);
   check('やがて止まる（rotating が false になり、そのあと向きが変わらない）', !last.rotating && a.length < 80 && (await staysStill(page)), `${a.length} フレーム`);
   // ドラッグ 150px = 0.375 rad。離す直前の速さ ≈ 940 px/s = 2.3 rad/s、時定数 0.3 秒 → 慣性の総回転量 ≈ 0.7 rad
-  check('慣性の総回転量が、離す直前の速さと時定数から見込める範囲に入る', total > 0.375 + 0.4 && total < 0.375 + 0.9, `総回転 ${total.toFixed(3)} rad（ドラッグ 0.375 + 慣性 ${(total - 0.375).toFixed(3)}、見込み ≈ 0.7）`);
+  check('慣性の総回転量が、離す直前の速さと時定数から見込める範囲に入る', total > 0.375 + 0.4 && total < 0.375 + INERTIA_MAX_TOTAL, `総回転 ${total.toFixed(3)} rad（ドラッグ 0.375 + 慣性 ${(total - 0.375).toFixed(3)}、見込み ≈ 0.7）`);
   check('慣性では位置が動かない', len(sub(s0.position, last.position)) < 1e-9);
   await level();
   await frames(page, 4); // HUD の視点の表示は約 0.25 秒ごとに書き換わる
@@ -383,21 +385,40 @@ async function testInertiaFly(page, inside) {
   const pu = await state(page);
   check('そのまま離しても（動かさないクリック）、慣性は付かない', !pu.rotating && angleBetween(pe.direction, pu.direction) < 1e-9);
 
-  // 慣性の間に W を押すと、回りながら進む
+  // 慣性の間に W を押すと、回りながら進む。W を押している間は、慣性が止まるまで 1 フレームずつ記録する
   await level();
-  const w0 = await state(page);
   await pointerGesture(page, flickPoints(cx, cy, 150, 0), 1);
   await sampleFrames(page, (x) => x.rotating, 4);
-  const w1 = await state(page);
+  const w1 = await state(page); // W を押した時点（位置と視線の基準）
   await page.keyboard.down('KeyW');
-  const w = await sampleFrames(page, () => false, 4);
+  const w = await sampleFrames(page, (x, all) => all.length >= 3 && !x.rotating, 40);
   await page.keyboard.up('KeyW');
   const w2 = w[w.length - 1];
   const turned = wrapPi(yawOf(w1.direction) - yawOf(w2.direction));
   check('慣性の間に W を押すと、W では止まらず、回りながら進む', w.some((x) => x.rotating) && turned > 0.02 && len(sub(w2.position, w1.position)) > 0.02,
     `回転 ${turned.toFixed(3)} rad、移動 ${len(sub(w2.position, w1.position)).toFixed(3)}`);
-  const bend = angleBetween(sub(w2.position, w0.position), w1.direction);
-  check('進む向きは、W を押した時点の視線ではなく、回っていく視線に沿って曲がる', bend > 0.08, `押した時点の視線と、移動の向きのなす角 ${bend.toFixed(3)} rad`);
+  // 進む向きは、W を押した時点の視線 d0 に固定されず、毎フレームの視線に沿って曲がる。描画の速さ（1 フレームで進む模擬の時間は
+  // min(0.1, 実時間)）によって、押すまでの減衰も、押している間に回る量も変わるので、絶対値ではなく、フレームごとの比で判定する。
+  //   turned = 視線が d0 から回った量、bent = 変位（W を押した時点の位置から）の向きが d0 から曲がった量。
+  // 視線は水平のまま回るので、変位は d0 と今の視線のあいだの向きになり、bent ≤ turned。速度は目標へ時定数 0.12 秒で近づくので、
+  // 曲がりは視線より少し遅れ、bent / turned は 1 フレーム目が 1、そのあと刻みを細かくするほど小さく（極限で約 0.4）、
+  // 視線が止まると 1 へ向かう。d0 のまま進み続ける実装では bent / turned が 0。押した直後の向きで固定する実装は、比が小さくなり、
+  // フレームが進んでも bent が伸びない。そこで、比の範囲に加えて、最初のフレームから最後のフレームまでの bent の増え方が、
+  // turned の増え方に見合う（0.2 倍より大きい）ことも確かめる。
+  const rows = w.map((x) => {
+    const disp = sub(x.position, w1.position);
+    return { moved: len(disp), turned: angleBetween(w1.direction, x.direction), bent: angleBetween(w1.direction, disp), toGaze: angleBetween(x.direction, disp) };
+  }).filter((q) => q.moved > 1e-3 && q.turned > 1e-3);
+  const ratios = rows.map((q) => q.bent / q.turned);
+  const rf = rows[0], rl = rows[rows.length - 1];
+  const dTurned = rl.turned - rf.turned, dBent = rl.bent - rf.bent;
+  const rowText = rows.map((q) => `${q.turned.toFixed(3)} → ${q.bent.toFixed(3)} (${(q.bent / q.turned).toFixed(2)})`).join(', ');
+  check('進む向きは、W を押した時点の視線ではなく、回っていく視線に沿って曲がる（毎フレーム、変位の向きの曲がりが、視線が回った量に見合う）',
+    rows.length >= 2 && ratios.every((q) => q > 0.2 && q < 1 + 1e-6) && dBent > 0.2 * dTurned,
+    `押した時点からの 視線の回転 → 変位の向きの曲がり（比）: ${rowText}（比は 0.2 より大きく 1 以下）。最初から最後までの増え方 視線 ${dTurned.toFixed(3)} → 曲がり ${dBent.toFixed(3)}（曲がりは視線の 0.2 倍より大きい）`);
+  check('慣性が止まったあと、進む向きは、W を押した時点の視線より、いまの視線に近い',
+    !!rl && !w2.rotating && rl.toGaze < rl.bent,
+    rl ? `いまの視線とのなす角 ${rl.toGaze.toFixed(3)} rad < 押した時点の視線とのなす角 ${rl.bent.toFixed(3)} rad` : '標本がない');
   await settle(page);
   await frames(page, 6); // 移動の慣性が消えるまで待つ
 
