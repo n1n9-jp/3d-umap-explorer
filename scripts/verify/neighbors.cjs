@@ -451,8 +451,23 @@ async function testPanelFit(page, q) {
     const g0 = await geo();
     check(`${w}×${h}: 情報パネルの矩形が画面の中に収まる`, g0.info.top >= 0 && g0.info.left >= 0 && g0.info.bottom <= g0.vh && g0.info.right <= g0.vw,
       `パネル ${JSON.stringify(g0.info)}、画面 ${g0.vw}×${g0.vh}`);
-    check(`${w}×${h}: 要約と一言がパネルの中に見える（一覧だけがスクロールする）`, g0.summary.bottom <= g0.info.bottom + 0.5 && g0.hint.top >= g0.list.bottom - 0.5 && g0.hint.bottom <= g0.info.bottom + 0.5,
-      `一覧 ${g0.list.top.toFixed(0)}–${g0.list.bottom.toFixed(0)}、一言 ${g0.hint.top.toFixed(0)}–${g0.hint.bottom.toFixed(0)}、パネルの下 ${g0.info.bottom.toFixed(0)}`);
+    // 情報パネルは右上の列（選択欄の下、右下のミニマップの上。src/app/topLayout.ts）に収まる。その高さが、一覧を最小の高さにした
+    // パネルの中身より低いときだけ、パネル全体がスクロールする（index.html の #info の規則）。そのときは、パネルを下までスクロールすると一言が見える
+    const panelScrolls = g0.panel.height > g0.panel.client + 1;
+    if (!panelScrolls) {
+      check(`${w}×${h}: 要約と一言がパネルの中に見える（一覧だけがスクロールする）`, g0.summary.bottom <= g0.info.bottom + 0.5 && g0.hint.top >= g0.list.bottom - 0.5 && g0.hint.bottom <= g0.info.bottom + 0.5,
+        `一覧 ${g0.list.top.toFixed(0)}–${g0.list.bottom.toFixed(0)}、一言 ${g0.hint.top.toFixed(0)}–${g0.hint.bottom.toFixed(0)}、パネルの下 ${g0.info.bottom.toFixed(0)}`);
+    } else {
+      const minList = await page.evaluate(() => parseFloat(getComputedStyle(document.getElementById('info-neighbors-list')).minHeight));
+      await page.evaluate(() => { const el = document.getElementById('info'); el.scrollTop = el.scrollHeight; });
+      await frames(page, 1);
+      const gs = await geo();
+      check(`${w}×${h}: パネルの高さが中身の下限より低いので、パネル全体がスクロールし、一覧は最小の高さを保つ。下までスクロールすると、要約と一言がパネルの中に見える`,
+        g0.list.bottom - g0.list.top >= minList - 1 && gs.hint.top >= gs.list.bottom - 0.5 && gs.hint.bottom <= gs.info.bottom + 0.5 && gs.summary.top >= gs.info.top - 0.5,
+        `パネル ${g0.info.top.toFixed(0)}–${g0.info.bottom.toFixed(0)}（中身 ${g0.panel.height}px）、一覧の高さ ${(g0.list.bottom - g0.list.top).toFixed(0)}px（下限 ${minList}px）、スクロール後の一言 ${gs.hint.top.toFixed(0)}–${gs.hint.bottom.toFixed(0)}`);
+      await page.evaluate(() => { document.getElementById('info').scrollTop = 0; });
+      await frames(page, 1);
+    }
     // キーボード: 最初の項目から End で最後の項目へ
     await page.evaluate(() => document.querySelector('#info-neighbors-list button.nb-item').focus());
     await page.keyboard.press('End');
