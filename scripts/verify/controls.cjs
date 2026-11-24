@@ -45,9 +45,23 @@ function check(name, ok, detail = '') {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`);
 }
 
+// `--fast-clock`: 描画の速い環境（60fps）を模擬する。ページの時計（performance.now と requestAnimationFrame に渡る時刻）を
+// 描画 1 フレームごとに 1/60 秒だけ進めるので、アプリが 1 フレームで進める模擬の時間は、実際の描画が遅くても 1/60 秒になる。
+const FAST_CLOCK = args.includes('--fast-clock');
+const FAST_CLOCK_SCRIPT = () => {
+  let t = performance.now(), seen = null;
+  performance.now = () => t;
+  const raf = window.requestAnimationFrame.bind(window);
+  window.requestAnimationFrame = (cb) => raf((real) => {
+    if (real !== seen) { seen = real; t += 1000 / 60; } // 1 回の描画（同じ real の呼び出し）につき 1 度だけ進める
+    cb(t);
+  });
+};
+
 const consoleErrors = [];
 async function openPage(browser, base, query = '', { reducedMotion = false } = {}) {
   const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 1 });
+  if (FAST_CLOCK) await page.addInitScript(FAST_CLOCK_SCRIPT);
   if (reducedMotion) await page.emulateMedia({ reducedMotion: 'reduce' });
   page.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(`[error] ${m.text()}`); });
   page.on('pageerror', (e) => consoleErrors.push(`[pageerror] ${e.message}`));
@@ -69,7 +83,7 @@ async function holdKeys(page, keys, n) {
   for (const k of keys) await page.keyboard.down(k);
   await frames(page, n);
   for (const k of [...keys].reverse()) await page.keyboard.up(k);
-  await frames(page, 4);
+  await waitSim(page, 0.5);
 }
 
 /**
@@ -85,6 +99,14 @@ async function drag(page, x0, y0, x1, y1) {
   await frames(page, 3);
 }
 
+/** キーを、模擬の時間で `seconds` 秒分（下限の見積もり）押し続けて離す。進む距離を、描画の速さによらず決めたいときに使う。 */
+async function holdKeysFor(page, keys, seconds) {
+  for (const k of keys) await page.keyboard.down(k);
+  await waitSim(page, seconds);
+  for (const k of [...keys].reverse()) await page.keyboard.up(k);
+  await waitSim(page, 0.5);
+}
+
 const yawOf = (d) => Math.atan2(-d[0], -d[2]);
 const pitchOf = (d) => Math.asin(Math.max(-1, Math.min(1, d[1])));
 const wrapPi = (a) => Math.atan2(Math.sin(a), Math.cos(a));
@@ -94,18 +116,60 @@ const angleBetween = (a, b) => Math.atan2(len(cross(a, b)), dot(a, b));
 const INERTIA_MAX_TOTAL = 4 * 0.3;
 
 /**
- * 1 フレームずつ進めて状態を記録する。`until(s, samples)` が true になるか `max` フレームで終わる。
+ * 1 標本（`measureFrames(1)` ひとつ分）の間にアプリが進めた模擬の時間（秒）の下限。アプリは 1 フレームで
+ * min(0.1, 実時間) 秒だけ進める（src/main.ts の描画ループ）。状態（getState）には 1 フレームの時間が出ないので、
+ * measureFrames の結果から求める。測った 1 フレームのほかに、測る前の 1 フレーム（数えない）も進むので、
+ * （数えたフレーム + 1）× min(0.1, 平均の 1 フレームの時間）を下限とする。標本のあいだに挟まる描画は数えないので、実際はこれ以上。
  */
-async function sampleFrames(page, until, max = 80) {
+const simSecondsOf = (stats) => (stats.frames + 1) * Math.min(0.1, stats.meanMs / 1000);
+
+/** 状態に、ホバー中の点（hovered）と、ここまでに進めた模擬の時間の下限（simSeconds）を足して返す。 */
+async function sampleOnce(page, simBefore) {
+  const stats = await frames(page, 1);
+  const s = await state(page);
+  s.hovered = await page.evaluate(() => window.__explorer.interaction.getState().hovered);
+  s.simSeconds = simBefore + simSecondsOf(stats);
+  return s;
+}
+
+/**
+ * 1 フレームずつ進めて状態を記録する。`until(s, samples)` が true になるか、ちょうど `n` 標本で終わる（標本の数を決めて記録したいとき）。
+ */
+async function sampleFrames(page, until, n = 80) {
   const samples = [];
-  for (let i = 0; i < max; i++) {
-    await frames(page, 1);
-    const s = await state(page);
-    s.hovered = await page.evaluate(() => window.__explorer.interaction.getState().hovered);
+  let sim = 0;
+  for (let i = 0; i < n; i++) {
+    const s = await sampleOnce(page, sim);
+    sim = s.simSeconds;
     samples.push(s);
     if (until(s, samples)) break;
   }
   return samples;
+}
+
+/**
+ * `until(s, samples)` が true になるまで 1 フレームずつ進めて状態を記録する。待つ上限は、フレーム数ではなく
+ * 模擬の時間（`maxSimSeconds` 秒分。下限の見積もりで数えるので、実際はそれ以上進んでいる）で決める。描画が速くても遅くても、
+ * 慣性などの「時間で決まる動き」が終わるまでの待ちは同じ長さになる。上限に達したら、配列の `timedOut` が true になる。
+ */
+async function sampleUntil(page, until, maxSimSeconds = 3) {
+  const samples = [];
+  let sim = 0;
+  samples.timedOut = false;
+  while (sim < maxSimSeconds) {
+    const s = await sampleOnce(page, sim);
+    sim = s.simSeconds;
+    samples.push(s);
+    if (until(s, samples)) return samples;
+  }
+  samples.timedOut = true;
+  return samples;
+}
+
+/** 模擬の時間で `seconds` 秒分（下限の見積もり）だけ描画を進める。移動の慣性（時定数 0.12 秒）などが消えるまでの待ちに使う。 */
+async function waitSim(page, seconds) {
+  let sim = 0;
+  while (sim < seconds) sim += simSecondsOf(await frames(page, 1));
 }
 
 // ---------- 検証本体 ----------
@@ -257,7 +321,7 @@ async function testModes(page, view, centerOf) {
     `位置の差 ${maxAbsDiff(d2.position, f1.position).toExponential(1)}, 向きの差 ${maxAbsDiff(d2.direction, f1.direction).toExponential(1)}`);
   check('戻った後の HUD は飛行モード', (await hudText(page)).includes('モード 飛行'));
   await holdKeys(page, ['KeyW'], 6);
-  await frames(page, 8); // 慣性が消えるまで待つ
+  await waitSim(page, 1); // 移動の慣性が消えるまで待つ
   const f2 = await state(page);
   check('飛行モードに戻ると W で動く', len(sub(f2.position, f1.position)) > 0.02);
   await drag(page, cx, cy, cx + 100, cy);
@@ -284,8 +348,8 @@ async function testModes(page, view, centerOf) {
 /** 向きの列（先頭を含む）の、ヨーの変化（右へ回ると正）。 */
 const yawSteps = (dirs) => dirs.slice(1).map((d, i) => wrapPi(yawOf(dirs[i]) - yawOf(d)));
 
-async function settle(page, max = 80) {
-  return sampleFrames(page, (s) => !s.rotating, max);
+async function settle(page, maxSimSeconds = 3) {
+  return sampleUntil(page, (s) => !s.rotating, maxSimSeconds);
 }
 
 /** 慣性が止まったあと、`n` フレーム進めても向きと位置が変わらないか。 */
@@ -305,7 +369,7 @@ async function testInertiaFly(page, inside) {
   await level();
   const s0 = await state(page);
   await pointerGesture(page, flickPoints(cx, cy, 150, 0), 1);
-  const a = await sampleFrames(page, (s) => !s.rotating, 80);
+  const a = await sampleUntil(page, (s) => !s.rotating);
   const dirs = [s0.direction, ...a.map((s) => s.direction)];
   const steps = yawSteps(dirs);
   const last = a[a.length - 1];
@@ -315,15 +379,15 @@ async function testInertiaFly(page, inside) {
   check('動かしながら離すと、離したあとも回り続ける（rotating が true で、向きが同じ向きへ変わり続ける）',
     a.some((s) => s.rotating) && afterRelease >= 2 && steps.every((d) => d > -1e-9),
     `回転のあった標本 ${afterRelease}、1 フレームごとの回転量 ${steps.map((d) => d.toFixed(3)).join(' ')}`);
-  check('やがて止まる（rotating が false になり、そのあと向きが変わらない）', !last.rotating && a.length < 80 && (await staysStill(page)), `${a.length} フレーム`);
+  check('やがて止まる（rotating が false になり、そのあと向きが変わらない）', !last.rotating && !a.timedOut && (await staysStill(page)), `${a.length} 標本、模擬の時間 ${last.simSeconds.toFixed(2)} 秒以上`);
   // ドラッグ 150px = 0.375 rad。離す直前の速さ ≈ 940 px/s = 2.3 rad/s、時定数 0.3 秒 → 慣性の総回転量 ≈ 0.7 rad
   check('慣性の総回転量が、離す直前の速さと時定数から見込める範囲に入る', total > 0.375 + 0.4 && total < 0.375 + INERTIA_MAX_TOTAL, `総回転 ${total.toFixed(3)} rad（ドラッグ 0.375 + 慣性 ${(total - 0.375).toFixed(3)}、見込み ≈ 0.7）`);
   check('慣性では位置が動かない', len(sub(s0.position, last.position)) < 1e-9);
   await level();
-  await frames(page, 4); // HUD の視点の表示は約 0.25 秒ごとに書き換わる
+  await waitSim(page, 0.4); // HUD の視点の表示は（模擬の時間で）約 0.25 秒ごとに書き換わる
   const hudBefore = (await hudText(page)).split('\n').pop();
   await pointerGesture(page, flickPoints(cx, cy, 150, 0), 1);
-  await frames(page, 4);
+  await waitSim(page, 0.4);
   const midState = await state(page);
   const hudDuring = (await hudText(page)).split('\n').pop();
   await settle(page);
@@ -336,7 +400,7 @@ async function testInertiaFly(page, inside) {
     const b0 = await state(page);
     const slow = [{ x: cx, y: cy, t: 0 }, { x: cx + 10, y: cy, t: 100 }];
     await pointerGesture(page, slow, 16, { x: cx + releaseDx, y: cy, t: 116 });
-    const q = await sampleFrames(page, (x) => !x.rotating, 80);
+    const q = await sampleUntil(page, (x) => !x.rotating);
     const total = wrapPi(yawOf(b0.direction) - yawOf(q[q.length - 1].direction));
     return { total, rotated: q.some((x) => x.rotating) };
   };
@@ -391,11 +455,11 @@ async function testInertiaFly(page, inside) {
   await sampleFrames(page, (x) => x.rotating, 4);
   const w1 = await state(page); // W を押した時点（位置と視線の基準）
   await page.keyboard.down('KeyW');
-  const w = await sampleFrames(page, (x, all) => all.length >= 3 && !x.rotating, 40);
+  const w = await sampleUntil(page, (x, all) => all.length >= 3 && !x.rotating);
   await page.keyboard.up('KeyW');
   const w2 = w[w.length - 1];
   const turned = wrapPi(yawOf(w1.direction) - yawOf(w2.direction));
-  check('慣性の間に W を押すと、W では止まらず、回りながら進む', w.some((x) => x.rotating) && turned > 0.02 && len(sub(w2.position, w1.position)) > 0.02,
+  check('慣性の間に W を押すと、W では止まらず、回りながら進む', !w.timedOut && w.some((x) => x.rotating) && turned > 0.02 && len(sub(w2.position, w1.position)) > 0.02,
     `回転 ${turned.toFixed(3)} rad、移動 ${len(sub(w2.position, w1.position)).toFixed(3)}`);
   // 進む向きは、W を押した時点の視線 d0 に固定されず、毎フレームの視線に沿って曲がる。描画の速さ（1 フレームで進む模擬の時間は
   // min(0.1, 実時間)）によって、押すまでの減衰も、押している間に回る量も変わるので、絶対値ではなく、フレームごとの比で判定する。
@@ -409,18 +473,26 @@ async function testInertiaFly(page, inside) {
     const disp = sub(x.position, w1.position);
     return { moved: len(disp), turned: angleBetween(w1.direction, x.direction), bent: angleBetween(w1.direction, disp), toGaze: angleBetween(x.direction, disp) };
   }).filter((q) => q.moved > 1e-3 && q.turned > 1e-3);
-  const ratios = rows.map((q) => q.bent / q.turned);
-  const rf = rows[0], rl = rows[rows.length - 1];
-  const dTurned = rl.turned - rf.turned, dBent = rl.bent - rf.bent;
+  // 標本が足りないときは、配列を読む前に FAIL として報告する（rows[0] などの参照で例外にしない）
+  const enough = rows.length >= 2;
+  const rf = enough ? rows[0] : null, rl = enough ? rows[rows.length - 1] : null;
   const rowText = rows.map((q) => `${q.turned.toFixed(3)} → ${q.bent.toFixed(3)} (${(q.bent / q.turned).toFixed(2)})`).join(', ');
-  check('進む向きは、W を押した時点の視線ではなく、回っていく視線に沿って曲がる（毎フレーム、変位の向きの曲がりが、視線が回った量に見合う）',
-    rows.length >= 2 && ratios.every((q) => q > 0.2 && q < 1 + 1e-6) && dBent > 0.2 * dTurned,
-    `押した時点からの 視線の回転 → 変位の向きの曲がり（比）: ${rowText}（比は 0.2 より大きく 1 以下）。最初から最後までの増え方 視線 ${dTurned.toFixed(3)} → 曲がり ${dBent.toFixed(3)}（曲がりは視線の 0.2 倍より大きい）`);
-  check('慣性が止まったあと、進む向きは、W を押した時点の視線より、いまの視線に近い',
-    !!rl && !w2.rotating && rl.toGaze < rl.bent,
-    rl ? `いまの視線とのなす角 ${rl.toGaze.toFixed(3)} rad < 押した時点の視線とのなす角 ${rl.bent.toFixed(3)} rad` : '標本がない');
+  if (!enough) {
+    check('進む向きは、W を押した時点の視線ではなく、回っていく視線に沿って曲がる（毎フレーム、変位の向きの曲がりが、視線が回った量に見合う）', false,
+      `判定に使える標本が ${rows.length} 件（2 件以上が必要）。記録した標本 ${w.length} 件、模擬の時間 ${w[w.length - 1].simSeconds.toFixed(2)} 秒以上${w.timedOut ? '（上限に達した）' : ''}`);
+    check('慣性が止まったあと、進む向きは、W を押した時点の視線より、いまの視線に近い', false, '標本がない');
+  } else {
+    const ratios = rows.map((q) => q.bent / q.turned);
+    const dTurned = rl.turned - rf.turned, dBent = rl.bent - rf.bent;
+    check('進む向きは、W を押した時点の視線ではなく、回っていく視線に沿って曲がる（毎フレーム、変位の向きの曲がりが、視線が回った量に見合う）',
+      ratios.every((q) => q > 0.2 && q < 1 + 1e-6) && dBent > 0.2 * dTurned,
+      `押した時点からの 視線の回転 → 変位の向きの曲がり（比）: ${rowText}（比は 0.2 より大きく 1 以下）。最初から最後までの増え方 視線 ${dTurned.toFixed(3)} → 曲がり ${dBent.toFixed(3)}（曲がりは視線の 0.2 倍より大きい）`);
+    check('慣性が止まったあと、進む向きは、W を押した時点の視線より、いまの視線に近い',
+      !w2.rotating && rl.toGaze < rl.bent,
+      `いまの視線とのなす角 ${rl.toGaze.toFixed(3)} rad < 押した時点の視線とのなす角 ${rl.bent.toFixed(3)} rad`);
+  }
   await settle(page);
-  await frames(page, 6); // 移動の慣性が消えるまで待つ
+  await waitSim(page, 1); // 移動の慣性が消えるまで待つ
 
   // ピッチの制限: 慣性の間も ±89° で止まる
   for (const [name, y0, dy, sign] of [['上', 600, -400, 1], ['下', 200, 400, -1]]) {
@@ -459,7 +531,7 @@ async function testInertiaFly(page, inside) {
   await frames(page, 1);
   const h0 = await state(page);
   check('慣性の間に H を押すと、ホームへの移動が始まり、慣性は止まる', h0.homing && !h0.rotating);
-  const hs = await sampleFrames(page, (x) => !x.homing, 40);
+  const hs = await sampleUntil(page, (x) => !x.homing);
   const hl = hs[hs.length - 1];
   check('ホームへ着いたあとも、慣性は残らない（向きはホームの向き）', !hl.homing && !hl.rotating && angleBetween(hl.direction, norm(sub(home.look, home.pos))) < 1e-3 && len(sub(hl.position, home.pos)) < 1e-3);
 
@@ -486,7 +558,7 @@ async function testInertiaFly(page, inside) {
     await setView(page, inside.pos, inside.look);
     await frames(page, 2);
     await pointerGesture(page, flickPoints(cx - 75, y0, 150, 0), 1);
-    const q = await sampleFrames(page, (x) => !x.rotating, 80);
+    const q = await sampleUntil(page, (x) => !x.rotating);
     await frames(page, 2);
     const rotatingSamples = q.slice(1).filter((x) => x.rotating);
     const hoverDuring = rotatingSamples.map((x) => x.hovered);
@@ -525,14 +597,14 @@ async function testInertiaOverview(page, center) {
   await place();
   const s0 = await state(page);
   await pointerGesture(page, flickPoints(cx, cy, 120, 0), 1);
-  const a = await sampleFrames(page, (s) => !s.rotating, 80);
+  const a = await sampleUntil(page, (s) => !s.rotating);
   const az = [azimuth(s0), ...a.map(azimuth)];
   const steps = az.slice(1).map((v, i) => wrapPi(v - az[i]));
   const last = a[a.length - 1];
   // 1 回の標本（measureFrames(1)）は、ソフトウェア描画では複数フレーム（約 0.4 秒）にあたるので、慣性は数標本で終わる
   const afterRelease = steps.slice(1).filter((d) => Math.abs(d) > 1e-4).length;
   check('俯瞰モード: 離したあとも中心のまわりを同じ向きへ回り続け、やがて止まる',
-    a.some((s) => s.rotating) && afterRelease >= 2 && steps.every((d) => d < 1e-9) && !last.rotating && a.length < 80 && (await staysStill(page)),
+    a.some((s) => s.rotating) && afterRelease >= 2 && steps.every((d) => d < 1e-9) && !last.rotating && !a.timedOut && (await staysStill(page)),
     `回転のあった標本 ${afterRelease}、1 フレームごとの回転量 ${steps.map((d) => d.toFixed(3)).join(' ')}`);
   check('俯瞰モード: 慣性の間も中心までの距離は変わらない', [s0, ...a].every((s) => Math.abs(dist(s) - dist(s0)) < 1e-4), `距離 ${dist(s0).toFixed(4)} → ${dist(last).toFixed(4)}`);
   check('俯瞰モード: 慣性の総回転量が見込める範囲に入る（ドラッグ 0.6 rad に、慣性が加わる）', Math.abs(wrapPi(azimuth(last) - azimuth(s0))) > 0.6 + 0.3, `総回転 ${Math.abs(wrapPi(azimuth(last) - azimuth(s0))).toFixed(3)} rad`);
@@ -540,7 +612,7 @@ async function testInertiaOverview(page, center) {
   await place();
   const w0 = await state(page);
   await pointerGesture(page, [{ x: cx, y: cy, t: 0 }, { x: cx + 10, y: cy, t: 100 }], 16, { x: cx + 90, y: cy, t: 116 });
-  const w = await sampleFrames(page, (x) => !x.rotating, 80);
+  const w = await sampleUntil(page, (x) => !x.rotating);
   const wl = w[w.length - 1];
   const wTotal = Math.abs(wrapPi(azimuth(wl) - azimuth(w0)));
   check('俯瞰モード: 最後の pointermove のあとに動いて離した位置も、離す直前の速さに入る（ドラッグだけより大きく回る）',
@@ -683,7 +755,7 @@ async function main() {
     await setView(page, edge.pos, edge.look);
     await frames(page, 3);
     const s0 = await state(page);
-    await holdKeys(page, ['KeyW'], 9); // 速度が既定 0.45（旧 0.15 の 3 倍）なので、旧 28 フレームと同じ距離になる 9 フレーム
+    await holdKeysFor(page, ['KeyW'], 1); // 縁からクラスタの内部まで届く距離を、描画の速さによらず進むため、フレーム数ではなく模擬の時間（1 秒分）で押す
     const s1 = await state(page);
     const d0 = len(sub(s0.position, L)), d1 = len(sub(s1.position, L));
     await page.screenshot({ path: path.join(outDir, 'controls-fly-inside.png') });
