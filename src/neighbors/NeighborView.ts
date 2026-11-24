@@ -5,6 +5,8 @@
  *   表示している埋め込みの座標の空間索引で、同じ数の 3 次元での近傍を求めて、一覧（情報パネル）と地図の上の表示を作る。
  * - 地図の上の表示（`NeighborOverlay` の輪と線、画面の外の近傍の方向を示す画面の端の印）は、N キー（`NeighborsShared.enabled`）で切り替える。
  *   位置は毎フレーム、点群に描いている座標（計算の途中の表示や、新旧の座標の間の移動も含む）から取り直すので、点が動いている間も合う。
+ *   画面の端の印は、HUD・ミニマップ・情報パネルなどの矩形（`update` に渡される）の外側の縁へずらして、常に見える位置に置く。
+ * - 計算の途中の表示の間（`setComputingDisplay`）は、「地図で近い」の判定は計算の前の座標についての答えなので、要約にそう添える。
  * - 一覧の項目を押すと、その点を選択して手前へ飛ぶ。戻る操作で、選択の履歴の 1 つ前へ戻る（そこへも飛ぶ）。
  */
 import * as THREE from 'three';
@@ -13,11 +15,17 @@ import { NEIGHBOR_COLOR, NeighborOverlay } from '../render/neighborOverlay';
 import { NeighborList } from '../interaction/neighborList';
 import type { PointInfoSource } from '../interaction/infoPanel';
 import { compareNeighbors, mapNeighbors, originalNeighbors, summaryText, type KNearestSearch } from './neighbors';
-import { placeOnEdge, type EdgePlacement } from './edge';
+import { placeOnEdge, type EdgeObstacle, type EdgePlacement } from './edge';
 import type { NeighborsShared } from './shared';
 
-/** 画面の端の印を、端からこの距離（CSS ピクセル）の内側に置く（上は、データセットの選択欄の行の下） */
+/**
+ * 画面の端の印を、端からこの距離（CSS ピクセル）の内側に置く（上は、データセットの選択欄の行の下）。
+ * HUD・ミニマップなどの矩形とは重ならないように、`update` に渡される矩形を避けてさらにずらす。
+ */
 export const EDGE_MARGINS = { top: 50, right: 18, bottom: 18, left: 18 };
+
+/** 単語を囲む矩形（点の中心から見たずれ dx・dy は右・下が正、半分の幅 hw と高さ hh。CSS ピクセル） */
+interface WordBoxOffset { dx: number; dy: number; hw: number; hh: number }
 
 export interface NeighborViewDeps {
   doc: Document;
@@ -35,10 +43,11 @@ export interface NeighborViewDeps {
   /** 点を選択して、その点の手前へ飛ぶ */
   selectAndFly(index: number): void;
   /**
-   * 単語の文字を出している点の、点の中心から見た文字の矩形（CSS ピクセル）。近傍の輪を文字に重ねず、文字を囲む矩形にするのに使う。
-   * 単語のデータセットでなければ省略
+   * 点 `index` の単語を囲む、いまの視点での矩形と基準点（点の中心の画面上の位置。CSS ピクセル）。そのフレームに描かれている文字の
+   * 位置と大きさ（`WordLabels.currentBox`）。近傍の輪を文字に重ねず、文字を囲む矩形にするのに使う。毎フレーム近傍の数だけ呼ぶので、
+   * 呼び出しごとに配列やオブジェクトを作らないこと。単語として描かれていない点は null。単語のデータセットでなければ省略
    */
-  wordBoxes?(): Map<number, { dx: number; dy: number; hw: number; hh: number }>;
+  wordBox?(index: number): { readonly rect: { x: number; y: number; width: number; height: number }; readonly anchorX: number; readonly anchorY: number } | null;
 }
 
 /** 検証用の状態（`window.__explorer.neighbors.getState()`）。 */
@@ -66,8 +75,14 @@ export interface NeighborViewState {
   overlayVisible: boolean;
   /** 線の端点（画面上の CSS ピクセル。選択中の点と近傍を投影した位置。カメラの前にあるものだけ） */
   lines: { from: [number, number]; to: [number, number]; rank: number; index: number }[];
-  /** 画面の端の印 */
+  /** 画面の端の印（x・y は印の中心。画面の端の余白の内側で、障害物の矩形の外） */
   edgeMarkers: { index: number; rank: number; x: number; y: number; behind: boolean }[];
+  /** 画面の端の印をずらすときに避けた矩形（直近のフレームで `update` に渡されたもの。x・y は中心） */
+  edgeObstacles: EdgeObstacle[];
+  /** 単語として描いている近傍の矩形（輪の代わり。画面上の中心 x・y と幅・高さ、CSS ピクセル。直近のフレームで描画へ渡した値） */
+  wordBoxes: { index: number; rank: number; x: number; y: number; width: number; height: number }[];
+  /** 計算の途中の表示の間か（要約に「計算前の地図での判定」を添えている） */
+  beforeCompute: boolean;
   /** 選択の履歴（戻る先。古い順） */
   history: number[];
 }
@@ -92,6 +107,21 @@ export class NeighborView {
   private readonly v = new THREE.Vector4();
   private readonly vpMatrix = new THREE.Matrix4();
   private lastEdges: NeighborViewState['edgeMarkers'] = [];
+  private lastObstacles: readonly EdgeObstacle[] = [];
+  private beforeCompute = false;
+  /** 直近のフレームで描画へ渡した単語の矩形（近傍の順位ごとに、あれば 1・dx・dy・hw・hh。作り直さない） */
+  private readonly wordBoxBuf: Float64Array;
+  private readonly wordBoxOut: WordBoxOffset = { dx: 0, dy: 0, hw: 0, hh: 0 };
+  private readonly wordBoxOf = (k: number): WordBoxOffset | null => {
+    const j = this.original[k];
+    const b = j === undefined ? null : this.deps.wordBox?.(j) ?? null;
+    const buf = this.wordBoxBuf;
+    if (!b) { buf[5 * k] = 0; return null; }
+    const o = this.wordBoxOut;
+    o.dx = b.rect.x - b.anchorX; o.dy = b.rect.y - b.anchorY; o.hw = b.rect.width / 2; o.hh = b.rect.height / 2;
+    buf[5 * k] = 1; buf[5 * k + 1] = o.dx; buf[5 * k + 2] = o.dy; buf[5 * k + 3] = o.hw; buf[5 * k + 4] = o.hh;
+    return o;
+  };
   private readonly startBuf = new Float32Array(3);
   private endBuf: Float32Array;
 
@@ -99,6 +129,7 @@ export class NeighborView {
     this.deps = deps;
     const n = deps.shared.count;
     this.endBuf = new Float32Array(3 * n);
+    this.wordBoxBuf = new Float64Array(5 * n);
     this.overlay = new NeighborOverlay(deps.cloud, n);
     this.list = new NeighborList(deps.doc, deps.info, {
       onFocus: (rank) => this.overlay.setFocus(rank),
@@ -186,12 +217,27 @@ export class NeighborView {
     }
   }
 
-  /** 毎フレーム（描画の前）。地図の上の表示の位置と、画面の端の印を合わせる。 */
-  update(width: number, height: number): void {
+  /**
+   * 計算の途中の表示の間（点群に、計算の途中の座標や新旧の座標の間の移動を出している間）か。「地図で近い」の判定は、
+   * 計算の前の座標（表示中の埋め込みの座標）についての答えなので、要約に「（計算前の地図での判定）」を添える。
+   * 計算が終わって表示が切り替わると、新しい座標で作り直した表示が、新しい座標での判定を出す。
+   */
+  setComputingDisplay(on: boolean): void {
+    if (this.disposed || this.beforeCompute === on) return;
+    this.beforeCompute = on;
+    this.list.setBeforeCompute(on);
+  }
+
+  /**
+   * 毎フレーム（描画の前）。地図の上の表示の位置と、画面の端の印を合わせる。
+   * `obstacles` は、画面の端の印を重ねない UI の矩形（HUD・ミニマップ・情報パネルなど。CSS ピクセル、x・y は中心）。
+   */
+  update(width: number, height: number, obstacles: readonly EdgeObstacle[] = []): void {
     if (this.disposed) return;
     const show = this.overlayShown();
     if (!show || this.selected === null) {
       this.hideEdges();
+      this.wordBoxBuf.fill(0);
       return;
     }
     const pos = this.deps.shownPositions();
@@ -203,9 +249,8 @@ export class NeighborView {
       this.endBuf[3 * k] = pos[3 * j]!; this.endBuf[3 * k + 1] = pos[3 * j + 1]!; this.endBuf[3 * k + 2] = pos[3 * j + 2]!;
     }
     this.overlay.setPositions(this.startBuf, this.endBuf.subarray(0, 3 * n));
-    const boxes = this.deps.wordBoxes?.();
-    this.overlay.setWordBoxes((k) => (boxes ? boxes.get(this.original[k]!) ?? null : null));
-    this.updateEdges(width, height);
+    this.overlay.setWordBoxes(this.wordBoxOf);
+    this.updateEdges(width, height, obstacles);
   }
 
   /** 描画バッファの大きさと倍率（DatasetView.resize から）。 */
@@ -230,7 +275,7 @@ export class NeighborView {
       inMap: [...this.inMap],
       matches: this.matches,
       count: this.deps.shared.count,
-      summary: this.ready ? summaryText(this.matches, this.original.length) : null,
+      summary: this.ready ? summaryText(this.matches, this.original.length, this.beforeCompute) : null,
       list: {
         state: listState.kind,
         indices: buttons.map((b) => Number(b.dataset.index)),
@@ -242,6 +287,9 @@ export class NeighborView {
       overlayVisible: this.overlay.visible,
       lines: this.overlay.visible ? this.projectLines() : [],
       edgeMarkers: this.lastEdges.map((e) => ({ ...e })),
+      edgeObstacles: this.lastObstacles.map((r) => ({ ...r })),
+      wordBoxes: this.wordBoxState(),
+      beforeCompute: this.beforeCompute,
       history: this.deps.shared.history.entries(),
     };
   }
@@ -292,6 +340,7 @@ export class NeighborView {
   private hideEdges(): void {
     for (const el of this.edgeEls) if (!el.hidden) el.hidden = true;
     this.lastEdges = [];
+    this.lastObstacles = [];
   }
 
   private computeViewProjection(): THREE.Matrix4 {
@@ -300,13 +349,33 @@ export class NeighborView {
     return this.vpMatrix.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse).multiply(this.deps.cloud.mesh.matrixWorld);
   }
 
-  private place(m: THREE.Matrix4, pos: ArrayLike<number>, i: number, width: number, height: number): EdgePlacement {
+  private place(m: THREE.Matrix4, pos: ArrayLike<number>, i: number, width: number, height: number, obstacles: readonly EdgeObstacle[]): EdgePlacement {
     this.v.set(pos[3 * i]!, pos[3 * i + 1]!, pos[3 * i + 2]!, 1).applyMatrix4(m);
-    return placeOnEdge(this.v.x, this.v.y, this.v.w, width, height, EDGE_MARGINS);
+    return placeOnEdge(this.v.x, this.v.y, this.v.w, width, height, EDGE_MARGINS, obstacles);
+  }
+
+  /** 直近のフレームで描画へ渡した単語の矩形を、画面上の中心と大きさにして返す（検証用。近傍の点の投影した位置にずれを足す）。 */
+  private wordBoxState(): NeighborViewState['wordBoxes'] {
+    const out: NeighborViewState['wordBoxes'] = [];
+    if (this.selected === null || !this.overlay.visible) return out;
+    const m = this.computeViewProjection();
+    const pos = this.deps.shownPositions();
+    const rect = this.deps.canvas.getBoundingClientRect();
+    const buf = this.wordBoxBuf;
+    for (let k = 0; k < this.original.length; k++) {
+      if (buf[5 * k] !== 1) continue;
+      const j = this.original[k]!;
+      this.v.set(pos[3 * j]!, pos[3 * j + 1]!, pos[3 * j + 2]!, 1).applyMatrix4(m);
+      if (!(this.v.w > 1e-9)) continue;
+      const ax = rect.left + (this.v.x / this.v.w + 1) / 2 * rect.width, ay = rect.top + (1 - this.v.y / this.v.w) / 2 * rect.height;
+      out.push({ index: j, rank: k, x: ax + buf[5 * k + 1]!, y: ay + buf[5 * k + 2]!, width: 2 * buf[5 * k + 3]!, height: 2 * buf[5 * k + 4]! });
+    }
+    return out;
   }
 
   /** 画面の外（またはカメラの後ろ）の近傍の方向を、画面の端の印で示す。 */
-  private updateEdges(width: number, height: number): void {
+  private updateEdges(width: number, height: number, obstacles: readonly EdgeObstacle[]): void {
+    this.lastObstacles = obstacles;
     const m = this.computeViewProjection();
     const pos = this.deps.shownPositions();
     const edges: NeighborViewState['edgeMarkers'] = [];
@@ -314,7 +383,7 @@ export class NeighborView {
       const el = this.edgeEls[k]!;
       const j = this.original[k];
       if (j === undefined) { if (!el.hidden) el.hidden = true; continue; }
-      const p = this.place(m, pos, j, width, height);
+      const p = this.place(m, pos, j, width, height, obstacles);
       if (p.onScreen) { if (!el.hidden) el.hidden = true; continue; }
       edges.push({ index: j, rank: k, x: p.x, y: p.y, behind: p.behind });
       el.hidden = false;

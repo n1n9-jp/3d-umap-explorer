@@ -7,15 +7,19 @@
  * 確かめること:
  *   - 起動しただけでは kNN グラフ（knn-indices・knn-distances）を要求しない。点を選択すると要求し、読み込み中は一覧に「読み込み中」が出る
  *   - 一覧の番号と順序が、kNN グラフのファイルをこのスクリプトで直接読んで求めたものと一致する
- *   - 「地図でも近くにある」の判定（印）と要約の数が、座標から総当たりで求めた 3 次元の近傍と一致する
- *   - word2vec の「january」の近傍は月の名前で、ほぼすべてが地図でも近い。「king」の近傍に kings と queen があり、地図でも近いものが少ない
+ *   - 「地図で近い10点にも入っている」の判定（印）と要約の数が、座標から総当たりで求めた 3 次元の近傍と一致する。要約の文面
+ *   - word2vec の「january」の近傍は月の名前で、ほぼすべてが地図で近い点にも入っている。「king」の近傍に kings と queen があり、入っているものが少ない
  *   - 地図の上に近傍の輪と線が描かれる（線の端点が、選択中の点と近傍を投影した位置。描画にも出る）。N キーで消え、もう一度押すと戻る
- *   - 画面の外・カメラの後ろの近傍に、画面の端の印が出る（このスクリプトで投影して求めた、画面の外の近傍と一致する）
+ *   - 画面の外・カメラの後ろの近傍に、画面の端の印が出る（このスクリプトで投影して求めた、画面の外の近傍と一致する）。
+ *     印の矩形が、HUD・選択欄・現在地・情報パネル・ミニマップの実際の矩形（getBoundingClientRect）と重ならない（向きを変えて何通りも）
+ *   - 縦の短い画面（1280×480、1280×320）でも、情報パネルの矩形が画面の中に収まる。一覧の最後の項目へキーボードで移ると、
+ *     その項目が一覧の見える範囲と画面の中に入る（1280×320 では一覧がスクロールする）。king のスクリーンショット（800・480）
+ *   - 単語として表示されている近傍は、輪の代わりの矩形が、そのフレームの文字の矩形（WordLabels の currentBoxes）と一致する（カメラが動いた直後も）
  *   - 一覧の項目にカーソルを重ねると、その近傍が強調される。項目のクリックでその点が選択され、手前へ飛ぶ。戻る操作で前の選択へ戻る
  *   - キーボード（Tab・矢印キー・Enter）で一覧を操作でき、見出し・リスト・項目の名前が読み上げに出る。要約が読み上げの領域に入る
  *   - 近傍の表示の有無で、ピッキングの番号の画像が変わらない
- *   - ブラウザで UMAP を計算し直したあと（近傍数 5）、元の空間での近傍の一覧は同じで、「地図でも近い」数が新しい座標から求めたものと一致する。
- *     計算の途中の表示の間も、線の端点が描いている座標と合う
+ *   - ブラウザで UMAP を計算し直したあと（近傍数 5）、元の空間での近傍の一覧は同じで、「地図で近い」数が新しい座標から求めたものと一致する。
+ *     計算の途中の表示の間も、線の端点が描いている座標と合い、要約に「計算前の地図での判定」が添えられる（終わると消える）
  *   - データセットを切り替えると、前のデータの近傍の表示が残らず、kNN グラフを捨てる（新しいデータでも選択するまで要求しない）
  *   - MNIST でも近傍の画像の一覧が出て、画像がアトラスのセルと一致する
  *   - コンソールエラーがない
@@ -198,10 +202,10 @@ async function checkLists(page, title, q, knn, positions) {
   const inMap = want.map((j) => set.has(j));
   const matches = inMap.filter(Boolean).length;
   check(`${title}: 3 次元での近傍が、座標から総当たりで求めたものと一致する`, JSON.stringify(st.map) === JSON.stringify(map), `アプリ ${st.map.join(',')} / 総当たり ${map.join(',')}`);
-  check(`${title}: 「地図でも近い」の判定と印が、総当たりの結果と一致する`,
+  check(`${title}: 「地図で近い10点に入っている」の判定と印が、総当たりの結果と一致する`,
     JSON.stringify(st.inMap) === JSON.stringify(inMap) && JSON.stringify(st.list.marks) === JSON.stringify(inMap.map((b) => (b ? '●' : '○'))),
     st.list.marks.join(''));
-  check(`${title}: 要約の数が一致する（${matches} 点）`, st.matches === matches && st.list.summary.includes(`地図でも近くにあるのは${matches}点`) && st.list.summary.includes(`近い${N}点のうち`), st.list.summary + st.list.hint);
+  check(`${title}: 要約の数が一致する（${matches} 点）`, st.matches === matches && st.list.summary.includes(`地図で近い${N}点にも入っているのは${matches}点。`) && st.list.summary.includes(`元のデータで近い${N}点のうち`) && !st.list.summary.includes('計算前'), st.list.summary + st.list.hint);
   return { st, matches, inMap, map };
 }
 
@@ -230,15 +234,15 @@ async function testWord2vec(page, base, w2v, knn) {
   check('点を選択すると kNN グラフを要求し、一覧が出る', ready && knnRequests(knn.files).length >= 2 && (await nb(page)).graph === 'ready' && (await nb(page)).graphLoads === 1,
     `要求 ${knnRequests(knn.files).length}`);
   const texts = await page.evaluate(() => window.__nbTexts);
-  check('読み込みの間、情報パネルに「読み込み中」が出る', texts.length >= 2 && texts[0].includes('読み込み中') && texts[texts.length - 1].includes('地図でも近くにあるのは'), texts.join(' → '));
+  check('読み込みの間、情報パネルに「読み込み中」が出る', texts.length >= 2 && texts[0].includes('読み込み中') && texts[texts.length - 1].includes('にも入っているのは'), texts.join(' → '));
 
   console.log('\n[word2vec: january]');
   const positions = w2v.positions;
   const j = await checkLists(page, 'january', jan, knn, positions);
   const words = j.st.original.map((i) => w2v.text[i]);
   check('january の近傍は月の名前', words.every((w) => MONTHS.includes(w)), words.join(', '));
-  check('january の近傍は、ほぼすべて（8 点以上）が地図でも近い', j.matches >= 8, `${j.matches} 点`);
-  check('january の要約は「よく表しています」', j.st.list.hint.includes('よく表しています'), j.st.list.hint);
+  check('january の近傍は、ほぼすべて（8 点以上）が地図で近い10点にも入っている', j.matches >= 8, `${j.matches} 点`);
+  check('january の一言は、この点の周りについて「よく表しています」', j.st.list.hint === 'この点の周りでは、地図は元のデータの近さをよく表しています。', j.st.list.hint);
   const live = await page.evaluate(() => document.getElementById('info-neighbors-live').textContent);
   check('要約が読み上げの領域（#info-neighbors-live）に入る', live === j.st.summary, live);
   await page.screenshot({ path: path.join(outDir, '1-january.png') });
@@ -251,7 +255,8 @@ async function testWord2vec(page, base, w2v, knn) {
   const kg = await checkLists(page, 'king', king, knn, positions);
   const kwords = kg.st.original.map((i) => w2v.text[i]);
   check('king の近傍に kings と queen がある', kwords.includes('kings') && kwords.includes('queen'), kwords.join(', '));
-  check('king の近傍で地図でも近いものは少ない（3 点以下）', kg.matches <= 3, `${kg.matches} 点`);
+  check('king の近傍で地図で近い10点にも入っているものは少ない（3 点以下）', kg.matches <= 3, `${kg.matches} 点`);
+  check('king の一言は「近いとは限りません」（3 点以下の文のまま）', kg.st.list.hint === '地図で近く見える点も、元のデータでは近いとは限りません。', kg.st.list.hint);
   check('kNN グラフは 1 度だけ読み込む', (await nb(page)).graphLoads === 1 && knnRequests(knn.files).length === 2, `${knnRequests(knn.files).length} 回`);
 
   // 線と輪: 少し引いた視点で、全体が見えるように
@@ -261,6 +266,8 @@ async function testWord2vec(page, base, w2v, knn) {
   await page.screenshot({ path: path.join(outDir, '2-king.png') });
   await testOverlay(page, 'king', king);
   await testEdges(page, king);
+  await testPanelFit(page, king);
+  await testWordBoxes(page, king);
   await testListInteraction(page, king, w2v, knn);
   await testUmap(page, king, knn);
 }
@@ -341,14 +348,193 @@ async function testEdges(page, q) {
   check('画面の外・カメラの後ろの近傍に、画面の端の印が出る（独立に投影したものと一致する）',
     JSON.stringify(marked) === JSON.stringify([...outside].sort((a, b) => a - b)) && outside.length > 0, `印 ${marked.join(',')} / 外 ${outside.join(',')}`);
   const farMark = s.edgeMarkers.find((e) => e.index === far);
-  check('カメラの後ろの近傍の印は「後ろ」になり、画面の端の近くにある', farMark && farMark.behind
-    && (farMark.x <= 19 || farMark.x >= width - 19 || farMark.y <= 51 || farMark.y >= height - 19), JSON.stringify(farMark));
+  // 画面の端の余白の内側で、端のそば（18 ピクセル以内）か、HUD・ミニマップなどの矩形を避けてずらした先（その矩形の縁のそば）にある
+  const obsNow = await readObstacles(page);
+  const nearEdge = (m) => m.x <= 19 || m.x >= width - 19 || m.y <= 51 || m.y >= height - 19
+    || obsNow.some((o) => m.x > o.left - 40 && m.x < o.right + 40 && m.y > o.top - 40 && m.y < o.bottom + 40);
+  check('カメラの後ろの近傍の印は「後ろ」になり、画面の端のそば（障害物を避けたときはその矩形の縁のそば）にある', farMark && farMark.behind && nearEdge(farMark)
+    && farMark.x >= 18 - 0.01 && farMark.x <= width - 18 + 0.01 && farMark.y >= 50 - 0.01 && farMark.y <= height - 18 + 0.01, JSON.stringify(farMark));
   const dom = await page.evaluate(() => [...document.querySelectorAll('#neighbor-edges .nb-edge')].filter((e) => !e.hidden).map((e) => {
     const r = e.getBoundingClientRect(); return { index: Number(e.dataset.index), behind: e.classList.contains('is-behind'), x: r.x, y: r.y };
   }));
   check('印の要素が、その近傍の数だけ画面の中に出る', dom.length === marked.length && dom.every((d) => d.x >= 0 && d.y >= 0 && d.x <= width && d.y <= height), JSON.stringify(dom.slice(0, 3)));
   check('印は操作を受けない（pointer-events: none）', await page.evaluate(() => getComputedStyle(document.getElementById('neighbor-edges')).pointerEvents === 'none'));
   await page.screenshot({ path: path.join(outDir, '3-edges.png') });
+  await testEdgeObstacles(page, st, P);
+}
+
+/** 画面の端の UI（単語の文字が避けるものと同じ）の、いまの実際の矩形（CSS ピクセル）。表示されているものだけ。 */
+const readObstacles = (page) => page.evaluate(() => ['hud', 'dataset-switcher', 'umap-panel', 'cluster-location', 'info', 'minimap'].flatMap((id) => {
+  const el = document.getElementById(id);
+  if (!el || el.hidden) return [];
+  const r = el.getBoundingClientRect();
+  return r.width > 0 && r.height > 0 ? [{ id, left: r.left, top: r.top, right: r.right, bottom: r.bottom }] : [];
+}));
+
+/** 矩形 a と b が（面積を持って）重なるか */
+const rectsOverlap = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+
+/**
+ * 画面の端の印の矩形が、HUD・選択欄・現在地・情報パネル・ミニマップの実際の矩形と重ならない。
+ * 選択中の点から離れた近傍が四方八方にあるように、向きを変えて何通りも見る（印が端のあちこち、とくに左下の HUD と右下のミニマップの近くに出る）。
+ */
+async function testEdgeObstacles(page, st, P) {
+  console.log('\n[画面の端の印: HUD・ミニマップ・情報パネルを避ける]');
+  const dirs = [];
+  for (let k = 0; k < 16; k++) {
+    const a = (k / 16) * Math.PI * 2;
+    dirs.push([Math.cos(a), 0.15 * (k % 3 - 1), Math.sin(a)]);
+  }
+  dirs.push([0, 1, 0.01], [0, -1, 0.01]);
+  let total = 0, bad = [], hudMinimapSide = 0, domMismatch = 0, obstacleMismatch = 0;
+  for (const dir of dirs) {
+    const l = Math.hypot(...dir);
+    // 選択中の点のすぐそばから、その向きを見る（近傍の多くは画面の外かカメラの後ろ）
+    const pos = P.map((v, k) => v - (dir[k] / l) * 0.02);
+    await page.evaluate((v) => window.__explorer.setView(v), { pos, look: P.map((v, k) => v + dir[k] / l) });
+    await frames(page, 2);
+    const s = await nb(page);
+    const obs = await readObstacles(page);
+    const dom = await page.evaluate(() => [...document.querySelectorAll('#neighbor-edges .nb-edge')].filter((e) => !e.hidden).map((e) => {
+      const r = e.querySelector('.nb-edge-rank').getBoundingClientRect();
+      return { index: Number(e.dataset.index), left: r.left, top: r.top, right: r.right, bottom: r.bottom, cx: (r.left + r.right) / 2, cy: (r.top + r.bottom) / 2 };
+    }));
+    // アプリが避けた矩形が、DOM から読んだ実際の矩形と一致する
+    const used = s.edgeObstacles.map((r) => ({ left: r.x - r.width / 2, top: r.y - r.height / 2, right: r.x + r.width / 2, bottom: r.y + r.height / 2 }));
+    const same = used.length === obs.length && obs.every((o) => used.some((u) => Math.abs(u.left - o.left) < 1 && Math.abs(u.right - o.right) < 1 && Math.abs(u.top - o.top) < 1 && Math.abs(u.bottom - o.bottom) < 1));
+    if (!same) obstacleMismatch++;
+    for (const m of s.edgeMarkers) {
+      total++;
+      // 印の見た目（丸と矢印）の外縁は、中心から 16 ピクセル以内
+      const box = { left: m.x - 16, top: m.y - 16, right: m.x + 16, bottom: m.y + 16 };
+      const hit = obs.filter((o) => rectsOverlap(box, o)).map((o) => o.id);
+      if (hit.length) bad.push(`向き ${dir.map((v) => v.toFixed(2)).join(',')} の ${m.index}: ${hit.join('・')}`);
+      if (m.x < 18 - 0.01 || m.x > width - 18 + 0.01 || m.y < 50 - 0.01 || m.y > height - 18 + 0.01) bad.push(`${m.index} が端の余白の外 (${m.x.toFixed(1)}, ${m.y.toFixed(1)})`);
+      if (m.y > height - 140 && (m.x < 700 || m.x > width - 260)) hudMinimapSide++;
+      const d = dom.find((e) => e.index === m.index);
+      if (!d || Math.hypot(d.cx - m.x, d.cy - m.y) > 1.5 || obs.some((o) => rectsOverlap(d, o))) domMismatch++;
+    }
+  }
+  check('画面の端の印を、向きを変えて何通りも見る（印が出る）', total >= 20, `${dirs.length} 通り、印 ${total} 個`);
+  check('印の矩形が、HUD・選択欄・現在地・情報パネル・ミニマップの実際の矩形と重ならず、端の余白の内側にある', bad.length === 0, bad.slice(0, 4).join(' / '));
+  check('印の要素の位置（丸の矩形）が報告と一致し、障害物の矩形と重ならない', domMismatch === 0, `${domMismatch} 個`);
+  check('アプリが避ける矩形が、実際の要素の矩形と一致する', obstacleMismatch === 0, `${obstacleMismatch} 通りで違う`);
+  check('左下の HUD・右下のミニマップの近くにも印が出る（避ける場面を確かめられている）', hudMinimapSide > 0, `${hudMinimapSide} 個`);
+}
+
+/** 縦の短い画面でも、情報パネルが画面の中に収まり、一覧の最後の項目へキーボードで移ると見える位置になる。 */
+async function testPanelFit(page, q) {
+  console.log('\n[縦の短い画面: 情報パネルが収まる]');
+  for (const [w, h] of [[1280, 480], [1280, 320]]) {
+    await page.setViewportSize({ width: w, height: h });
+    await frames(page, 3);
+    const P = await pointAt(page, q);
+    await page.evaluate((v) => window.__explorer.setView(v), { pos: [P[0] + 0.35, P[1] + 0.25, P[2] + 0.7], look: P });
+    await frames(page, 2);
+    const geo = () => page.evaluate(() => {
+      const r = (el) => { const b = el.getBoundingClientRect(); return { left: b.left, top: b.top, right: b.right, bottom: b.bottom }; };
+      const list = document.getElementById('info-neighbors-list');
+      const a = document.activeElement;
+      return {
+        vw: window.innerWidth, vh: window.innerHeight,
+        info: r(document.getElementById('info')), list: r(list), listScroll: { top: list.scrollTop, height: list.scrollHeight, client: list.clientHeight },
+        panel: { height: document.getElementById('info').scrollHeight, client: document.getElementById('info').clientHeight },
+        hint: r(document.getElementById('info-neighbors-hint')), summary: r(document.getElementById('info-neighbors-summary')),
+        active: a && a.classList.contains('nb-item') ? { rank: Number(a.dataset.rank), ...r(a) } : null,
+      };
+    });
+    const g0 = await geo();
+    check(`${w}×${h}: 情報パネルの矩形が画面の中に収まる`, g0.info.top >= 0 && g0.info.left >= 0 && g0.info.bottom <= g0.vh && g0.info.right <= g0.vw,
+      `パネル ${JSON.stringify(g0.info)}、画面 ${g0.vw}×${g0.vh}`);
+    check(`${w}×${h}: 要約と一言がパネルの中に見える（一覧だけがスクロールする）`, g0.summary.bottom <= g0.info.bottom + 0.5 && g0.hint.top >= g0.list.bottom - 0.5 && g0.hint.bottom <= g0.info.bottom + 0.5,
+      `一覧 ${g0.list.top.toFixed(0)}–${g0.list.bottom.toFixed(0)}、一言 ${g0.hint.top.toFixed(0)}–${g0.hint.bottom.toFixed(0)}、パネルの下 ${g0.info.bottom.toFixed(0)}`);
+    // キーボード: 最初の項目から End で最後の項目へ
+    await page.evaluate(() => document.querySelector('#info-neighbors-list button.nb-item').focus());
+    await page.keyboard.press('End');
+    await frames(page, 1);
+    const g1 = await geo();
+    const a = g1.active;
+    const visible = a && a.top >= g1.list.top - 1 && a.bottom <= g1.list.bottom + 1 && a.left >= g1.list.left - 1 && a.right <= g1.list.right + 1
+      && a.top >= 0 && a.bottom <= g1.vh && a.left >= 0 && a.right <= g1.vw;
+    check(`${w}×${h}: 一覧の最後の項目へキーボードで移ると、その項目が一覧の見える範囲と画面の中に入る`, a && a.rank === N - 1 && visible,
+      a ? `項目 ${a.rank}: ${a.top.toFixed(0)}–${a.bottom.toFixed(0)}、一覧 ${g1.list.top.toFixed(0)}–${g1.list.bottom.toFixed(0)}、スクロール ${g1.listScroll.top}/${g1.listScroll.height - g1.listScroll.client}` : '項目にフォーカスがない');
+    check(`${w}×${h}: 最後の項目へ移ったあとも、パネルは画面の中に収まる`, g1.info.top >= 0 && g1.info.bottom <= g1.vh);
+    if (g0.listScroll.height > g0.listScroll.client + 1) {
+      check(`${w}×${h}: 一覧が高さに収まらないので、一覧の部分がスクロールして最後まで見られる（一覧の下の余白 4 ピクセルを除いて末尾）`, g1.listScroll.top > 0 && g1.listScroll.top + g1.listScroll.client >= g1.listScroll.height - 4,
+        `scrollTop ${g1.listScroll.top}、全体 ${g1.listScroll.height}、見える高さ ${g1.listScroll.client}`);
+    } else {
+      console.log(`  ${w}×${h}: 一覧は高さに収まっている（スクロールなし）`);
+    }
+    await page.keyboard.press('Home');
+    await frames(page, 1);
+    const g2 = await geo();
+    check(`${w}×${h}: Home で最初の項目へ戻ると、最初の項目が見える範囲に入る`, g2.active && g2.active.rank === 0 && g2.active.top >= g2.list.top - 1 && g2.active.bottom <= g2.list.bottom + 1, g2.active ? `項目 ${g2.active.rank}` : '');
+    await page.evaluate(() => document.activeElement && document.activeElement.blur());
+    await page.screenshot({ path: path.join(outDir, `7-king-${w}x${h}.png`) });
+  }
+  await page.setViewportSize({ width, height });
+  await frames(page, 3);
+}
+
+/** 単語として表示されている近傍の矩形が、そのフレームの文字の矩形と一致する。 */
+async function testWordBoxes(page, q) {
+  console.log('\n[単語として表示されている近傍の矩形]');
+  const st = await nb(page);
+  const compare = () => page.evaluate(() => {
+    const ex = window.__explorer;
+    const n = ex.neighbors.getState(), w = ex.words.getState();
+    const rows = n.wordBoxes.map((b) => {
+      const cur = w.currentBoxes.find((c) => c.index === b.index);
+      const shown = w.shown.find((c) => c.index === b.index);
+      return {
+        index: b.index, found: !!cur,
+        diff: cur ? Math.max(Math.abs(cur.rect.x - b.x), Math.abs(cur.rect.y - b.y), Math.abs(cur.rect.width - b.width), Math.abs(cur.rect.height - b.height)) : Infinity,
+        // 最後に選び直したときの矩形（古い値）との差
+        stale: shown ? Math.max(Math.abs(shown.rect.x - b.x), Math.abs(shown.rect.y - b.y), Math.abs(shown.rect.width - b.width)) : Infinity,
+        inCurrentRects: w.currentRects.some((r) => Math.abs(r.x - b.x) < 0.05 && Math.abs(r.y - b.y) < 0.05 && Math.abs(r.width - b.width) < 0.05 && Math.abs(r.height - b.height) < 0.05),
+      };
+    });
+    return { rows, words: w.shown.length, neighbors: n.original, enabled: w.enabled, overlay: n.overlayVisible };
+  });
+  // 近傍の 1 つの近くへ寄る（その単語が文字で出る）
+  let found = null;
+  for (const j of st.original) {
+    const Pj = await pointAt(page, j);
+    const d = (await page.evaluate((k) => window.__explorer.interaction.stopDistance(k), j)).distance;
+    const pos = Pj.map((v, k) => v + ([0.3, 0.2, 1][k] / Math.hypot(0.3, 0.2, 1)) * d * 1.8);
+    await page.evaluate((v) => window.__explorer.setView(v), { pos, look: Pj });
+    for (let k = 0; k < 25; k++) {
+      await frames(page, 1);
+      const c = await compare();
+      if (c.rows.some((r) => r.index === j)) { found = { j, pos, Pj, c }; break; }
+    }
+    if (found) break;
+  }
+  check('近傍の単語に寄ると、その単語を囲む矩形（輪の代わり）が出る', !!found, found ? `${found.j}（${found.c.rows.length} 個）` : '見つからない');
+  if (!found) return;
+  const c0 = await compare();
+  check('単語を囲む矩形が、そのフレームの文字の矩形（WordLabels の currentBoxes）と一致する（0.05 ピクセル以内）', c0.rows.length > 0 && c0.rows.every((r) => r.found && r.diff < 0.05 && r.inCurrentRects),
+    c0.rows.map((r) => `${r.index}:${r.diff.toFixed(4)}`).join(','));
+  await page.screenshot({ path: path.join(outDir, '8-word-boxes.png') });
+  // カメラを少し動かした直後（単語の選び直しの前でも）、文字の矩形は動くので、矩形もそのフレームの文字に合う
+  let moved = null;
+  for (let k = 0; k < 6 && !moved; k++) {
+    const sh = 0.0008 * (k + 1);
+    await page.evaluate(({ v }) => window.__explorer.setView(v), { v: { pos: found.pos.map((x, i) => x + (i === 0 ? sh : i === 1 ? sh / 2 : 0)), look: found.Pj } });
+    await frames(page, 1);
+    const c = await compare();
+    if (c.rows.length > 0) moved = c;
+  }
+  check('カメラを動かした直後も、矩形がそのフレームの文字の矩形と一致する', moved && moved.rows.every((r) => r.found && r.diff < 0.05 && r.inCurrentRects),
+    moved ? moved.rows.map((r) => `${r.index}:${r.diff.toFixed(4)}（最後の選び直しからのずれ ${r.stale.toFixed(2)}）`).join(',') : '矩形が出ていない');
+  // 一覧に出ている近傍のうち、文字として描かれていないものは輪のまま（矩形なし）
+  const c2 = await compare();
+  const nonWord = c2.neighbors.filter((j) => !c2.rows.some((r) => r.index === j));
+  check('文字として描かれていない近傍には矩形を出さない（輪のまま）', nonWord.length + c2.rows.length === c2.neighbors.length, `矩形 ${c2.rows.length}、輪 ${nonWord.length}`);
+  // 元の視点へ戻す
+  const P = await pointAt(page, q);
+  await page.evaluate((v) => window.__explorer.setView(v), { pos: [P[0] + 0.35, P[1] + 0.25, P[2] + 0.7], look: P });
+  await frames(page, 2);
 }
 
 /** 一覧の項目のホバー・クリック・戻る・キーボード・読み上げ。 */
@@ -430,8 +616,8 @@ async function testListInteraction(page, q, w2v, knn) {
   const snap = await page.locator('#info-neighbors').ariaSnapshot();
   const first = (await nb(page)).original[0];
   const firstName = w2v.text[first];
-  check('読み上げ: 見出し・リスト・項目の名前（順位・単語・地図でも近いか）が出る',
-    snap.includes('heading "元のデータで近い点"') && snap.includes('list "元のデータで近い順"') && new RegExp(`button "1 番目に近い: ${firstName}、地図(でも近い|では離れている)"`).test(snap),
+  check('読み上げ: 見出し・リスト・項目の名前（順位・単語・地図で近い10点に入っているか）が出る',
+    snap.includes('heading "元のデータで近い点"') && snap.includes('list "元のデータで近い順"') && new RegExp(`button "1 番目に近い: ${firstName}、地図で近い${N}点(にも入っている|には入っていない)"`).test(snap),
     snap.replace(/\n/g, ' / ').slice(0, 300));
   await page.evaluate(() => document.activeElement && document.activeElement.blur());
   // king へ戻しておく
@@ -447,13 +633,27 @@ async function testUmap(page, q, knn) {
   // 計算の途中の表示を有効にして、途中で線の端点が描いている座標と合うかを見る
   await page.evaluate(() => window.__explorer.umap.setPreview(true));
   const done = page.evaluate(() => window.__explorer.umap.compute({ nNeighbors: 5, minDist: 0.1, seed: 42 }));
-  let maxErr = -1, samples = 0;
-  for (let k = 0; k < 400 && samples < 3; k++) {
+  // 計算の途中の座標を点群に出している間（目印を隠し、ミニマップに「計算中」を出している間。最初の途中経過が届いてから）は、要約に注記が付く。
+  // それより前（計算を始めただけで、点群は表示中の座標のまま）は付かない
+  let maxErr = -1, samples = 0, noted = 0, onSamples = 0, offWithNote = 0, noteDetail = '';
+  for (let k = 0; k < 600 && samples < 3; k++) {
     await frames(page, 1);
     const ph = await page.evaluate(() => { const s = window.__explorer.umap.getState(); return s.loaded ? s.phase : 'idle'; });
     if (ph !== 'running' && ph !== 'morphing') continue;
     const s = await nb(page);
     if (!s.overlayVisible) continue;
+    // 計算の途中の表示の間は、「地図で近い」の判定が計算前の座標のものなので、要約にそう添える
+    const live = await page.evaluate(() => document.getElementById('info-neighbors-live').textContent);
+    const computingOn = await page.evaluate(() => document.getElementById('minimap-computing') !== null);
+    if (!computingOn) {
+      if (s.beforeCompute || s.list.summary.includes('計算前') || live.includes('計算前')) offWithNote++;
+      continue;
+    }
+    onSamples++;
+    const noteOk = s.beforeCompute && s.list.state === 'ready' && s.list.summary.includes('（計算前の地図での判定）') && s.summary.includes('（計算前の地図での判定）') && live.includes('（計算前の地図での判定）')
+      && s.list.summary.startsWith(`元のデータで近い${N}点のうち、地図で近い${N}点にも入っているのは${s.matches}点。`);
+    if (noteOk) noted++;
+    else noteDetail = `${ph}: ${s.list.summary}`;
     const r = await page.evaluate(async () => {
       const ex = window.__explorer;
       const s = ex.neighbors.getState();
@@ -471,17 +671,23 @@ async function testUmap(page, q, knn) {
   const outcome = await done;
   await page.evaluate(() => window.__explorer.umap.setPreview(false));
   check('計算の途中の表示と点の移動の間も、線の端点が描いている座標と合う', samples > 0 && maxErr < 0.5, `${samples} 回、最大の差 ${maxErr.toFixed(3)} px`);
+  check('計算の途中の表示の間、要約に「計算前の地図での判定」が添えられる（情報パネルと読み上げの領域）', onSamples > 0 && noted === onSamples, noteDetail || `${noted}/${onSamples} 回`);
+  check('計算の途中の座標を出す前は、注記を付けない', offWithNote === 0, `${offWithNote} 回`);
   check('近傍数 5 で計算し直せる', outcome && outcome.ok !== false && (await page.evaluate(() => window.__explorer.umap.getState().current.kind)) === 'computed', JSON.stringify(outcome).slice(0, 120));
   const ready = await waitFor(page, (k) => { const s = window.__explorer.neighbors.getState(); return s && s.selected === k && s.list.state === 'ready' ? s : null; }, 20, q);
   const positions = new Float32Array(await page.evaluate(() => Array.from(window.__explorer.umap.positions())));
+  check('計算が終わって表示が切り替わると、「計算前の地図での判定」の添えが消え、新しい座標での判定に戻る',
+    ready && !ready.beforeCompute && !ready.list.summary.includes('計算前') && !ready.summary.includes('計算前')
+    && !(await page.evaluate(() => document.getElementById('info-neighbors-live').textContent)).includes('計算前'), ready ? ready.list.summary : '');
   check('計算し直したあとも選択が続き、元の空間での近傍の一覧は同じ', ready && JSON.stringify(ready.original) === JSON.stringify(before.original), ready ? ready.original.join(',') : '');
   const r = await checkLists(page, '近傍数 5 の埋め込み', q, knn, positions);
   check('kNN グラフは読み込み直さない（同じデータセット）', r.st.graphLoads === 1);
-  console.log(`  地図でも近い数: 事前計算 ${before.matches} → 近傍数 5 ${r.matches}`);
+  console.log(`  地図で近い10点に入っている数: 事前計算 ${before.matches} → 近傍数 5 ${r.matches}`);
   await page.screenshot({ path: path.join(outDir, '5-king-nn5.png') });
   const rv = await page.evaluate(() => window.__explorer.umap.revert());
   const back = await waitFor(page, (k) => { const s = window.__explorer.neighbors.getState(); return s && s.selected === k && s.list.state === 'ready' ? s : null; }, 20, q);
-  check('事前計算に戻すと、地図でも近い数も戻る', rv && back && back.matches === before.matches && JSON.stringify(back.map) === JSON.stringify(before.map), back ? `${back.matches}` : '');
+  check('事前計算に戻した後も、要約に「計算前の地図での判定」は残らない', back && !back.beforeCompute && !back.list.summary.includes('計算前'), back ? back.list.summary : '');
+  check('事前計算に戻すと、地図で近い10点に入っている数も戻る', rv && back && back.matches === before.matches && JSON.stringify(back.map) === JSON.stringify(before.map), back ? `${back.matches}` : '');
 }
 
 async function testSwitch(page, mnist, mknn) {

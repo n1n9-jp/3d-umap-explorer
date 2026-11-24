@@ -77,26 +77,43 @@ export function mapReliability(matches: number, total: number): MapReliability {
   return 'low';
 }
 
-/** 要約の 1 文目（例: 「元のデータで近い10点のうち、地図でも近くにあるのは3点」）。 */
+/** 要約の 1 文目（例: 「元のデータで近い10点のうち、地図で近い10点にも入っているのは3点」。地図での近傍は元の空間での近傍と同じ数で比べる）。 */
 export function summaryCountText(matches: number, total: number): string {
-  return `元のデータで近い${total}点のうち、地図でも近くにあるのは${matches}点`;
+  return `元のデータで近い${total}点のうち、地図で近い${total}点にも入っているのは${matches}点`;
 }
 
-/** 要約の 2 文目（この点の周りの地図が、どの程度当てになるか）。 */
+/**
+ * 計算の途中の表示の間（ブラウザで UMAP を計算し直している間）、要約に添える注記。この間の「地図で近い」の判定は、
+ * 点群に描いている途中の座標ではなく、計算の前の座標についての答えになっている。
+ */
+export const BEFORE_COMPUTE_NOTE = '（計算前の地図での判定）';
+
+/** 要約の先頭（1 文目と、計算の途中の表示の間は注記）。一覧の上に出す。 */
+export function summaryLeadText(matches: number, total: number, beforeCompute = false): string {
+  return `${summaryCountText(matches, total)}。${beforeCompute ? BEFORE_COMPUTE_NOTE : ''}`;
+}
+
+/** 要約の 2 文目（この点の周りで、地図が元のデータの近さをどの程度表しているか）。 */
 export function summaryHintText(matches: number, total: number): string {
   switch (mapReliability(matches, total)) {
-    case 'high': return 'この辺りの地図は、元のデータの近さをよく表しています。';
-    case 'medium': return 'この辺りの地図は、元のデータの近さを一部だけ表しています。';
+    case 'high': return 'この点の周りでは、地図は元のデータの近さをよく表しています。';
+    case 'medium': return 'この点の周りでは、地図は元のデータの近さを一部だけ表しています。';
     default: return '地図で近く見える点も、元のデータでは近いとは限りません。';
   }
 }
 
 /** 要約の全文（読み上げにも使う）。 */
-export function summaryText(matches: number, total: number): string {
-  return `${summaryCountText(matches, total)}。${summaryHintText(matches, total)}`;
+export function summaryText(matches: number, total: number, beforeCompute = false): string {
+  return `${summaryLeadText(matches, total, beforeCompute)}${summaryHintText(matches, total)}`;
 }
 
-/** 一覧の項目の読み上げの名前（例: 「2 番目に近い: queen、地図でも近い」）。 */
-export function neighborItemLabel(rank: number, title: string, inMap: boolean): string {
-  return `${rank} 番目に近い: ${title}、${inMap ? '地図でも近い' : '地図では離れている'}`;
+/** 凡例と読み上げで使う、地図での近傍に入っているかの言い方。`total` は地図での近傍の数（要約と同じ数） */
+export function inMapPhrase(inMap: boolean, total?: number): string {
+  const near = total === undefined ? '地図で近い点' : `地図で近い${total}点`;
+  return inMap ? `${near}にも入っている` : `${near}には入っていない`;
+}
+
+/** 一覧の項目の読み上げの名前（例: 「2 番目に近い: queen、地図で近い10点にも入っている」）。 */
+export function neighborItemLabel(rank: number, title: string, inMap: boolean, total?: number): string {
+  return `${rank} 番目に近い: ${title}、${inMapPhrase(inMap, total)}`;
 }

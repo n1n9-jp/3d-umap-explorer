@@ -34,7 +34,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require('playwright');
-const { loadDataset, waitForServer, startPreview, CHROMIUM_ARGS, sub, len } = require('./lib.cjs');
+const { loadDataset, waitForServer, startPreview, CHROMIUM_ARGS, sub, len, readInfoRect } = require('./lib.cjs');
 
 const root = path.resolve(__dirname, '../..');
 const args = process.argv.slice(2);
@@ -201,9 +201,11 @@ async function computeViaPanel(page, p, { wait = true } = {}) {
 
 /** 画面に見えていて、投影した中心で pick するとその点が返る点を探す（大きく見えるものから）。 */
 async function findVisiblePoint(page, { minPx = 4 } = {}) {
-  return page.evaluate(async ({ minPx, w, h }) => {
+  const info = await readInfoRect(page); // 情報パネルは実際の矩形で避ける
+  return page.evaluate(async ({ minPx, w, h, info }) => {
     const ex = window.__explorer;
-    const ok = (x, y) => x > 340 && y > 60 && x < w - 40 && y < h - 40 && !(x > w - 380 && y < 240) && !(x < 900 && y > h - 220) && !(x > w - 260 && y > h - 240);
+    const inInfo = (x, y) => info && x > info.left - 12 && x < info.right + 12 && y > info.top - 12 && y < info.bottom + 12;
+    const ok = (x, y) => x > 340 && y > 60 && x < w - 40 && y < h - 40 && !inInfo(x, y) && !(x < 900 && y > h - 220) && !(x > w - 260 && y > h - 240);
     const cands = [];
     for (let i = 0; i < ex.picking.count; i++) {
       const p = ex.picking.project(i);
@@ -220,7 +222,7 @@ async function findVisiblePoint(page, { minPx = 4 } = {}) {
       if (r && r.index === c.i && r.pixelDistance === 0) return c;
     }
     return null;
-  }, { minPx, w: width, h: height });
+  }, { minPx, w: width, h: height, info });
 }
 
 /** `center` の少し外側（原点から見て外向きに `dist`）から `center` を見る視点へ移り、止まるまで待つ */

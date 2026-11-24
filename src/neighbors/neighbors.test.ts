@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { SpatialIndex } from '../spatial/SpatialIndex';
 import { formatHud } from '../app/hud';
 import {
-  compareNeighbors, mapNeighbors, mapReliability, neighborItemLabel, originalNeighbors, summaryCountText, summaryHintText, summaryText,
+  BEFORE_COMPUTE_NOTE, compareNeighbors, inMapPhrase, mapNeighbors, mapReliability, neighborItemLabel, originalNeighbors, summaryCountText, summaryHintText,
+  summaryLeadText, summaryText,
 } from './neighbors';
 
 /** 4 点・k=3 のグラフ（行優先、近い順） */
@@ -60,21 +61,25 @@ describe('compareNeighbors', () => {
 });
 
 describe('要約の文', () => {
-  it('数の文は「元のデータで近い N 点のうち、地図でも近くにあるのは M 点」', () => {
-    expect(summaryCountText(3, 10)).toBe('元のデータで近い10点のうち、地図でも近くにあるのは3点');
+  it('数の文は「元のデータで近い N 点のうち、地図で近い N 点にも入っているのは M 点」', () => {
+    expect(summaryCountText(3, 10)).toBe('元のデータで近い10点のうち、地図で近い10点にも入っているのは3点');
+    expect(summaryCountText(0, 7)).toBe('元のデータで近い7点のうち、地図で近い7点にも入っているのは0点');
   });
-  it('一致の割合で、地図がどの程度当てになるかの文が変わる', () => {
+  it('一致の割合で、この点の周りの地図がどの程度当てになるかの文が変わる', () => {
     expect(mapReliability(10, 10)).toBe('high');
     expect(mapReliability(7, 10)).toBe('high');
     expect(mapReliability(6, 10)).toBe('medium');
     expect(mapReliability(4, 10)).toBe('medium');
     expect(mapReliability(3, 10)).toBe('low');
     expect(mapReliability(0, 0)).toBe('low');
-    expect(summaryHintText(9, 10)).toContain('よく表しています');
-    expect(summaryHintText(5, 10)).toContain('一部だけ');
-    expect(summaryHintText(1, 10)).toContain('近いとは限りません');
+    for (const m of [7, 8, 10]) expect(summaryHintText(m, 10)).toBe('この点の周りでは、地図は元のデータの近さをよく表しています。');
+    for (const m of [4, 5, 6]) expect(summaryHintText(m, 10)).toBe('この点の周りでは、地図は元のデータの近さを一部だけ表しています。');
+    for (const m of [0, 1, 3]) expect(summaryHintText(m, 10)).toBe('地図で近く見える点も、元のデータでは近いとは限りません。');
   });
-  it('全文は 2 つをつなげたもの。専門用語を使わない', () => {
+  it('一言は、周辺の全体ではなく、この点の周りについて述べる（「この辺り」を使わない）', () => {
+    for (const m of [0, 5, 10]) expect(summaryText(m, 10)).not.toContain('この辺り');
+  });
+  it('全文は 1 文目と一言をつなげたもの。専門用語を使わない', () => {
     const t = summaryText(0, 10);
     expect(t).toBe(`${summaryCountText(0, 10)}。${summaryHintText(0, 10)}`);
     for (const m of [0, 5, 10]) {
@@ -82,9 +87,22 @@ describe('要約の文', () => {
       for (const word of ['次元', '削減', '埋め込み', '近傍', 'UMAP']) expect(s).not.toContain(word);
     }
   });
-  it('項目の読み上げの名前に、順位・名前・地図でも近いかが入る', () => {
-    expect(neighborItemLabel(2, 'queen', true)).toBe('2 番目に近い: queen、地図でも近い');
-    expect(neighborItemLabel(1, 'kings', false)).toBe('1 番目に近い: kings、地図では離れている');
+  it('全文の実際の値の例', () => {
+    expect(summaryText(8, 10)).toBe('元のデータで近い10点のうち、地図で近い10点にも入っているのは8点。この点の周りでは、地図は元のデータの近さをよく表しています。');
+  });
+  it('計算の途中の表示の間は、1 文目のあとに「計算前の地図での判定」を添える。終われば添えない', () => {
+    expect(BEFORE_COMPUTE_NOTE).toBe('（計算前の地図での判定）');
+    expect(summaryLeadText(4, 10)).toBe('元のデータで近い10点のうち、地図で近い10点にも入っているのは4点。');
+    expect(summaryLeadText(4, 10, true)).toBe('元のデータで近い10点のうち、地図で近い10点にも入っているのは4点。（計算前の地図での判定）');
+    expect(summaryText(4, 10, true)).toBe(`${summaryLeadText(4, 10, true)}${summaryHintText(4, 10)}`);
+    expect(summaryText(4, 10, false)).not.toContain('計算前');
+    expect(summaryText(4, 10)).not.toContain('計算前');
+  });
+  it('項目の読み上げの名前に、順位・名前・地図で近い点に入っているかが入る', () => {
+    expect(neighborItemLabel(2, 'queen', true, 10)).toBe('2 番目に近い: queen、地図で近い10点にも入っている');
+    expect(neighborItemLabel(1, 'kings', false, 10)).toBe('1 番目に近い: kings、地図で近い10点には入っていない');
+    expect(neighborItemLabel(3, 'x', true)).toBe('3 番目に近い: x、地図で近い点にも入っている');
+    expect(inMapPhrase(false)).toBe('地図で近い点には入っていない');
   });
 });
 
