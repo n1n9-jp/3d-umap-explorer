@@ -43,12 +43,12 @@ const outDir = path.resolve(root, opt('out', 'artifacts/umap'));
 const port = Number(opt('port', '4340'));
 const width = 1280, height = 800;
 
-/** 変更の前（ブラウザ内の UMAP を入れる前、コミット 191dc27）の主のチャンクの大きさ（バイト） */
-// 近くの単語の文字表示（src/text/）を取り込んだあとの、この機能を除いた主のチャンクの大きさ（666745 − この機能の増分 8750）に、
-// 縁から見たときの丸い点・目印の調整（src/labels/budget.ts・src/text/clearance.ts）の増分 2235（673540 → 675775）を足したもの
-const MAIN_CHUNK_BEFORE = 657995 + 2235;
-/** 主のチャンクの増加の許容（この機能のための窓口・キー・パネルの開閉の分） */
-const MAIN_CHUNK_ALLOWED_GROWTH = 16 * 1024;
+/**
+ * 主のチャンクの大きさの上限（バイト）。UMAP の計算の本体（WebAssembly を含む Worker、約 1.3MB）が主のチャンクへ
+ * 混ざっていないことを確かめるための予算。ほかの機能の追加でも変わる「変更前の大きさ」との差ではなく、絶対値で見る
+ * （機能を足すたびに基準値を直す必要がないように）。
+ */
+const MAIN_CHUNK_BUDGET = 900 * 1024;
 /** 事前計算（umap-learn）の 3 次元の 10 近傍の同ラベル率（scripts/spike/umap-bench/README.md） */
 const PRECOMPUTED_SAME_LABEL_10 = 0.9215;
 
@@ -262,8 +262,8 @@ async function hoverAndSelect(page, c) {
 async function testLazyAndPanel(page) {
   console.log('\n[読み込みの遅延・パネル]');
   const size = fs.readdirSync(path.join(root, 'dist/assets')).filter((f) => /^index-.*\.js$/.test(f)).map((f) => fs.statSync(path.join(root, 'dist/assets', f)).size)[0];
-  check('主のチャンクの大きさが、変更の前から大きく増えていない', size <= MAIN_CHUNK_BEFORE + MAIN_CHUNK_ALLOWED_GROWTH,
-    `${size} バイト（変更の前 ${MAIN_CHUNK_BEFORE}、+${size - MAIN_CHUNK_BEFORE}、許容 +${MAIN_CHUNK_ALLOWED_GROWTH}）`);
+  check('主のチャンクに、UMAP の計算の本体が混ざっていない（大きさが予算以下）', size <= MAIN_CHUNK_BUDGET,
+    `${size} バイト（予算 ${MAIN_CHUNK_BUDGET}）`);
   const workerFiles = fs.readdirSync(path.join(root, 'dist/assets')).filter((f) => /^umapWorker-.*\.js$/.test(f));
   check('Worker が別のチャンクになっている', workerFiles.length === 1, workerFiles.join(', '));
 
