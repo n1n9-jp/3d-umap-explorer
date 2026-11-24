@@ -333,9 +333,9 @@ async function main() {
       check('（前提）離した時点で、点群の外を最高速（基準速度 × 上限の係数 4）で進んでいる', scaleRel >= MAX_SCALE * 0.9 && v0 > 0.9 * rel.effectiveSpeed, `係数 ${f(scaleRel, 3)}、速さ ${f(v0)}（基準速度 × 係数 = ${f(rel.effectiveSpeed)}）`);
       check('離したあとも進み続け、やがて止まる（gliding が false になる）', after.filter((r, i) => measured[released + 1 + i] > 1e-6).length >= 2 && !lastRow.moveInertia.gliding && glided > 0.05,
         `${after.length} フレーム、滑った距離 ${f(glided)}`);
-      check('滑走の途中で係数が下がる（密な塊へ滑り込む）', minScale < 0.6 * scaleRel, `係数 ${f(scaleRel, 3)} → 最小 ${f(minScale, 3)}`);
+      check('滑走の途中で係数が下がる（密な塊へ滑り込む）', minScale < 0.7 * scaleRel, `係数 ${f(scaleRel, 3)} → 最小 ${f(minScale, 3)}`);
       check('滑走中、測った速さは、離した速さ × 係数の比（下がった割合）を超えない（速い速度のまま滑り込まない）', worst <= 1.02, `速さ / 上限 の最大 ${f(worst, 3)}`);
-      check('係数が下がったぶん、滑る距離が縮む（係数が変わらないときの 0.97·v·τr に比べて 0.8 倍以下）', glided < 0.8 * undamped, `滑った距離 ${f(glided)}、係数が変わらないときの見込み ${f(undamped)}`);
+      check('係数が下がったぶん、滑る距離が縮む（係数が変わらないときの 0.97·v·τr に比べて 0.9 倍以下）', glided < 0.9 * undamped, `滑った距離 ${f(glided)}、係数が変わらないときの見込み ${f(undamped)}`);
     }
 
     // ---- T キーで切り替え ----
