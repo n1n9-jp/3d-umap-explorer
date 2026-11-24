@@ -73,6 +73,60 @@
       }
       #info-close:hover { color: #fff; }
       #info-close:focus-visible { outline: 2px solid #ffc233; outline-offset: 1px; color: #fff; }
+      /* 元のデータで近い点の一覧（src/neighbors/）。パネルの幅はほかの内容で決め、一覧はその幅で折り返す */
+      /* 一覧はパネルの幅（画像とラベルの列で決まる）で折り返す。グリッドにして、一覧の行が幅を広げないようにする */
+      #info { display: grid; grid-template-columns: auto auto; gap: 8px 12px; justify-content: start; }
+      #info[data-kind="text"] { grid-template-columns: auto; }
+      #info-neighbors {
+        grid-column: 1 / -1; contain: inline-size; min-width: 320px;
+        border-top: 1px solid rgba(79, 216, 255, 0.35); padding-top: 6px; font-size: 11px; line-height: 1.4;
+      }
+      #info-neighbors[hidden] { display: none; }
+      #info-neighbors .nb-head { display: flex; align-items: baseline; gap: 8px; }
+      #info-neighbors h3 { margin: 0; font-size: 11px; font-weight: 600; color: #4fd8ff; }
+      #info-neighbors .nb-legend { margin-left: auto; color: #8a93a6; white-space: nowrap; }
+      #info-neighbors-summary { margin: 2px 0 4px; color: #e8ecf4; }
+      #info-neighbors-hint { margin: 3px 0 0; color: #8a93a6; }
+      #info-neighbors-hint:empty { display: none; }
+      #info-neighbors-list { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 2px 3px; }
+      #info-neighbors-list:empty { display: none; }
+      #info-neighbors .nb-item {
+        position: relative; display: inline-flex; align-items: center; gap: 3px; margin: 0; cursor: pointer;
+        padding: 0 5px 0 3px; border-radius: 3px; border: 1px solid rgba(79, 216, 255, 0.3);
+        background: rgba(20, 24, 34, 0.9); color: #e8ecf4; font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      #info-neighbors .nb-item:hover, #info-neighbors .nb-item:focus-visible { border-color: #4fd8ff; background: rgba(79, 216, 255, 0.16); outline: none; }
+      #info-neighbors .nb-item:focus-visible { box-shadow: 0 0 0 1px #4fd8ff; }
+      #info-neighbors .nb-item[data-in-map="0"] { border-style: dashed; }
+      #info-neighbors .nb-mark { color: #4fd8ff; font-size: 9px; }
+      #info-neighbors .nb-swatch { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+      #info-neighbors-list:has(.nb-thumb) { gap: 2px; }
+      #info-neighbors .nb-thumb { padding: 0; border-width: 1px 1px 3px; border-style: solid; border-radius: 2px; }
+      #info-neighbors .nb-thumb[data-in-map="0"] { border-top-style: dashed; border-left-style: dashed; border-right-style: dashed; }
+      #info-neighbors .nb-thumb canvas { display: block; image-rendering: pixelated; image-rendering: crisp-edges; }
+      #info-neighbors .nb-thumb .nb-mark { position: absolute; right: 0; top: -2px; font-size: 10px; text-shadow: 0 0 2px #000, 0 0 2px #000, 0 0 1px #000; }
+      #info-back {
+        flex: none; align-self: center; border: 1px solid rgba(255, 255, 255, 0.25); background: rgba(20, 24, 34, 0.9); color: #e8ecf4; border-radius: 3px;
+        padding: 0 6px; cursor: pointer; font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      #info-back[hidden] { display: none; }
+      #info-back:hover, #info-back:focus-visible { border-color: #fff; outline: none; }
+      #neighbor-edges { position: fixed; inset: 0; z-index: 0; overflow: hidden; pointer-events: none; }
+      .nb-edge { position: absolute; left: 0; top: 0; width: 0; height: 0; }
+      .nb-edge[hidden] { display: none; }
+      .nb-edge-arrow {
+        position: absolute; left: -9px; top: -9px; width: 18px; height: 18px;
+      }
+      .nb-edge-arrow::before {
+        content: ''; position: absolute; left: 15px; top: 3px; border-style: solid; border-width: 6px 0 6px 9px;
+        border-color: transparent transparent transparent var(--c, #4fd8ff); filter: drop-shadow(0 0 1px #000);
+      }
+      .nb-edge-rank {
+        position: absolute; left: -8px; top: -8px; width: 16px; height: 16px; border-radius: 50%;
+        border: 1.5px solid var(--c, #4fd8ff); background: rgba(7, 8, 12, 0.85); color: #e8ecf4; box-sizing: border-box;
+        font: 600 9px/13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; text-align: center;
+      }
+      .nb-edge.is-behind .nb-edge-rank { border-style: dashed; }
       .sr-only {
         position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0;
         overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
@@ -222,7 +276,21 @@
         <div class="info-hint">ダブルクリックで近づく<br />Esc で選択を解除</div>
       </div>
       <button id="info-close" type="button" aria-label="選択を解除"><span aria-hidden="true">×</span></button>
+      <!-- 元のデータで近い点（src/neighbors/）。Tab の順で閉じるボタンのあと -->
+      <section id="info-neighbors" aria-labelledby="info-neighbors-heading" hidden>
+        <div class="nb-head">
+          <h3 id="info-neighbors-heading">元のデータで近い点</h3>
+          <span class="nb-legend" aria-hidden="true">●地図でも近い ○離れている</span>
+          <button id="info-back" type="button" hidden>← 前の点</button>
+        </div>
+        <p id="info-neighbors-summary"></p>
+        <ol id="info-neighbors-list" aria-label="元のデータで近い順"></ol>
+        <p id="info-neighbors-hint"></p>
+      </section>
     </section>
+    <div id="info-neighbors-live" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
+    <!-- 画面の外やカメラの後ろにある、元のデータで近い点の方向を示す印（src/neighbors/）。操作は受けない -->
+    <div id="neighbor-edges" aria-hidden="true"></div>
     <div id="hover-label" aria-hidden="true" hidden></div>
     <!-- 目印は Tab の順で情報パネルのあと。見た目の重なりは z-index（HUD・情報パネルより下） -->
     <div id="cluster-labels" role="group" aria-label="クラスタの目印" hidden></div>

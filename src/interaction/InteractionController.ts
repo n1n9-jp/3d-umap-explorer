@@ -40,6 +40,8 @@ export interface InteractionDeps {
    * 関数を渡すこと（`CameraRig.pressStopsInertia`）。
    */
   pressStopsInertia(e: PointerEvent): boolean;
+  /** 選択が変わったとき（解除を含む）に呼ぶ。情報パネルを更新したあとに呼ぶ（元の空間で近い点の一覧など。src/neighbors/） */
+  onSelect?(index: number | null): void;
 }
 
 /**
@@ -89,6 +91,7 @@ export class InteractionController {
     this.selected = index;
     this.deps.cloud.setHighlight('selected', index);
     this.deps.panel.show(index);
+    this.deps.onSelect?.(index);
   }
 
   /** 点 index へ飛ぶときに止まる距離（点からの距離）。 */

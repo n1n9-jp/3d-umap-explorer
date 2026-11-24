@@ -32,6 +32,8 @@ import { Minimap } from '../minimap/Minimap';
 import { WordLabels } from '../text/WordLabels';
 import { takeFault } from './faults';
 import type { ScreenRect } from '../text/selection';
+import { NeighborView } from '../neighbors/NeighborView';
+import type { NeighborsShared } from '../neighbors/shared';
 
 /**
  * 画面の端の UI の要素（単語の文字をこの下に出さない）。HUD・データセットの選択欄・UMAP のパネル・現在地・
@@ -96,6 +98,11 @@ export interface DatasetViewOptions {
    * 渡すと、空間索引を作り直さずに使う。省略時は、ここで構築する
    */
   spatialIndex?: SpatialIndex;
+  /**
+   * 「元の空間で近い点」の、表示をまたいで保つ状態（kNN グラフ・選択の履歴・N キー。src/neighbors/）。
+   * 省略時は、この機能を作らない
+   */
+  neighbors?: NeighborsShared;
 }
 
 /**
@@ -129,6 +136,8 @@ export class DatasetView {
   readonly interaction: InteractionController;
   readonly clusterLabels: ClusterLabels;
   readonly minimap: Minimap;
+  /** 選択中の点の「元の空間で近い点」の一覧と地図の上の表示（src/neighbors/）。`options.neighbors` がなければ null */
+  readonly neighbors: NeighborView | null = null;
   /** 点ごとの表示用の文字列（単語のデータセットだけ） */
   readonly text: string[] | null;
   /** 近くの単語の文字（単語のデータセットで、画像のないときだけ。src/text/） */
@@ -247,7 +256,8 @@ export class DatasetView {
       }
 
       // ---- ホバー・選択・ダブルクリックで点へ飛ぶ（src/interaction/）----
-      this.infoPanel = new InfoPanel(doc, this.pointInfoSource(coarseLevel?.clusters.map((c) => c.name) ?? []), () => this.interaction.select(null));
+      const info = this.pointInfoSource(coarseLevel?.clusters.map((c) => c.name) ?? []);
+      this.infoPanel = new InfoPanel(doc, info, () => this.interaction.select(null));
       this.interaction = new InteractionController({
         canvas: renderer.domElement,
         camera,
@@ -258,7 +268,40 @@ export class DatasetView {
         flyTo: (target, opts) => this.controller.flyTo(target, opts),
         pressStopsInertia: (e) => this.controller.pressStopsInertia(e),
         bufferHeight: () => renderer.getDrawingBufferSize(new THREE.Vector2()).y,
+        onSelect: (i) => this.neighbors?.onSelect(i),
       });
+
+      // ---- 選択中の点の「元の空間で近い点」（src/neighbors/）。一覧は情報パネルに、輪と線は root に加える ----
+      if (options.neighbors) {
+        const neighbors = new NeighborView({
+          doc,
+          camera,
+          canvas: renderer.domElement,
+          cloud: this.cloud,
+          shared: options.neighbors,
+          positions: arrays.positions,
+          shownPositions: () => this.displayPositions,
+          index: this.spatialIndex,
+          info,
+          selectAndFly: (i) => {
+            this.interaction.select(i);
+            this.interaction.flyToPoint(i);
+          },
+          // 単語の文字を出している近傍は、文字を囲む矩形で示す（文字の位置は最後に選び直したときのもの。点からのずれとして使う）
+          wordBoxes: () => {
+            const out = new Map<number, { dx: number; dy: number; hw: number; hh: number }>();
+            const w = this.words;
+            if (!w || !w.isEnabled() || this.wordsSuspended) return out;
+            for (const s of w.getState().shown) {
+              if (s.opacity < 0.5) continue;
+              out.set(s.index, { dx: s.rect.x - s.anchorX, dy: s.rect.y - s.anchorY, hw: s.rect.width / 2, hh: s.rect.height / 2 });
+            }
+            return out;
+          },
+        });
+        (this as { neighbors: NeighborView | null }).neighbors = neighbors;
+        this.root.add(neighbors.overlay.group);
+      }
 
       // ---- ミニマップ（src/minimap/）：右下に全体の俯瞰と現在位置・視線の向き ----
       this.minimap = new Minimap({
@@ -439,6 +482,8 @@ export class DatasetView {
     this.cloud.setViewportHeight(r.getDrawingBufferSize(new THREE.Vector2()).y);
     // 画面上の大きさのパラメータは CSS ピクセルで持ち、描画バッファの画素へはこの倍率で直す
     this.cloud.setPixelRatio(r.getPixelRatio());
+    const buf = r.getDrawingBufferSize(new THREE.Vector2());
+    this.neighbors?.resize(buf.x, buf.y, r.getPixelRatio());
     this.minimap.resize();
   }
 
@@ -451,6 +496,7 @@ export class DatasetView {
       this.words.update(dt, width, height);
     }
     this.clusterLabels.update(width, height);
+    this.neighbors?.update(width, height);
     this.layoutComputingBadge();
   }
 
@@ -463,8 +509,9 @@ export class DatasetView {
     if (this.disposed) return;
     this.disposed = true;
     // コンストラクタの途中で失敗したときにも呼ぶ。まだ作っていないものは飛ばす
-    const made = this as Partial<Pick<DatasetView, 'interaction' | 'infoPanel' | 'clusterLabels' | 'minimap' | 'controller' | 'words' | 'picker' | 'cloud'>>;
+    const made = this as Partial<Pick<DatasetView, 'interaction' | 'infoPanel' | 'clusterLabels' | 'minimap' | 'controller' | 'words' | 'picker' | 'cloud' | 'neighbors'>>;
     made.interaction?.dispose();
+    made.neighbors?.dispose();
     made.infoPanel?.dispose();
     made.clusterLabels?.dispose();
     made.minimap?.dispose();
