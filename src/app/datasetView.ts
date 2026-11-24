@@ -231,6 +231,7 @@ export class DatasetView {
             cloud: this.cloud,
             picker: this.picker,
             nearest: (x, y, z, k) => this.spatialIndex.kNearest(x, y, z, k).indices,
+            index: this.spatialIndex,
             camera,
             doc,
           });

@@ -466,6 +466,52 @@ export class SpatialIndex {
   }
 
   /**
+   * ある領域の中にある点だけを調べるための木の巡回。範囲の外接箱を `mayContain` に渡し、false なら、その範囲の点は領域の外として
+   * 丸ごと飛ばす。true の範囲は、葉まで降りて、点を木の順に `visit(添字, x, y, z)` へ渡す
+   * （`visit` に渡す点は領域の外のものを含むので、呼び出し側が点ごとに判定する）。
+   * `mayContain` は保守的でよい（領域と交わる箱には必ず true を返す。交わらない箱への true は、巡回が増えるだけで結果は変わらない）。
+   * 座標は構築時の Float32 の値（`positions` と同じ）。
+   */
+  forEachInBoxes(
+    mayContain: (minX: number, minY: number, minZ: number, maxX: number, maxY: number, maxZ: number) => boolean,
+    visit: (id: number, x: number, y: number, z: number) => void,
+  ): void {
+    const n = this.count;
+    if (n === 0) return;
+    const pts = this.pts;
+    const ids = this.ids;
+    if (n <= LEAF_SIZE) {
+      for (let i = 0, o = 0; i < n; i++, o += 3) visit(ids[i], pts[o], pts[o + 1], pts[o + 2]);
+      return;
+    }
+    const boxes = this.boxes;
+    const stackLo = this.stackLo;
+    const stackHi = this.stackHi;
+    stackLo[0] = 0;
+    stackHi[0] = n;
+    let sp = 1;
+    while (sp > 0) {
+      sp--;
+      const lo = stackLo[sp];
+      const hi = stackHi[sp];
+      const mid = (lo + hi) >> 1;
+      const b = mid * 6;
+      if (!mayContain(boxes[b], boxes[b + 1], boxes[b + 2], boxes[b + 3], boxes[b + 4], boxes[b + 5])) continue;
+      if (hi - lo <= LEAF_SIZE) {
+        for (let i = lo, o = lo * 3; i < hi; i++, o += 3) visit(ids[i], pts[o], pts[o + 1], pts[o + 2]);
+        continue;
+      }
+      const o = mid * 3;
+      visit(ids[mid], pts[o], pts[o + 1], pts[o + 2]);
+      stackLo[sp] = lo;
+      stackHi[sp] = mid;
+      stackLo[sp + 1] = mid + 1;
+      stackHi[sp + 1] = hi;
+      sp += 2;
+    }
+  }
+
+  /**
    * 点 (x, y, z) から、範囲 [lo, hi) の点の外接箱までの二乗距離（箱の内側なら 0）。
    * 範囲内のどの点の二乗距離（`dx*dx + dy*dy + dz*dz`）も、これ以上になる。
    * 軸ごとの差は点の距離と同じ計算（Float32 の値を倍精度で引く）で、足す順も同じなので、

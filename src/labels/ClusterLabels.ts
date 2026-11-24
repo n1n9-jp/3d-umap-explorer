@@ -2,13 +2,16 @@ import { Matrix4, Vector3 } from 'three';
 import type { PerspectiveCamera } from 'three';
 import type { FlyToOptions } from '../controls/FlyCameraControls';
 import type { ClusterInfo } from '../data/manifest';
-import { appearanceParamsForBounds, insideAppearance, labelAppearance, type AppearanceParams } from './appearance';
+import { appearanceParamsForBounds, blendInsideAppearance, insideBlend, labelAppearance, type AppearanceParams } from './appearance';
 import { DEFAULT_BUDGET, cloudProximity, labelBudget, selectWithinBudget } from './budget';
 import { clusterViewDistance } from './flyDistance';
 import { focusFallback } from './focus';
 import { chipText, clusterColor, clusterTitle, formatLocation } from './format';
 import type { ColorSource } from '../render/colorScheme';
-import { describeDirection, locateCamera, type ClusterSphere, type Location } from './location';
+import {
+  describeDirection, distanceToCenter, EMPTY_MEMORY, INSIDE_ENTER_RATIO, INSIDE_EXIT_RATIO, locateCamera, rememberLocation,
+  type ClusterSphere, type Location, type LocationMemory,
+} from './location';
 import { labelsCoveringWords, resolveOverlaps, type OverlapItem, type ScreenBox } from './overlap';
 import { projectPoint, screenVisibility, type Vec3 } from './projection';
 
@@ -135,6 +138,8 @@ export class ClusterLabels {
   private _enabled = true;
   private frame = 0;
   private insideId = -1;
+  /** 前のフレームの現在地の判定（内部へ入る・出る距離に幅を持たせるため。src/labels/location.ts） */
+  private memory: LocationMemory = EMPTY_MEMORY;
   private proximity = Infinity;
   /** 前のフレームの目印の数の上限（上限なしなら null） */
   private budget: number | null = null;
@@ -260,8 +265,16 @@ export class ClusterLabels {
     this.position.setFromMatrixPosition(cam.matrixWorld);
     const camPos: Vec3 = [this.position.x, this.position.y, this.position.z];
 
-    const location = locateCamera(camPos, this.spheres);
+    const location = locateCamera(camPos, this.spheres, this.memory);
+    this.memory = rememberLocation(location);
     const insideId = location.kind === 'inside' ? location.id : -1;
+    // 内部の見せ方の度合い: 判定の幅（入る距離から出る距離まで）の間で連続して変える（境界で一度に変わらない）
+    let minRatio = Infinity;
+    for (const sphere of this.spheres) {
+      const ratio = sphere.radius > 0 ? distanceToCenter(camPos, sphere) / sphere.radius : Infinity;
+      if (ratio < minRatio) minRatio = ratio;
+    }
+    const blend = insideBlend(minRatio, INSIDE_ENTER_RATIO, INSIDE_EXIT_RATIO);
 
     // フォーカス中の目印は、重なりでは隠さない（隠れるとフォーカスが何も知らされずに body へ移るため）
     const doc = this.deps.document;
@@ -275,8 +288,8 @@ export class ClusterLabels {
       const pt = projectPoint(this.viewProj.elements, c.center, width, height);
       const distance = Math.hypot(camPos[0] - c.center[0], camPos[1] - c.center[1], camPos[2] - c.center[2]);
       const base = labelAppearance(distance, this.appearance);
-      // 内部にいる間は、ほかのクラスタの目印を小さく薄くする（方向の手がかりにとどめる）
-      const look = insideId >= 0 ? insideAppearance(base) : base;
+      // 内部にいる間は、ほかのクラスタの目印を小さく薄くする（方向の手がかりにとどめる。内部へ入る・出る判定の幅の間で連続して変える）
+      const look = blendInsideAppearance(base, blend);
       const w = chip.width * look.scale;
       const h = chip.height * look.scale;
       let reason: HiddenReason | null = null;
@@ -298,12 +311,13 @@ export class ClusterLabels {
     for (const chip of this.chips) if (chip.shown) shown.add(chip.cluster.id);
     const pinned = focused?.cluster.id ?? null;
 
-    // 2. クラスタの外でも点群のすぐ近くでは、出す目印の数を控えめにする（近いものから数個。src/labels/budget.ts）。
-    //    全体が見える遠い視点では上限なし。内部では、単語と重なる目印を隠す（4.）ので、上限は設けない
+    // 2. 点群の近くでは、出す目印の数を控えめにする（近いものから数個。src/labels/budget.ts）。クラスタの内部も、点群のすぐ近く
+    //    （近さ 0）なので、外と同じ規則で数える（境界をまたぐ瞬間に、目印が一度に多数現れたり消えたりしない）。全体が見える遠い視点では上限なし。
+    //    内部ではさらに、単語と重なる目印を隠す（4.）
     const total = this.chips.length;
     this.proximity = insideId >= 0 ? 0
-      : cloudProximity(camPos, this.deps.boundsCenter ?? [0, 0, 0], this.deps.boundsRadius, location.kind === 'nearest' ? location.distance : Infinity);
-    const budget = insideId >= 0 || !this.enabled ? total : labelBudget(this.proximity, total, DEFAULT_BUDGET, this.budget ?? total);
+      : cloudProximity(camPos, this.deps.boundsCenter ?? [0, 0, 0], this.deps.boundsRadius, location.kind === 'nearest' ? location.closest ?? location.distance : Infinity);
+    const budget = !this.enabled ? total : labelBudget(this.proximity, total, DEFAULT_BUDGET, this.budget ?? total);
     this.budget = budget < total ? budget : null;
     let allowed = candidates;
     if (budget < total) {

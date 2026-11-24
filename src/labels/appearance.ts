@@ -51,3 +51,20 @@ export const INSIDE_OPACITY = 0.6;
 export function insideAppearance(a: Appearance): Appearance {
   return { t: a.t, scale: a.scale * INSIDE_SCALE, opacity: a.opacity * INSIDE_OPACITY };
 }
+
+/**
+ * 内部の見せ方の度合い（0: 外、1: 内部）。カメラから最も近いクラスタの中心までの距離 ÷ 半径（`minRatio`）で決め、
+ * `enterRatio` 以下で 1、`exitRatio` 以上で 0、その間は線形。内部へ入る・出る判定（location.ts）の幅と同じ範囲で、
+ * 目印の大きさと不透明度が連続して変わる（境界をまたぐ瞬間に、出ている目印が一度に小さく薄くなったり戻ったりしない）。
+ */
+export function insideBlend(minRatio: number, enterRatio: number, exitRatio: number): number {
+  if (!(minRatio < exitRatio)) return 0;
+  if (!(minRatio > enterRatio)) return 1;
+  return (exitRatio - minRatio) / (exitRatio - enterRatio);
+}
+
+/** `labelAppearance` の結果に、内部の見せ方を `blend`（0..1）の度合いで掛ける。0 なら `a` のまま、1 なら `insideAppearance(a)`。 */
+export function blendInsideAppearance(a: Appearance, blend: number): Appearance {
+  const k = Math.min(1, Math.max(0, blend));
+  return { t: a.t, scale: a.scale * (1 - k * (1 - INSIDE_SCALE)), opacity: a.opacity * (1 - k * (1 - INSIDE_OPACITY)) };
+}

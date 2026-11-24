@@ -6,8 +6,10 @@
  *   文字 1 つを 1 インスタンスとして描く（shaders.ts）。単語の組み立ては layout.ts、選び方は selection.ts。
  * - 画面上の文字の高さは、透視投影のままの高さを、下限と上限のある緩やかな変化に写す（selection.ts の textSizePx）。
  * - UI の領域や目印（`setObstacles`）と重なる単語は出さない。
- * - 選び直しは、カメラ（と点の大きさ・画面の大きさ・障害物）が変わったときだけ、`minIntervalMs` に 1 回まで行う。
+ * - 選び直しは、カメラ（と点の大きさ・画面の大きさ・障害物）が変わったときだけ、0.1 秒に 1 回まで行う。カメラが速く動いて、
+ *   表示中の単語が画面上で大きく動いたときは、33 ミリ秒（選び直しが重いときはその 6 倍）まで間隔を縮め、障害物との間隔も広げる（motion.ts）。
  *   新しく入る単語と抜ける単語は、`fadeSeconds` 秒で不透明度を変える。
+ * - 表示中の単語の矩形（`shownRects`）は、毎フレーム、いまの視点で求め直す（描かれている文字の位置と合う）。
  * - 文字を出している点の丸い点は縮めて消し（不透明度に合わせる）、ホバー・選択の強調は単語を囲む矩形にする。
  *   表示中の単語の矩形の近くの丸い点は小さくして（clearance.ts）、同じ色の点の塊が文字を読みにくくしないようにする。
  * - ピッキング（src/picking/GpuPicker.ts）の層として、文字の本体の画素をその点の番号で描く。
@@ -18,17 +20,18 @@ import type { GpuPicker } from '../picking/GpuPicker';
 import { buildGlyphAtlas, type GlyphAtlas } from './glyphAtlas';
 import { collectChars, layoutWord, MAX_WORD_CHARS, type WordLayout } from './layout';
 import {
-  DEFAULT_SELECT_PARAMS, selectWords, stepOpacities, textSizePx, type PlacedWord, type ScreenRect, type WordBox, type WordSelectParams,
+  DEFAULT_SELECT_PARAMS, placeWordRect, selectWords, stepOpacities, textSizePx, type PlacedWord, type ScreenRect, type SelectView, type WordBox, type WordSelectParams,
 } from './selection';
 import { wordFragmentShader, wordVertexShader } from './shaders';
-import { DOT_CLEARANCE_MARGIN_PX, DOT_CLEARANCE_SCALE, pointsNearRects } from './clearance';
+import { DOT_CLEARANCE_MARGIN_PX, DOT_CLEARANCE_SCALE, pointsNearRects, pointsNearRectsIndexed, type BoxQueryIndex } from './clearance';
+import { BASE_INTERVAL_MS, maxAnchorDisplacement, motionMarginPx, selectIntervalMs } from './motion';
 
 /** 文字の大きさ: 1 em = TEXT_SCALE × 点の大きさ（ワールド単位）。 */
 export const TEXT_SCALE = 0.4;
 /** 縁取りの幅（em） */
 export const OUTLINE_EM = 0.12;
 /** 選び直しの間隔の下限（ミリ秒） */
-export const SELECT_INTERVAL_MS = 100;
+export const SELECT_INTERVAL_MS = BASE_INTERVAL_MS;
 /** 表示の切り替えにかける時間（秒） */
 export const FADE_SECONDS = 0.2;
 /** 空間索引から取る候補の数（表示する数の上限 N に対する倍率） */
@@ -49,6 +52,8 @@ export interface WordLabelsDeps {
   picker: GpuPicker;
   /** カメラの近くの点（近い順） */
   nearest(x: number, y: number, z: number, k: number): ArrayLike<number>;
+  /** 点の空間索引。あれば、単語の周りの丸い点を、全点ではなく木を巡って探す（結果は全点を調べた場合と同じ）。なければ全点を調べる */
+  index?: BoxQueryIndex;
   camera: THREE.PerspectiveCamera;
   doc: Document;
 }
@@ -64,6 +69,8 @@ export interface WordLabelsState {
   enabled: boolean;
   /** 表示中（選ばれている）の単語。矩形は最後に選んだときの画面上の位置（CSS ピクセル） */
   shown: { index: number; text: string; rect: PlacedWord['rect']; anchorX: number; anchorY: number; textPx: number; naturalPx: number; distance: number; opacity: number }[];
+  /** 表示中の単語の、いまの視点での画面上の矩形（`shownRects()` と同じ。カメラの後ろへ回った単語は含まない） */
+  currentRects: ScreenRect[];
   /** 単語を重ねない領域（UI の要素・目印。CSS ピクセル） */
   obstacles: ScreenRect[];
   /** 単語の矩形の近くにあって、丸い点を小さくしている点の数（clearance.ts） */
@@ -74,7 +81,9 @@ export interface WordLabelsState {
   /** 不透明度が 0 と 1 の間の単語の数 */
   fading: number;
   atlas: { width: number; height: number; glyphs: number; buildMs: number };
-  select: { count: number; lastMs: number; meanMs: number; maxMs: number; candidates: number; eligible: number };
+  select: { count: number; lastMs: number; meanMs: number; maxMs: number; candidates: number; eligible: number; clearMs: number; clearMeanMs: number };
+  /** カメラの動き: 表示中の単語の基準点が、最後に選び直したときから動いた量（CSS ピクセル。`atSelectPx` は最後の選び直しの時点の値）、障害物との間隔に足している余裕、いまの選び直しの間隔 */
+  motion: { px: number; atSelectPx: number; marginPx: number; intervalMs: number };
   params: { maxWords: number; textScale: number; outlineEm: number; intervalMs: number; fadeSeconds: number; noiseTextColor: string; select: WordSelectParams };
 }
 
@@ -113,6 +122,13 @@ export class WordLabels {
   /** 丸い点を小さくする量（0..1。0 で元の大きさ、1 で DOT_CLEARANCE_SCALE 倍）。単語の不透明度と同じ速さで切り替える */
   private readonly clearance = new Map<number, number>();
   private sinceSelectMs = Infinity;
+  /** 表示中の単語の基準点が、最後に選び直したときの位置から動いた量（CSS ピクセル） */
+  private motionPx = 0;
+  /** 最後の選び直しで足した、障害物との間隔の余裕（CSS ピクセル） */
+  private lastMarginPx = 0;
+  private motionAtSelectPx = 0;
+  /** いまの視点での、表示中の単語の矩形（`shown` と同じ順） */
+  private currentRects: ScreenRect[] = [];
   private dirtyLayout = true;
   private drawnWords = 0;
   private drawnGlyphs = 0;
@@ -120,7 +136,7 @@ export class WordLabels {
   private readonly lastProjection = new THREE.Matrix4();
   private lastKey = '';
   private viewDirty = true;
-  private readonly stats = { count: 0, lastMs: 0, totalMs: 0, maxMs: 0, candidates: 0, eligible: 0 };
+  private readonly stats = { count: 0, lastMs: 0, totalMs: 0, maxMs: 0, candidates: 0, eligible: 0, clearMs: 0, clearTotalMs: 0 };
   private disposed = false;
 
   constructor(deps: WordLabelsDeps, options: WordLabelsOptions = {}) {
@@ -227,6 +243,8 @@ export class WordLabels {
     this.opacity.clear();
     this.clearTargets = new Set();
     this.clearance.clear();
+    this.currentRects = [];
+    this.motionPx = 0;
     this.viewDirty = true;
     this.sinceSelectMs = Infinity;
     this.dirtyLayout = true;
@@ -245,9 +263,12 @@ export class WordLabels {
     this.viewDirty = true;
   }
 
-  /** 表示中（選ばれている）の単語の画面上の矩形（最後に選んだときの位置。CSS ピクセル）。無効なら空。 */
+  /**
+   * 表示中（選ばれている）の単語の画面上の矩形（CSS ピクセル）。毎フレームの `update` で、いまの視点で求め直した位置
+   * （カメラが動いても、描かれている文字の位置と合う）。カメラの後ろへ回った単語は含まない。無効なら空。
+   */
   shownRects(): readonly ScreenRect[] {
-    return this.shown.map((w) => w.rect);
+    return this.currentRects;
   }
 
   /** 毎フレーム（描画の前）。width・height は画面の大きさ（CSS ピクセル）。 */
@@ -265,13 +286,19 @@ export class WordLabels {
       if (!cam.matrixWorld.equals(this.lastView) || !cam.projectionMatrix.equals(this.lastProjection) || key !== this.lastKey) {
         this.viewDirty = true;
       }
-      if (this.viewDirty && this.sinceSelectMs >= SELECT_INTERVAL_MS) {
+      this.trackMotion(width, height);
+      const lastCost = this.stats.lastMs;
+      if (this.viewDirty && this.sinceSelectMs >= selectIntervalMs(this.motionPx, lastCost)) {
+        // 速く動いているときは、次の選び直しまでに動く量を見込んで、障害物との間隔を広げる
+        this.lastMarginPx = motionMarginPx(this.motionPx, this.sinceSelectMs);
+        this.motionAtSelectPx = this.motionPx;
         this.lastView.copy(cam.matrixWorld);
         this.lastProjection.copy(cam.projectionMatrix);
         this.lastKey = key;
         this.viewDirty = false;
         this.sinceSelectMs = 0;
         this.select(width, height);
+        this.trackMotion(width, height);
       }
     }
     if (stepOpacities(this.opacity, this.shownSet, dt, FADE_SECONDS)) this.dirtyLayout = true;
@@ -291,13 +318,18 @@ export class WordLabels {
         index: w.index, text: this.deps.text[w.index] ?? '', rect: { ...w.rect }, anchorX: w.anchorX, anchorY: w.anchorY,
         textPx: w.textPx, naturalPx: w.naturalPx, distance: w.distance, opacity: this.opacity.get(w.index) ?? 0,
       })),
+      currentRects: this.currentRects.map((r) => ({ ...r })),
       obstacles: this.obstacles.map((r) => ({ ...r })),
       cleared: this.clearTargets.size,
       drawnWords: this.drawnWords,
       drawnGlyphs: this.drawnGlyphs,
       fading,
       atlas: { width: this.atlas.width, height: this.atlas.height, glyphs: this.atlas.glyphs.size, buildMs: this.atlas.buildMs },
-      select: { count: s.count, lastMs: s.lastMs, meanMs: s.count ? s.totalMs / s.count : 0, maxMs: s.maxMs, candidates: s.candidates, eligible: s.eligible },
+      select: {
+        count: s.count, lastMs: s.lastMs, meanMs: s.count ? s.totalMs / s.count : 0, maxMs: s.maxMs, candidates: s.candidates, eligible: s.eligible,
+        clearMs: s.clearMs, clearMeanMs: s.count ? s.clearTotalMs / s.count : 0,
+      },
+      motion: { px: this.motionPx, atSelectPx: this.motionAtSelectPx, marginPx: this.lastMarginPx, intervalMs: selectIntervalMs(this.motionPx, s.lastMs) },
       params: { maxWords: this.params.maxWords, textScale: this.textScale, outlineEm: OUTLINE_EM, intervalMs: SELECT_INTERVAL_MS, fadeSeconds: FADE_SECONDS, noiseTextColor: NOISE_TEXT_COLOR, select: { ...this.params, size: { ...this.params.size } } },
     };
   }
@@ -347,15 +379,19 @@ export class WordLabels {
       box: (i) => this.box(i),
       shown: this.shownSet,
       obstacles: this.obstacles,
+      motionMarginPx: this.lastMarginPx,
       params: this.params,
     });
     this.shown = res.words;
     this.shownSet = new Set(res.words.map((w) => w.index));
-    // 単語の矩形の近くの丸い点を小さくする（離れた点も上限の大きさで描かれるので、全点から選ぶ）
-    this.clearTargets = this.deps.cloud.dotScales
-      ? pointsNearRects(null, this.deps.positions, view, res.words.map((w) => w.rect), DOT_CLEARANCE_MARGIN_PX, this.shownSet)
-      : new Set();
+    const t1 = performance.now();
+    // 単語の矩形の近くの丸い点を小さくする。離れた点も上限の大きさで描かれるので、全点が対象（空間索引の木を巡って、全点を調べた場合と同じ結果を得る）
+    const rects = res.words.map((w) => w.rect);
+    this.clearTargets = !this.deps.cloud.dotScales ? new Set()
+      : this.deps.index ? pointsNearRectsIndexed(this.deps.index, view, rects, DOT_CLEARANCE_MARGIN_PX, this.shownSet)
+        : pointsNearRects(null, this.deps.positions, view, rects, DOT_CLEARANCE_MARGIN_PX, this.shownSet);
     this.dirtyLayout = true;
+    const clearMs = performance.now() - t1;
     const ms = performance.now() - t0;
     const s = this.stats;
     s.count++;
@@ -364,6 +400,29 @@ export class WordLabels {
     s.maxMs = Math.max(s.maxMs, ms);
     s.candidates = candidates.length;
     s.eligible = res.eligible;
+    s.clearMs = clearMs;
+    s.clearTotalMs += clearMs;
+  }
+
+  /**
+   * 表示中の単語の矩形をいまの視点で求め直し（`currentRects`）、基準点が最後に選び直したときの位置から動いた量を測る（`motionPx`）。
+   * 選び直しの間隔と、障害物との間隔の余裕を決める（motion.ts）。
+   */
+  private trackMotion(width: number, height: number): void {
+    const cam = this.deps.camera;
+    const view: SelectView = { view: cam.matrixWorldInverse.elements, projection: cam.projectionMatrix.elements, width, height };
+    const pos = this.deps.positions;
+    const emWorld = this.textScale * this.deps.cloud.params.pointSize;
+    const rects: ScreenRect[] = [];
+    const anchors: ({ x: number; y: number } | null)[] = [];
+    for (const w of this.shown) {
+      const b = this.box(w.index);
+      const placed = b ? placeWordRect(view, pos[3 * w.index]!, pos[3 * w.index + 1]!, pos[3 * w.index + 2]!, b, emWorld, this.params.size) : null;
+      anchors.push(placed ? { x: placed.anchorX, y: placed.anchorY } : null);
+      if (placed) rects.push(placed.rect);
+    }
+    this.currentRects = rects;
+    this.motionPx = maxAnchorDisplacement(this.shown.map((w) => ({ x: w.anchorX, y: w.anchorY })), anchors);
   }
 
   /** 描く単語（不透明度が 0 より大きいもの）のインスタンスを作り直し、丸い点の大きさを合わせる。 */
@@ -407,31 +466,29 @@ export class WordLabels {
    * DOT_CLEARANCE_SCALE 倍まで小さくする（両方に当たるときは小さいほう）。
    */
   private updateDots(): void {
-    const scales = this.deps.cloud.dotScales;
-    if (!scales) return;
-    let changed = false;
+    const cloud = this.deps.cloud;
+    if (!cloud.dotScales) return;
     const target = (i: number): number => {
       const a = this.opacity.get(i);
       const c = this.clearance.get(i) ?? 0;
       return Math.min(a === undefined ? 1 : 1 - a, 1 - (1 - DOT_CLEARANCE_SCALE) * c);
     };
     for (const i of this.dotScaled) {
-      if (!this.opacity.has(i) && !this.clearance.has(i)) { scales[i] = 1; this.dotScaled.delete(i); changed = true; }
+      if (!this.opacity.has(i) && !this.clearance.has(i)) { cloud.setDotScale(i, 1); this.dotScaled.delete(i); }
     }
     for (const i of [...this.opacity.keys(), ...this.clearance.keys()]) {
-      const s = target(i);
-      if (scales[i] !== s) { scales[i] = s; changed = true; }
+      cloud.setDotScale(i, target(i));
       this.dotScaled.add(i);
     }
-    if (changed) this.deps.cloud.commitDotScales();
+    cloud.commitDotScales(); // 値が変わった点（の範囲）だけを GPU へ送る
   }
 
   private resetDots(): void {
-    const scales = this.deps.cloud.dotScales;
-    if (!scales) return;
-    for (const i of this.dotScaled) scales[i] = 1;
+    const cloud = this.deps.cloud;
+    if (!cloud.dotScales) return;
+    for (const i of this.dotScaled) cloud.setDotScale(i, 1);
     this.dotScaled.clear();
-    this.deps.cloud.commitDotScales();
+    cloud.commitDotScales();
   }
 
   /**

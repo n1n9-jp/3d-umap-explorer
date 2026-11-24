@@ -46,6 +46,14 @@ export const DOTS_ONLY_PARAMS: Partial<PointCloudParams> = {
   dotRadius: [0.5, DOTS_ONLY_MAX_RADIUS_PX],
 };
 
+/**
+ * 丸い点の倍率の属性を GPU へ送るとき、範囲 1 つ（`bufferSubData` 1 回）の手間を、送る要素の何個分とみなすか（1 KB 相当）。
+ * 変えた点が散らばっていて範囲を分けるほうが高くつくときは、まとめて（全体を）送る。
+ */
+export const DOT_SCALE_CALL_COST = 256;
+/** 範囲にまとめるときの、隙間のしきい値の候補（要素数） */
+const DOT_SCALE_GAPS = [0, 8, 32, 128, 512, 2048, 8192];
+
 /** 強調表示の種類。 */
 export type HighlightKind = 'hover' | 'selected';
 
@@ -94,6 +102,11 @@ export class PointCloud {
   private readonly highlighted: Record<HighlightKind, number | null> = { hover: null, selected: null };
   private pixelRatio = 1;
   private dotScaleAttr: THREE.InstancedBufferAttribute | null = null;
+  /** `setDotScale` で書き換えて、まだ GPU へ送っていない点（重複なし） */
+  private dotDirty: Int32Array = new Int32Array(0);
+  private dotDirtyCount = 0;
+  private dotDirtyFlags: Uint8Array | null = null;
+  private readonly dotUpload = { commits: 0, elements: 0, ranges: 0, lastElements: 0, lastRanges: 0 };
 
   constructor(data: PointCloudData, params: Partial<PointCloudParams> = {}) {
     const atlas = data.atlas ?? null;
@@ -115,6 +128,7 @@ export class PointCloud {
       attr.setUsage(THREE.DynamicDrawUsage);
       geometry.setAttribute('instanceDotScale', attr);
       this.dotScaleAttr = attr;
+      this.dotDirtyFlags = new Uint8Array(count);
     }
     geometry.instanceCount = count;
     // ビルボードはシェーダで広げるので、カリング用の境界は点群全体＋余白で十分
@@ -248,16 +262,75 @@ export class PointCloud {
   }
 
   /**
-   * 丸い点の半径の倍率（画像のないデータセットだけ。長さ count、既定 1）。書き換えたら `commitDotScales()` を呼ぶ。
+   * 丸い点の半径の倍率（画像のないデータセットだけ。長さ count、既定 1）。読み取り用: 書き換えは `setDotScale` で行う。
    * 単語の文字を出している点を 0 にして、文字と丸い点を重ねない（ピッキングも同じ形になる）。
    */
   get dotScales(): Float32Array | null {
     return (this.dotScaleAttr?.array as Float32Array | undefined) ?? null;
   }
 
-  /** `dotScales` の書き換えを GPU へ送る。 */
+  /** 点 `index` の丸い点の倍率を書き換える（値が変わったときだけ、GPU へ送る対象に加える）。`commitDotScales()` で送る。 */
+  setDotScale(index: number, value: number): void {
+    const attr = this.dotScaleAttr, flags = this.dotDirtyFlags;
+    if (!attr || !flags) return;
+    const scales = attr.array as Float32Array;
+    const v = Math.fround(value); // 属性は Float32。倍精度の値のまま比べると、同じ値でも毎回「変わった」ことになる
+    if (scales[index] === v) return;
+    scales[index] = v;
+    if (flags[index]) return;
+    flags[index] = 1;
+    if (this.dotDirtyCount === this.dotDirty.length) {
+      const bigger = new Int32Array(Math.max(256, this.dotDirty.length * 2));
+      bigger.set(this.dotDirty);
+      this.dotDirty = bigger;
+    }
+    this.dotDirty[this.dotDirtyCount++] = index;
+  }
+
+  /**
+   * `setDotScale` で変えた点だけを GPU へ送る（変えていなければ何も送らない）。
+   * 変えた点の添字を並べ、隣り合う点の間の隙間（要素数）がしきい値以内なら 1 つの範囲にまとめる。まとめるしきい値は、
+   * 「範囲 1 つあたりの呼び出しの手間（`DOT_SCALE_CALL_COST` 要素分）× 範囲の数 + 送る要素数」が最小になるものを、候補から選ぶ
+   * （変えた点が少なければ範囲ごとに細かく、多ければまとめて、全体の半分を超えるなら全体を 1 回で送る）。
+   */
   commitDotScales(): void {
-    if (this.dotScaleAttr) this.dotScaleAttr.needsUpdate = true;
+    const attr = this.dotScaleAttr, flags = this.dotDirtyFlags;
+    const n = this.dotDirtyCount;
+    if (!attr || !flags || n === 0) return;
+    const list = this.dotDirty.subarray(0, n);
+    list.sort();
+    const total = (attr.array as Float32Array).length;
+    // しきい値の候補ごとに、範囲の数と送る要素数を数えて、費用が最小のものを選ぶ
+    let bestGap = -1, bestCost = DOT_SCALE_CALL_COST + total, bestElements = total, bestRanges = 1;
+    for (const gap of DOT_SCALE_GAPS) {
+      let ranges = 1, elements = 1, end = list[0]! + 1;
+      for (let k = 1; k < n; k++) {
+        const i = list[k]!;
+        if (i - end <= gap) { elements += i + 1 - end; end = i + 1; } else { ranges++; elements++; end = i + 1; }
+      }
+      const cost = ranges * DOT_SCALE_CALL_COST + elements;
+      if (cost < bestCost) { bestCost = cost; bestGap = gap; bestElements = elements; bestRanges = ranges; }
+    }
+    attr.clearUpdateRanges();
+    if (bestGap >= 0) {
+      let start = list[0]!, end = start + 1;
+      for (let k = 1; k < n; k++) {
+        const i = list[k]!;
+        if (i - end <= bestGap) end = i + 1;
+        else { attr.addUpdateRange(start, end - start); start = i; end = i + 1; }
+      }
+      attr.addUpdateRange(start, end - start);
+    }
+    attr.needsUpdate = true;
+    for (let k = 0; k < n; k++) flags[list[k]!] = 0;
+    this.dotDirtyCount = 0;
+    const u = this.dotUpload;
+    u.commits++; u.elements += bestElements; u.ranges += bestRanges; u.lastElements = bestElements; u.lastRanges = bestRanges;
+  }
+
+  /** 倍率の属性の GPU への送信の累計（検証・計測用）。要素は Float32（4 バイト）。 */
+  getDotScaleUploadStats(): { commits: number; elements: number; ranges: number; lastElements: number; lastRanges: number; total: number } {
+    return { ...this.dotUpload, total: this.dotScaleAttr ? (this.dotScaleAttr.array as Float32Array).length : 0 };
   }
 
   /** 強調表示されている点の番号。 */

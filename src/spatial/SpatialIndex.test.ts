@@ -546,3 +546,43 @@ describe('SpatialIndex（構築済みの中身の受け渡し）', () => {
     expect(() => new SpatialIndex(p, { ...data, boxes: new Float32Array(10) })).toThrow(RangeError);
   });
 });
+
+
+describe('forEachInBoxes（領域の枝刈りつきの巡回）', () => {
+  const make = (n: number) => {
+    const pos = new Float32Array(3 * n);
+    let s = 7;
+    const rand = () => { s = (Math.imul(s, 1664525) + 1013904223) >>> 0; return s / 4294967296; };
+    for (let i = 0; i < pos.length; i++) pos[i] = rand() * 2 - 1;
+    return pos;
+  };
+  for (const n of [0, 1, 5, 8, 9, 100, 3000]) {
+    it(`常に true なら、全点を一度ずつ渡す（${n} 点）。座標は入力と一致する`, () => {
+      const pos = make(n);
+      const index = new SpatialIndex(pos);
+      const seen = new Map<number, number>();
+      index.forEachInBoxes(() => true, (id, x, y, z) => {
+        seen.set(id, (seen.get(id) ?? 0) + 1);
+        expect([x, y, z]).toEqual([pos[3 * id], pos[3 * id + 1], pos[3 * id + 2]]);
+      });
+      expect(seen.size).toBe(n);
+      expect([...seen.values()].every((c) => c === 1)).toBe(true);
+    });
+  }
+  it('箱の判定が、ある直方体と交わる箱だけ true なら、その直方体の中の点はすべて渡される', () => {
+    const pos = make(4000);
+    const index = new SpatialIndex(pos);
+    const lo = [-0.3, -0.2, 0.1], hi = [0.2, 0.4, 0.6];
+    const inside = new Set<number>();
+    for (let i = 0; i < 4000; i++) {
+      if ([0, 1, 2].every((k) => pos[3 * i + k]! >= lo[k]! && pos[3 * i + k]! <= hi[k]!)) inside.add(i);
+    }
+    const visited = new Set<number>();
+    index.forEachInBoxes(
+      (x0, y0, z0, x1, y1, z1) => x1 >= lo[0]! && x0 <= hi[0]! && y1 >= lo[1]! && y0 <= hi[1]! && z1 >= lo[2]! && z0 <= hi[2]!,
+      (id) => visited.add(id));
+    expect(inside.size).toBeGreaterThan(50);
+    for (const i of inside) expect(visited.has(i)).toBe(true);
+    expect(visited.size).toBeLessThan(2000);
+  });
+});

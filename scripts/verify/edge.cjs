@@ -14,6 +14,7 @@
  *   - word2vec の縁と少し外の視点で、丸い点の直径の最大値が、表示中の単語の文字の高さの最小値以下（DOT_TO_TEXT_MAX 倍以下）
  *   - word2vec の内部の視点で、近い点ほど大きい（直径の最大値が最小サイズの 2 倍以上）
  *   - 縁の視点で、画面に出る目印の数が NEAR_LABEL_LIMIT 以下。現在地の表示が出ている
+ *   - クラスタの内部・内部の密な場所の視点でも、画面に出る目印の数が NEAR_LABEL_LIMIT 以下（内部も外と同じ規則で数を控える）
  *   - ホームの視点で、目印の数が変更前（HOME_LABELS_BEFORE）と同じ
  *   - word2vec の縁の視点で、単語が出ている（12px 以上の単語が 15 語以上）
  *   - 縁の視点の小さな点（直径が最小サイズに近い点）でも、点の中心から 4 CSS ピクセルずらした位置のホバーで、その点が選ばれる（吸着）
@@ -312,6 +313,8 @@ async function main() {
       const r = report[id];
       check(`${id} edge: 画面に出る目印の数が ${NEAR_LABEL_LIMIT} 以下で、現在地が出ている`, r.edge.labels.visible <= NEAR_LABEL_LIMIT && r.edge.location.shown,
         `${r.edge.labels.visible} 個（${r.edge.labels.names.join(' / ')}）、現在地 ${r.edge.location.text}`);
+      check(`${id} inside・deep: 内部でも、画面に出る目印の数が ${NEAR_LABEL_LIMIT} 以下（内部と外で同じ規則）`, ['inside', 'deep'].every((k) => r[k].labels.visible <= NEAR_LABEL_LIMIT),
+        ['inside', 'deep'].map((k) => `${k} ${r[k].labels.visible} 個`).join('、'));
       check(`${id} home: 目印の数が変更前と同じ（${HOME_LABELS_BEFORE[id]} 個）`, r.home.labels.visible === HOME_LABELS_BEFORE[id], `${r.home.labels.visible} 個`);
       check(`${id}: 表示中の目印の矩形と単語の矩形が重ならない（全視点）`, ['home', 'near', 'edge', 'inside', 'deep'].every((k) => r[k].overlaps === 0),
         ['home', 'near', 'edge', 'inside', 'deep'].map((k) => r[k].overlaps).join(','));

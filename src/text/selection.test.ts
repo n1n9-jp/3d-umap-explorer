@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
 import {
-  DEFAULT_SELECT_PARAMS, DEFAULT_TEXT_SIZE, NATURAL_TEXT_SIZE, rectsOverlap, selectWords, stepOpacities, textSizePx,
+  DEFAULT_SELECT_PARAMS, DEFAULT_TEXT_SIZE, NATURAL_TEXT_SIZE, placeWordRect, rectsOverlap, selectWords, stepOpacities, textSizePx,
   type SelectInput, type WordBox, type WordSelectParams,
 } from './selection';
 
@@ -245,5 +245,55 @@ describe('selectWords（文字の高さの写し方と障害物）', () => {
     const left = r0.words.find((w) => w.index === 0)!.rect;
     const r = selectWords(input([[0, 0, -0.5], [0.15, 0, -0.5]], { obstacles: [left] }));
     expect(ids(r)).toEqual([1]);
+  });
+});
+
+describe('placeWordRect（いまの視点での矩形）', () => {
+  it('選んだときの矩形と、同じ視点なら一致する', () => {
+    const pts = [[0.02, 0.01, -0.4], [-0.05, 0.03, -0.9]];
+    const r = selectWords(input(pts, {}, { size: DEFAULT_TEXT_SIZE, minNaturalPx: 5, keepMinNaturalPx: 4.5 }));
+    expect(r.words.length).toBe(2);
+    for (const w of r.words) {
+      const p = placeWordRect(view(), pts[w.index]![0]!, pts[w.index]![1]!, pts[w.index]![2]!, BOX, 0.01, DEFAULT_TEXT_SIZE)!;
+      expect(p.rect.x).toBeCloseTo(w.rect.x, 9);
+      expect(p.rect.y).toBeCloseTo(w.rect.y, 9);
+      expect(p.rect.width).toBeCloseTo(w.rect.width, 9);
+      expect(p.textPx).toBeCloseTo(w.textPx, 9);
+    }
+  });
+  it('カメラが回ると、矩形はいまの視点の位置へ動く。カメラの後ろに回れば null', () => {
+    const p = [0, 0, -0.5];
+    const a = placeWordRect(view(), p[0]!, p[1]!, p[2]!, BOX, 0.01, DEFAULT_TEXT_SIZE)!;
+    expect(a.anchorX).toBeCloseTo(W / 2, 6);
+    const turned = view(new THREE.Vector3(0, 0, 0), new THREE.Vector3(0.2, 0, -1)); // 右へ向く → 点は左へ動く
+    const b = placeWordRect(turned, p[0]!, p[1]!, p[2]!, BOX, 0.01, DEFAULT_TEXT_SIZE)!;
+    expect(b.anchorX).toBeLessThan(a.anchorX - 50);
+    const back = view(new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, 1)); // 真後ろを向く
+    expect(placeWordRect(back, p[0]!, p[1]!, p[2]!, BOX, 0.01, DEFAULT_TEXT_SIZE)).toBeNull();
+  });
+});
+
+describe('selectWords（カメラが速く動く間の余裕）', () => {
+  const params = { size: DEFAULT_TEXT_SIZE, minNaturalPx: 5, keepMinNaturalPx: 4.5 };
+  it('障害物との間隔に motionMarginPx を足す（新しく出す単語も、表示中の単語も、動いて重なる手前から外す）', () => {
+    const pts = [[0, 0, -0.5]];
+    const base = selectWords(input(pts, {}, params));
+    const w = base.words[0]!;
+    // 矩形の右端から 20px 離れた障害物
+    const obstacle = { x: w.rect.x + w.rect.width / 2 + 20 + 10, y: w.rect.y, width: 20, height: 20 };
+    const none = selectWords(input(pts, { obstacles: [obstacle] }, params));
+    expect(ids(none)).toEqual([0]);
+    const margin = selectWords(input(pts, { obstacles: [obstacle], motionMarginPx: 30 }, params));
+    expect(ids(margin)).toEqual([]);
+    const keptNone = selectWords(input(pts, { obstacles: [obstacle], shown: new Set([0]) }, params));
+    expect(ids(keptNone)).toEqual([0]);
+    const keptMargin = selectWords(input(pts, { obstacles: [obstacle], shown: new Set([0]), motionMarginPx: 30 }, params));
+    expect(ids(keptMargin)).toEqual([]);
+  });
+  it('余裕が 0 や負なら、これまでと同じ', () => {
+    const pts = [[0, 0, -0.5], [0.05, 0, -0.7]];
+    const a = selectWords(input(pts, {}, params));
+    expect(ids(selectWords(input(pts, { motionMarginPx: 0 }, params)))).toEqual(ids(a));
+    expect(ids(selectWords(input(pts, { motionMarginPx: -5 }, params)))).toEqual(ids(a));
   });
 });

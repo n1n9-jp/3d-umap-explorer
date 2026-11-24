@@ -111,6 +111,11 @@ export interface SelectInput {
   shown: ReadonlySet<number>;
   /** 単語を重ねない画面上の領域（UI の要素・目印など。CSS ピクセル） */
   obstacles?: readonly ScreenRect[];
+  /**
+   * カメラが速く動いているとき、次の選び直しまでに単語が画面上で動く量の見込み（CSS ピクセル）。
+   * 障害物との間隔に足して（表示中の単語にも）、動いて重なる手前から外し始める。既定 0
+   */
+  motionMarginPx?: number;
   params: WordSelectParams;
 }
 
@@ -163,10 +168,43 @@ export function projectPoint(v: SelectView, x: number, y: number, z: number):
   return { vx, vy, vz, ndcX: cx / cw, ndcY: cy / cw };
 }
 
+/** 現在の視点での単語の画面上の位置と矩形。カメラの後ろ（または真横）なら null。 */
+export interface PlacedRect {
+  rect: ScreenRect;
+  anchorX: number;
+  anchorY: number;
+  textPx: number;
+  naturalPx: number;
+  distance: number;
+}
+
+/**
+ * 点 (x, y, z) の単語（矩形 `b`）を、視点 `view` で画面へ置いたときの矩形。`selectWords` が使う式と同じで、
+ * 選んだあとにカメラが動いても、いまの視点での矩形（描かれている文字の位置）を求められる。
+ */
+export function placeWordRect(view: SelectView, x: number, y: number, z: number, b: WordBox, emWorld: number, size: TextSizeParams): PlacedRect | null {
+  const q = projectPoint(view, x, y, z);
+  if (!q) return null;
+  const naturalPx = emWorld * 0.5 * view.height * view.projection[5]! / -q.vz;
+  const textPx = textSizePx(naturalPx, size);
+  const anchorX = (q.ndcX + 1) / 2 * view.width;
+  const anchorY = (1 - q.ndcY) / 2 * view.height;
+  return {
+    rect: {
+      x: anchorX + (b.left + b.right) / 2 * textPx,
+      y: anchorY - (b.top + b.bottom) / 2 * textPx,
+      width: (b.right - b.left) * textPx,
+      height: (b.top - b.bottom) * textPx,
+    },
+    anchorX, anchorY, textPx, naturalPx, distance: Math.hypot(q.vx, q.vy, q.vz),
+  };
+}
+
 /** 表示する単語を選ぶ。 */
 export function selectWords(input: SelectInput): SelectResult {
   const { candidates, positions, view, emWorld, nearLimit, shown, params } = input;
   const obstacles = input.obstacles ?? [];
+  const motionMargin = Math.max(0, input.motionMarginPx ?? 0);
   const items: (PlacedWord & { rank: number; wasShown: boolean })[] = [];
   const p5 = view.projection[5]!;
   for (let k = 0; k < candidates.length; k++) {
@@ -195,7 +233,7 @@ export function selectWords(input: SelectInput): SelectResult {
     // 新しく出す単語は、画面の端で切れないものだけ。表示中の単語は、矩形のはみ出しが視錐台の余白（画面の半分 × keepFrustumMargin）までなら残す
     const mx = wasShown ? params.keepFrustumMargin * view.width / 2 : 0, my = wasShown ? params.keepFrustumMargin * view.height / 2 : 0;
     if (rect.x - rect.width / 2 < -mx || rect.x + rect.width / 2 > view.width + mx || rect.y - rect.height / 2 < -my || rect.y + rect.height / 2 > view.height + my) continue;
-    const og = wasShown ? Math.min(params.stayGapPx, params.obstacleGapPx) : params.obstacleGapPx;
+    const og = (wasShown ? Math.min(params.stayGapPx, params.obstacleGapPx) : params.obstacleGapPx) + motionMargin;
     if (obstacles.some((o) => rectsOverlap(rect, o, og))) continue;
     items.push({ index: i, rect, distance, textPx, naturalPx, anchorX, anchorY, wasShown, rank: wasShown ? distance * (1 - params.stickiness) : distance });
   }
