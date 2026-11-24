@@ -150,6 +150,8 @@ export class CameraRig {
   private reorient: Reorient | null = null;
   /** 切り替えた瞬間に残っていた移動の速度と回転の慣性（時定数 0.15 秒で減らして消す）。 */
   private readonly residual = new ResidualMotion();
+  /** 向き直しを中断した押下（`onTransitionPointerDown`）。残った回転を止めた押下は `residual` が覚える。 */
+  private reorientCancelledBy: object | null = null;
 
   constructor(camera: PerspectiveCamera, domElement: HTMLElement, center: Vector3, options: CameraRigOptions = {}) {
     this.camera = camera;
@@ -350,9 +352,17 @@ export class CameraRig {
    * 押下 `e`（pointerdown）が、回転の慣性を止めた押下か（現在のモードの操作）。点のクリックの判定が、
    * 慣性を止めるための押下を、選択・選択の解除・ダブルクリックのどれにも数えないために使う。
    * 飛行・俯瞰のカメラ操作と、このメソッドを呼ぶリスナーの登録順によらず、同じ答えになる。
+   * モードの切り替えで残った回転と、向き直し（左ボタンの押下で中断する）を止めた押下も数える。
+   * 残った移動の速度だけの最中の押下は、押しても止まらない（飛行モードの滑走の最中の押下と同じ）ので、数えない。
    */
   pressStopsInertia(e: Event): boolean {
-    return this.fly.pressStopsInertia(e) || this.overview.pressStopsInertia(e);
+    return (
+      this.fly.pressStopsInertia(e) ||
+      this.overview.pressStopsInertia(e) ||
+      this.residual.isRotationStoppedBy(e) ||
+      this.reorientCancelledBy === e ||
+      (this.reorient !== null && (e as Partial<PointerEvent>).button === 0)
+    );
   }
 
   /** 回転の慣性を止める（飛行・俯瞰の両方。位置と向きはそのまま）。 */
@@ -619,10 +629,17 @@ export class CameraRig {
     if (this.flight && this._mode === 'overview' && e.deltaY !== 0) this.cancelHome();
   };
 
-  /** ポインタを押したら、残った回転は止める（慣性と同じ）。左ボタンのドラッグなら、向き直しも中断する。 */
+  /**
+   * ポインタを押したら、残った回転は止める（慣性と同じ）。左ボタンのドラッグなら、向き直しも中断する。
+   * 止めた押下は覚えて、クリックの判定（`pressStopsInertia`）が「動きを止めるための押下」を点のクリックに数えないようにする。
+   */
   private readonly onTransitionPointerDown = (e: PointerEvent): void => {
-    this.residual.stopRotation();
-    if (this.reorient && e.button === 0) this.cancelReorient();
+    this.residual.stopRotationByPress(e);
+    this.reorientCancelledBy = null;
+    if (this.reorient && e.button === 0) {
+      this.reorientCancelledBy = e;
+      this.cancelReorient();
+    }
   };
 
   /**

@@ -192,7 +192,7 @@ const sameView = (a, b) => angleBetween(a.direction, b.direction) < 1e-9 && len(
 
 /**
  * モードを切り替えたあと、向き直しと、残った動きの減衰がすべて終わる（連続した 2 標本で位置と向きが同じになる）まで待つ。
- * 残った移動の速度は時定数 0.15 秒で減り、1e-5 単位/秒を下回ると止まる（基準速度 0.45 で約 1.6 秒）。
+ * 残った移動の速度は時定数 0.15 秒で減り、切り替えた瞬間の 3% になる時刻（約 0.53 秒）で止まる。
  */
 async function sampleUntilStill(page, maxSimSeconds = 4) {
   return sampleUntil(page, (s, all) => all.length >= 2 && !s.reorienting && !s.rotating && sameView(all[all.length - 2], s), maxSimSeconds);
@@ -450,7 +450,7 @@ async function testModes(page, view, centerOf) {
 
 /**
  * W で基準速度に達してから O を押すと、移動の速度は急に止まらず、時定数 0.15 秒で減りながら進み、やがて止まる
- * （総距離は 速度 × 0.15 秒）。進む向きは、押していた向き（視線）。
+ * （総距離は 速度 × 0.15 秒 × (1 − 0.03)）。約 0.53 秒で止まり、settling は模擬の時間で 0.6 秒以内に消える。進む向きは、押していた向き（視線）。
  */
 async function testResidualMovement(page) {
   console.log('\n[切り替えた瞬間に残っている移動の速度]');
@@ -469,11 +469,15 @@ async function testResidualMovement(page) {
   const q = await sampleUntilStill(page);
   const last = q[q.length - 1];
   const moved = sub(last.position, pre.position);
-  const total = pre.effectiveSpeed * 0.15; // 基準速度 × 時定数
-  check('飛行 → 俯瞰: 切り替えの瞬間は跳ばず、そのあと移動の速度は急に止まらず、減りながら進んで止まる（総距離は 速度 × 0.15 秒）',
+  const total = pre.effectiveSpeed * 0.15 * (1 - 0.03); // 基準速度 × 時定数 × (1 − 止める比)
+  check('飛行 → 俯瞰: 切り替えの瞬間は跳ばず、そのあと移動の速度は急に止まらず、減りながら進んで止まる（総距離は 速度 × 0.15 秒 × (1 − 0.03)）',
     post.mode === 'overview' && len(sub(post.position, pre.position)) < 1e-9 && !q.timedOut &&
     len(sub(q[0].position, pre.position)) > 1e-4 && len(moved) > total * 0.95 && len(moved) < total * 1.001 && cos(moved, pre.direction) > 0.999,
     `実速度 ${pre.effectiveSpeed.toFixed(3)} → 総距離 ${len(moved).toFixed(4)}（見込み ${total.toFixed(4)}）、最初の標本までの移動 ${len(sub(q[0].position, pre.position)).toFixed(4)}、進んだ向きと視線の cos ${cos(moved, pre.direction).toFixed(4)}`);
+  const cleared = q.find((s) => !s.settling);
+  check('settling は、模擬の時間で 0.6 秒以内に消える（切り替えた瞬間の速さの 3% になる約 0.53 秒で止まる）。それまでは true',
+    cleared !== undefined && cleared.simSeconds <= 0.6 && q.slice(0, q.indexOf(cleared)).every((s) => s.settling),
+    cleared ? `settling が消えた標本の模擬の時間（下限） ${cleared.simSeconds.toFixed(3)} 秒` : 'settling が消えない');
   check('残った動きが消えたあと、位置も向きも変わらない（rotating も reorienting も false）', (await staysStill(page, 4)) && !last.reorienting);
   await page.keyboard.press('KeyO');
   await page.waitForFunction(() => window.__explorer.getState().mode === 'fly');
@@ -617,8 +621,11 @@ async function testMotionCombos(page, center) {
   check('滑走中に O で俯瞰へ切り替えると、滑走は終わり（gliding が false）、残った動き（settling）になる',
     g.post.mode === 'overview' && !g.post.moveInertia.gliding && g.post.settling && len(sub(g.post.position, g.pre.position)) < 1e-9, JSON.stringify({ gliding: g.post.moveInertia.gliding, settling: g.post.settling }));
   check('滑走中の O のあとに進む距離は、O の時点の速さ × 0.15 秒（滑走の 0.5 秒を引き継がない）',
-    !q.timedOut && moved > v0 * Math.exp(-0.1 / 0.5) * 0.15 * 0.95 && moved < v0 * 0.15 * 1.001,
-    `O のあとの距離 ${moved.toFixed(4)}（見込み ${(v0 * Math.exp(-0.1 / 0.5) * 0.15).toFixed(4)}〜${(v0 * 0.15).toFixed(4)}。滑走を引き継げば約 ${(v0 * 0.5).toFixed(4)}）`);
+    !q.timedOut && moved > v0 * Math.exp(-0.1 / 0.5) * 0.15 * 0.97 * 0.95 && moved < v0 * 0.15 * 0.97 * 1.001,
+    `O のあとの距離 ${moved.toFixed(4)}（見込み ${(v0 * Math.exp(-0.1 / 0.5) * 0.15 * 0.97).toFixed(4)}〜${(v0 * 0.15 * 0.97).toFixed(4)}。滑走を引き継げば約 ${(v0 * 0.5).toFixed(4)}）`);
+  const clearedG = q.find((s) => !s.settling);
+  check('滑走中の O のあとも、settling は模擬の時間で 0.6 秒以内に消える',
+    clearedG !== undefined && clearedG.simSeconds <= 0.6, clearedG ? `settling が消えた標本の模擬の時間（下限） ${clearedG.simSeconds.toFixed(3)} 秒` : 'settling が消えない');
   // 状態が「止まった」と言うまでの標本では、位置が動いていれば settling（または reorienting）が true
   const movingButStill = q.filter((s, i) => i > 0 && len(sub(s.position, q[i - 1].position)) > 0 && !s.settling && !s.reorienting && !q[i - 1].settling && !q[i - 1].reorienting);
   check('残った動きが消えるまでは settling が true で、止まった（settling も reorienting も false）あとは位置も向きも変わらない',
@@ -931,6 +938,8 @@ async function testInertiaFly(page, inside) {
   check('慣性の間に O でモードを切り替えると、操作の慣性は止まり、残った回転は短い時間で消えて、そのあとは回らない',
     m0.mode === 'overview' && !m0.rotating && !mq.timedOut && !m1.rotating && !m1.reorienting && len(sub(m0.position, m1.position)) < 1e-9 && (await staysStill(page)),
     `位置の差 ${len(sub(m0.position, m1.position)).toExponential(1)}、模擬の時間 ${m1.simSeconds.toFixed(2)} 秒以上`);
+  const mc = mq.find((x) => !x.settling);
+  check('残った回転の settling は、模擬の時間で 0.6 秒以内に消える', mc !== undefined && mc.simSeconds <= 0.6, mc ? `${mc.simSeconds.toFixed(3)} 秒（下限）` : 'settling が消えない');
   await page.keyboard.press('KeyO');
   await page.waitForFunction(() => window.__explorer.getState().mode === 'fly');
   await frames(page, 2);
@@ -1076,6 +1085,8 @@ async function testInertiaOverview(page, center) {
   check('俯瞰モードの慣性の間に O で飛行モードへ切り替えると、操作の慣性は止まり、残った周回は中心のまわりで短い時間で消える',
     !r0.rotating && !rq.timedOut && !r1.rotating && [r0, ...rq].every((s) => Math.abs(len(sub(s.position, center)) - d0) < 1e-4) && (await staysStill(page)),
     `中心までの距離 ${d0.toFixed(4)} → ${len(sub(r1.position, center)).toFixed(4)}、模擬の時間 ${r1.simSeconds.toFixed(2)} 秒以上`);
+  const rc = rq.find((x) => !x.settling);
+  check('残った周回の settling は、模擬の時間で 0.6 秒以内に消える', rc !== undefined && rc.simSeconds <= 0.6, rc ? `${rc.simSeconds.toFixed(3)} 秒（下限）` : 'settling が消えない');
 }
 
 async function testInertiaReducedMotion(browser, base, center) {

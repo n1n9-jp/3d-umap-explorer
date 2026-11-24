@@ -105,28 +105,73 @@ describe('Reorient', () => {
 });
 
 describe('ResidualMotion', () => {
-  const total = (motion: ResidualMotion, dt: number, seconds: number) => {
+  /** 止まる（active が false になる）までの、模擬の時間（秒）と、そのあいだの動きの総量。 */
+  const runUntilStopped = (motion: ResidualMotion, dt: number, limit = 4) => {
     const sum = new Vector3();
     let yaw = 0;
     let pitch = 0;
-    for (let t = 0; t < seconds - 1e-12; t += dt) {
+    let t = 0;
+    while (motion.active && t < limit) {
       const s = motion.step(dt);
       sum.add(s.translation);
       yaw += s.dYaw;
       pitch += s.dPitch;
+      t += dt;
     }
-    return { sum, yaw, pitch };
+    return { sum, yaw, pitch, seconds: t };
   };
+  const STOP_AT = 0.15 * Math.log(1 / 0.03); // 速さが切り替えた瞬間の 3% になる時刻（約 0.526 秒）
 
-  it('移動の速度は時定数 0.15 秒で減り、総距離は v0 × τ。刻み幅によらない', () => {
-    for (const dt of [1 / 240, 1 / 60, 0.05, 0.1]) {
+  it('移動の速度は時定数 0.15 秒で減り、0.6 秒以内に 0 になる。総距離は v0 × τ × (1 − 0.03)', () => {
+    for (const dt of [1 / 240, 1 / 120, 1 / 60, 1 / 30, 0.1]) {
       const m = new ResidualMotion();
       m.addVelocity(new Vector3(0.4, 0, -0.3)); // 速さ 0.5
-      const { sum } = total(m, dt, 4);
-      expect(sum.length()).toBeCloseTo(0.5 * 0.15, 5);
+      const { sum, seconds } = runUntilStopped(m, dt);
+      expect(seconds).toBeLessThanOrEqual(0.6 + 1e-9); // dt = 0.1 では、止まる時刻 0.526 秒を含む 6 フレーム目（0.6 秒）で止まる
+      expect(seconds).toBeGreaterThanOrEqual(STOP_AT - 1e-9);
+      expect(sum.length()).toBeCloseTo(0.5 * 0.15 * (1 - 0.03), 9);
       expect(sum.clone().normalize().distanceTo(new Vector3(0.8, 0, -0.6))).toBeLessThan(1e-9);
       expect(m.active).toBe(false);
+      expect(m.moving).toBe(false);
     }
+  });
+
+  it('止まる位置と向きは、刻み幅によらず一致する（dt = 1/120・1/60・1/30・0.1）', () => {
+    const results = [1 / 120, 1 / 60, 1 / 30, 0.1].map((dt) => {
+      const m = new ResidualMotion();
+      m.addVelocity(new Vector3(0.3, -0.2, 0.1));
+      m.setRotation(1.5, -0.8, true);
+      const r = runUntilStopped(m, dt);
+      expect(r.seconds).toBeLessThan(0.6 + dt);
+      expect(m.active).toBe(false);
+      return r;
+    });
+    const [ref, ...rest] = results as [(typeof results)[0], ...typeof results];
+    for (const r of rest) {
+      expect(r.sum.distanceTo(ref.sum)).toBeLessThan(1e-9);
+      expect(r.yaw).toBeCloseTo(ref.yaw, 9);
+      expect(r.pitch).toBeCloseTo(ref.pitch, 9);
+    }
+    // 回転の総量は rate × τ × (1 − 0.03)
+    expect(ref.yaw).toBeCloseTo(1.5 * 0.15 * 0.97, 9);
+    expect(ref.pitch).toBeCloseTo(-0.8 * 0.15 * 0.97, 9);
+  });
+
+  it('止まるフレームの移動も返す（カメラへ反映できる）。止まったあとは何も動かさない', () => {
+    const m = new ResidualMotion();
+    m.addVelocity(new Vector3(1, 0, 0));
+    let last = 0;
+    let stoppedStep = -1;
+    for (let i = 0; i < 60; i++) {
+      const s = m.step(0.1);
+      if (!m.active && stoppedStep < 0) {
+        stoppedStep = i;
+        last = s.translation.x;
+      }
+    }
+    expect(stoppedStep).toBe(5); // 0.526 秒は 6 フレーム目（0.5〜0.6）で止まる
+    expect(last).toBeGreaterThan(0); // 止まるフレームにも、その時刻までの移動がある
+    expect(m.step(0.1).translation.length()).toBe(0);
   });
 
   it('毎フレームの移動量は exp(−dt/τ) の比で減る', () => {
@@ -137,16 +182,24 @@ describe('ResidualMotion', () => {
     expect(b / a).toBeCloseTo(Math.exp(-1 / 60 / 0.15), 9);
   });
 
-  it('回転の角速度も時定数 0.15 秒で減り、総回転は rate × τ（stopSpeed 分を除く）。ヨーとピッチは別々に積算される', () => {
+  it('回転の角速度も時定数 0.15 秒で減り、0.6 秒以内に 0 になる。ヨーとピッチは別々に積算される', () => {
     const m = new ResidualMotion();
     m.setRotation(2, -1, false);
     expect(m.rotating).toBe(true);
     expect(m.orbit).toBe(false);
-    const { yaw, pitch } = total(m, 1 / 60, 4);
-    expect(yaw).toBeGreaterThan(2 * 0.15 * 0.97);
-    expect(yaw).toBeLessThanOrEqual(2 * 0.15 + 1e-9);
-    expect(pitch).toBeLessThan(-1 * 0.15 * 0.97);
+    const { yaw, pitch, seconds } = runUntilStopped(m, 1 / 60);
+    expect(seconds).toBeLessThan(0.6);
+    expect(yaw).toBeCloseTo(2 * 0.15 * 0.97, 9);
+    expect(pitch).toBeCloseTo(-1 * 0.15 * 0.97, 9);
     expect(m.active).toBe(false);
+  });
+
+  it('角速度が小さいとき、止める閾値は絶対値の下限（0.02 ラジアン/秒）。それでも 0.6 秒以内に止まる', () => {
+    const m = new ResidualMotion();
+    m.setRotation(0.1, 0, false); // 0.1 の 3% は 0.003 < 0.02
+    const { yaw, seconds } = runUntilStopped(m, 1 / 60);
+    expect(seconds).toBeLessThan(0.6);
+    expect(yaw).toBeCloseTo(0.15 * (0.1 - 0.02), 9);
   });
 
   it('引き継ぐ角速度に上限を掛けない（元の慣性が決めた値のまま）', () => {
@@ -157,12 +210,44 @@ describe('ResidualMotion', () => {
     expect(s.dYaw).toBeCloseTo(9 * 0.15 * (1 - Math.exp(-1 / 60 / 0.15)), 9);
   });
 
-  it('小さすぎる速度・角速度は残さない', () => {
+  it('小さすぎる速度・角速度は残さない。ごく小さい初速は、すぐ 0 になる', () => {
     const m = new ResidualMotion();
     m.addVelocity(new Vector3(1e-6, 0, 0));
     m.setRotation(0.001, 0, false);
     expect(m.active).toBe(false);
     expect(m.step(0.1).translation.length()).toBe(0);
+    // 絶対値の閾値（1e-5）をわずかに上回る初速は、残って、1 回で 0 になる（閾値は初速の 3% ではなく下限）
+    m.addVelocity(new Vector3(2e-5, 0, 0));
+    expect(m.moving).toBe(true);
+    const s = m.step(0.2); // 止まる時刻 0.15 × ln 2 = 0.10 秒を含む区間
+    expect(s.translation.x).toBeGreaterThan(0);
+    expect(s.translation.x).toBeLessThan(2e-5 * 0.15);
+    expect(m.active).toBe(false);
+  });
+
+  it('止める押下: 回転を止めた押下は覚え、止めるものがない押下は false。まだ回っているときは、これから止めるので true', () => {
+    const m = new ResidualMotion();
+    const p0 = {};
+    const p1 = {};
+    expect(m.stopRotationByPress(p0)).toBe(false); // 回っていない
+    expect(m.isRotationStoppedBy(p0)).toBe(false);
+    m.setRotation(1, 0, false);
+    expect(m.isRotationStoppedBy(p0)).toBe(true); // まだ回っている（リスナーの順によらない）
+    expect(m.stopRotationByPress(p1)).toBe(true);
+    expect(m.rotating).toBe(false);
+    expect(m.isRotationStoppedBy(p1)).toBe(true); // 止めた押下
+    expect(m.isRotationStoppedBy(p0)).toBe(false); // ほかの押下は違う
+    expect(m.stopRotationByPress(p0)).toBe(false); // 止めるものがない押下は、覚えを置き換える
+    expect(m.isRotationStoppedBy(p1)).toBe(false);
+  });
+
+  it('残った移動だけの最中の押下は、回転を止めたことにならない', () => {
+    const m = new ResidualMotion();
+    m.addVelocity(new Vector3(1, 0, 0));
+    const p = {};
+    expect(m.stopRotationByPress(p)).toBe(false);
+    expect(m.isRotationStoppedBy(p)).toBe(false);
+    expect(m.moving).toBe(true);
   });
 
   it('stop・stopRotation・blockPitch', () => {
@@ -170,7 +255,7 @@ describe('ResidualMotion', () => {
     m.addVelocity(new Vector3(1, 0, 0));
     m.setRotation(1, 1, false);
     m.blockPitch();
-    expect(m.step(0.1).dPitch).toBe(0);
+    expect(m.step(0.01).dPitch).toBe(0);
     m.stopRotation();
     expect(m.rotating).toBe(false);
     expect(m.moving).toBe(true);

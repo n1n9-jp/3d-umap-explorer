@@ -610,8 +610,130 @@ describe('CameraRig: 慣性を止めた押下はクリックに数えない', ()
       });
     }
   }
+
+  // モードの切り替えで残った回転・向き直しを止める押下
+  for (const order of ['before', 'after'] as const) {
+    describe(`切り替えの残った動き・クリックの判定のリスナーがカメラ操作の${order === 'before' ? '前' : '後'}`, () => {
+      const dt = 1 / 60;
+
+      for (const [from, to] of [['fly', 'overview'], ['overview', 'fly']] as const) {
+        it(`${from} → ${to}: 残った回転を止めた押下は pressStopsInertia が true で、クリックに数えない。次の押下は通常どおりクリック`, () => {
+          const { el, rig, releases } = createWired(order, from);
+          flick(el);
+          rig.update(dt);
+          rig.setMode(to);
+          rig.update(dt);
+          expect(rig.getState().settling).toBe(true);
+          expect(rig.getState().rotating).toBe(false); // 慣性ではなく、残った回転
+          releases.length = 0;
+
+          el.emit('pointerdown', { button: 0, pointerId: 2, clientX: 400, clientY: 300, timeStamp: 3000 });
+          el.emit('pointerup', { pointerId: 2, clientX: 400, clientY: 300, timeStamp: 3040 });
+          expect(releases).toEqual([{ kind: 'stop' }]);
+          expect(rig.getState().settling).toBe(false); // 回転を止めた（移動の速度はない）
+
+          el.emit('pointerdown', { button: 0, pointerId: 3, clientX: 400, clientY: 300, timeStamp: 3100 });
+          el.emit('pointerup', { pointerId: 3, clientX: 400, clientY: 300, timeStamp: 3140 });
+          expect(releases[1]).toEqual({ kind: 'click', x: 400, y: 300, double: false });
+        });
+
+        it(`${from} → ${to}: 残った回転が自然に止まったあとの押下は、通常どおりクリック`, () => {
+          const { el, rig, releases } = createWired(order, from);
+          flick(el);
+          rig.update(dt);
+          rig.setMode(to);
+          for (let i = 0; i < 36; i++) rig.update(dt); // 0.6 秒
+          expect(rig.getState().settling).toBe(false);
+          releases.length = 0;
+          el.emit('pointerdown', { button: 0, pointerId: 2, clientX: 50, clientY: 50, timeStamp: 9000 });
+          el.emit('pointerup', { pointerId: 2, clientX: 50, clientY: 50, timeStamp: 9030 });
+          expect(releases).toEqual([{ kind: 'click', x: 50, y: 50, double: false }]);
+        });
+      }
+
+      it('止めるものがない押下は false', () => {
+        const { rig } = createWired(order, 'fly');
+        expect(rig.pressStopsInertia({ button: 0 } as unknown as Event)).toBe(false);
+      });
+
+      it('残った移動の速度だけの最中の押下は、止めずにクリックとして数える（滑走の最中の押下と同じ）', () => {
+        const { camera, el, rig, releases } = createWired(order, 'fly');
+        const win = (el.ownerDocument as { defaultView: FakeTarget }).defaultView;
+        win.emit('keydown', { code: 'KeyW', target: null });
+        for (let i = 0; i < 40; i++) rig.update(0.1);
+        rig.setMode('overview');
+        rig.update(dt);
+        expect(rig.getState().settling).toBe(true);
+        releases.length = 0;
+        el.emit('pointerdown', { button: 0, pointerId: 2, clientX: 400, clientY: 300, timeStamp: 3000 });
+        el.emit('pointerup', { pointerId: 2, clientX: 400, clientY: 300, timeStamp: 3040 });
+        expect(releases).toEqual([{ kind: 'click', x: 400, y: 300, double: false }]);
+        expect(rig.getState().settling).toBe(true); // 押しても、残った移動は止まらない
+        const at = camera.position.clone();
+        rig.update(dt);
+        expect(camera.position.distanceTo(at)).toBeGreaterThan(0);
+      });
+
+      it('向き直しを中断した押下は pressStopsInertia が true で、クリックに数えない。左以外のボタンでは中断しないので false', () => {
+        const { el, rig, releases } = createWired(order, 'fly');
+        rig.setView({ pos: [0, 0, 2], look: [5, 0, 2] }); // 中心は 90° ずれている
+        rig.setMode('overview');
+        expect(rig.getState().reorienting).toBe(true);
+        expect(rig.pressStopsInertia({ button: 2 } as unknown as Event)).toBe(false);
+        releases.length = 0;
+        el.emit('pointerdown', { button: 0, pointerId: 2, clientX: 400, clientY: 300, timeStamp: 3000 });
+        expect(rig.getState().reorienting).toBe(false);
+        el.emit('pointerup', { pointerId: 2, clientX: 400, clientY: 300, timeStamp: 3040 });
+        expect(releases).toEqual([{ kind: 'stop' }]);
+        el.emit('pointerdown', { button: 0, pointerId: 3, clientX: 400, clientY: 300, timeStamp: 3100 });
+        el.emit('pointerup', { pointerId: 3, clientX: 400, clientY: 300, timeStamp: 3140 });
+        expect(releases[1]).toEqual({ kind: 'click', x: 400, y: 300, double: false });
+      });
+    });
+  }
 });
 
+describe('CameraRig: 残った動きは 0.6 秒以内に消え、止まる位置と向きは刻み幅によらない', () => {
+  function cruise(rig: CameraRig, win: FakeTarget): void {
+    win.emit('keydown', { code: 'KeyW', target: null });
+    for (let i = 0; i < 40; i++) rig.update(0.1);
+  }
+
+  it('移動と回転が残った切り替えでも、settling が 0.6 秒以内に false になり、dt を変えても同じ位置・同じ向きで止まる', () => {
+    const results = [1 / 120, 1 / 60, 1 / 30, 0.1].map((dt) => {
+      const { camera, win, el, rig } = createRig();
+      rig.setView({ pos: [0, 0, 5], look: [0, 0, 0] }); // 中心を向いたまま、中心へ進む
+      cruise(rig, win);
+      // 向き直し（3° 以上のずれ）にならない小さな回転の慣性を付けて、すぐ切り替える
+      let t = 1000;
+      el.emit('pointerdown', { button: 0, pointerId: 1, clientX: 100, clientY: 100, timeStamp: t });
+      for (let i = 1; i <= 6; i++) {
+        t += 16;
+        el.emit('pointermove', { pointerId: 1, clientX: 100 + 2 * i, clientY: 100, timeStamp: t });
+      }
+      el.emit('pointerup', { pointerId: 1, timeStamp: t });
+      expect(Math.abs(rig.fly.getResidualMotion().yawRate)).toBeGreaterThan(0.1);
+      rig.setMode('overview');
+      expect(rig.getState().reorienting).toBe(false);
+      expect(rig.getState().settling).toBe(true);
+      let seconds = 0;
+      while (rig.getState().settling && seconds < 2) {
+        rig.update(dt);
+        seconds += dt;
+      }
+      expect(seconds).toBeLessThanOrEqual(0.6 + 1e-9);
+      const position = camera.position.clone();
+      const dir = forward(camera).clone();
+      for (let i = 0; i < 10; i++) rig.update(dt);
+      expect(camera.position.distanceTo(position)).toBe(0);
+      return { position, dir };
+    });
+    for (const r of results.slice(1)) {
+      expect(r.position.distanceTo(results[0]!.position)).toBeLessThan(1e-6);
+      expect(r.dir.distanceTo(results[0]!.dir)).toBeLessThan(1e-6);
+    }
+  });
+});
 
 describe('CameraRig: モードごとの回転の慣性の既定値', () => {
   it('飛行モード 0.35 秒・俯瞰モード 0.45 秒。代入は両方に効き、null でモードごとの既定へ戻る', () => {
@@ -935,11 +1057,14 @@ describe('CameraRig: 切り替えた瞬間に残っている動きを、時定�
       prev = camera.position.clone();
     }
     expect(steps[0]).toBeGreaterThan(0); // 急に止まらない
-    // 毎フレームの移動量は、exp(−dt/τ) の比で減る
-    for (let i = 1; i < 60; i++) expect((steps[i] as number) / (steps[i - 1] as number)).toBeCloseTo(Math.exp(-dt / TAU), 6);
+    // 毎フレームの移動量は、exp(−dt/τ) の比で減る（止まるフレームの前まで）
+    for (let i = 1; i < 30; i++) expect((steps[i] as number) / (steps[i - 1] as number)).toBeCloseTo(Math.exp(-dt / TAU), 6);
+    // 速さが切り替えた瞬間の 3% まで減る時刻 τ·ln(1/0.03)（約 0.526 秒）で止まる。総距離は v0 × τ × (1 − 0.03)
+    const lastMoving = steps.map((d) => d > 0).lastIndexOf(true);
+    expect((lastMoving + 1) * dt).toBeLessThan(0.6);
+    expect(steps[lastMoving]).toBeGreaterThan(0); // 止まるフレームの移動も、カメラへ反映されている
     const total = camera.position.distanceTo(at);
-    expect(total).toBeGreaterThan(v0 * TAU * 0.98);
-    expect(total).toBeLessThan(v0 * TAU * 1.0001);
+    expect(total).toBeCloseTo(v0 * TAU * 0.97, 6);
     // 進んだ向きは、切り替えの瞬間の視線（W の向き）
     expect(camera.position.clone().sub(at).normalize().distanceTo(dir)).toBeLessThan(1e-6);
     // 止まったあとは動かない
@@ -988,10 +1113,10 @@ describe('CameraRig: 切り替えた瞬間に残っている動きを、時定�
     }
     const yaw0 = Math.atan2(-dir.x, -dir.z);
     expect(yaws[0]).toBeLessThan(yaw0); // 切り替えてすぐ止まらず、同じ向きへ回り続ける
-    // 総回転は rate × τ。角速度が stopSpeed（0.02 rad/s）を下回った時点で打ち切るので、その分（stopSpeed × τ）だけ少ない
+    // 総回転は rate × τ × (1 − 0.03)（角速度が切り替えた瞬間の 3% まで減る時刻で止まる）
     const total = yaw0 - (yaws[299] as number);
-    expect(total).toBeLessThanOrEqual(-rate * TAU + 1e-9);
-    expect(total).toBeGreaterThan(-rate * TAU - 0.02 * TAU);
+    expect(total).toBeCloseTo(-rate * TAU * 0.97, 6);
+    expect(yaws.findIndex((y) => y === yaws[299])).toBeLessThan(36); // 0.6 秒以内に止まる
     expect(camera.position.distanceTo(pos)).toBeLessThan(1e-12);
     expect(rig.isRotatingByInertia).toBe(false);
   });
@@ -1059,9 +1184,8 @@ describe('CameraRig: 切り替えた瞬間に残っている動きを、時定�
       rig.update(1 / 60);
       expect(camera.position.length()).toBeCloseTo(r0, 6); // 中心までの距離は保たれる
     }
-    const turned = azimuth() - a0; // 総回転は rate × τ（角速度が stopSpeed を下回った時点で打ち切るので、その分だけ少ない）
-    expect(turned).toBeGreaterThanOrEqual(rate * TAU - 1e-9);
-    expect(turned).toBeLessThan(rate * TAU + 0.02 * TAU);
+    const turned = azimuth() - a0; // 総回転は rate × τ × (1 − 0.03)
+    expect(turned).toBeCloseTo(rate * TAU * 0.97, 6);
     const settled = camera.position.clone();
     for (let i = 0; i < 20; i++) rig.update(1 / 60);
     expect(camera.position.distanceTo(settled)).toBe(0);
@@ -1201,10 +1325,9 @@ describe('CameraRig: 滑走・寄り・モードの切り替えの組み合わ�
       prev = camera.position.clone();
     }
     // 毎フレームの移動量の比は exp(−dt/0.15)（滑走なら exp(−dt/0.5)）
-    for (let i = 1; i < 60; i++) expect((steps[i] as number) / (steps[i - 1] as number)).toBeCloseTo(Math.exp(-dt / TAU), 6);
+    for (let i = 1; i < 30; i++) expect((steps[i] as number) / (steps[i - 1] as number)).toBeCloseTo(Math.exp(-dt / TAU), 6);
     const total = camera.position.distanceTo(at);
-    expect(total).toBeGreaterThan(v * TAU * 0.98);
-    expect(total).toBeLessThan(v * TAU * 1.0001); // 滑走を引き継いでいれば v × 0.5 に近づく
+    expect(total).toBeCloseTo(v * TAU * 0.97, 6); // 滑走を引き継いでいれば v × 0.5 に近づく
     expect(rig.getState().settling).toBe(false);
   });
 
@@ -1520,11 +1643,10 @@ describe('CameraRig: 自動移動と、モードの切り替えの移り変わ�
       steps.push(camera.position.distanceTo(prev));
       prev = camera.position.clone();
     }
-    for (let i = 1; i < 40; i++) expect((steps[i] as number) / (steps[i - 1] as number)).toBeCloseTo(Math.exp(-dt / TAU_SETTLE), 6);
-    // 残った動きで進む距離は v · τ（止まる閾値で打ち切るぶん、わずかに短い）。移動の目標までは進まない
+    for (let i = 1; i < 30; i++) expect((steps[i] as number) / (steps[i - 1] as number)).toBeCloseTo(Math.exp(-dt / TAU_SETTLE), 6);
+    // 残った動きで進む距離は v · τ × (1 − 0.03)（速さが 3% まで減る時刻で止める）。移動の目標までは進まない
     const travelled = camera.position.distanceTo(at);
-    expect(travelled).toBeLessThanOrEqual(vNow * TAU_SETTLE + 1e-9);
-    expect(travelled).toBeGreaterThan(vNow * TAU_SETTLE * 0.99);
+    expect(travelled).toBeCloseTo(vNow * TAU_SETTLE * 0.97, 6);
     expect(rig.getState().settling).toBe(false);
     expect(rig.getState().animating).toBe(false);
     expect(camera.position.z).toBeGreaterThan(-0.45 + 0.1);
