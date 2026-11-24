@@ -123,8 +123,8 @@ async function testStart(browser, base, ds, size, name, shot) {
   if (axes) {
     check(`${name}: 第3軸の方向から見ている`, Math.abs(dot(s.direction, axes[2])) > 0.999, `|向き・第3軸| ${Math.abs(dot(s.direction, axes[2])).toFixed(5)}`);
   }
-  const hud = (await page.evaluate(() => document.getElementById('hud').innerText)).split('\n');
-  check(`${name}: HUD の操作説明に H キーがある`, hud[2].includes('H 全体へ戻る'), JSON.stringify(hud[2]));
+  const help = await page.evaluate(() => window.__explorer.hud.getState().detail[1]); // 操作説明の行（畳んでいても読める）
+  check(`${name}: HUD の操作説明に H キーがある`, help.includes('H 全体へ戻る'), JSON.stringify(help));
   if (shot) {
     await page.screenshot({ path: path.join(outDir, shot) });
     console.log(`スクリーンショット → artifacts/${shot}`);

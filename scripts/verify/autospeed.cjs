@@ -132,7 +132,7 @@ async function openPage(browser, base) {
 const state = (page) => page.evaluate(() => window.__explorer.getState());
 const frames = (page, n) => page.evaluate((k) => window.__explorer.measureFrames(k), n);
 const setView = (page, pos, look) => page.evaluate((v) => window.__explorer.setView(v), { pos, look });
-const hudLine = async (page) => (await page.evaluate(() => document.getElementById('hud').innerText)).split('\n')[1];
+const hudLine = (page) => page.evaluate(() => window.__explorer.hud.getState().summary); // 要約（飛行速度と自動調整）
 
 /**
  * 毎フレーム（アプリの更新の後）getState() を記録する。`stopWithin` 以内にクラスタの中心へ近づくか、
