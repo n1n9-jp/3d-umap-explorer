@@ -694,16 +694,19 @@ async function testInertiaFly(page, inside) {
   // ホバー: 慣性で回っている間は止まり、止まると再開する（カーソルの位置は動かさない）
   console.log('\n[慣性とホバー]');
   let hoverOk = false, detail = '候補の位置が見つからない';
-  for (const y0 of [cy, cy - 120, cy + 120, cy - 220]) {
+  // 慣性の総回転量は時定数で変わる（飛行モード 0.35 秒）。止まったあとのカーソルの下に点がある位置を、候補から探す
+  const candidates = [];
+  for (const dx of [150, 100]) for (const y0 of [cy, cy - 120, cy + 120, cy - 220, cy + 220, cy - 60, cy + 60]) candidates.push([dx, y0]);
+  for (const [dx, y0] of candidates) {
     await setView(page, inside.pos, inside.look);
     await frames(page, 2);
-    await pointerGesture(page, flickPoints(cx - 75, y0, 150, 0), 1);
+    await pointerGesture(page, flickPoints(cx - dx / 2, y0, dx, 0), 1);
     const q = await sampleUntil(page, (x) => !x.rotating);
     await frames(page, 2);
     const rotatingSamples = q.slice(1).filter((x) => x.rotating);
     const hoverDuring = rotatingSamples.map((x) => x.hovered);
     // 止まったあとのカーソルの位置（離した位置）に見える点
-    const want = await page.evaluate(([x, y]) => window.__explorer.pick(x, y).then((r) => (r ? r.index : null)), [cx + 75, y0]);
+    const want = await page.evaluate(([x, y]) => window.__explorer.pick(x, y).then((r) => (r ? r.index : null)), [cx + dx / 2, y0]);
     if (want === null) { detail = `位置 y=${y0} に点がない`; continue; }
     const h = await waitFrames(page, async () => ({ ok: (await page.evaluate(() => window.__explorer.interaction.getState().hovered)) === want }), 6);
     hoverOk = rotatingSamples.length > 0 && hoverDuring.every((x) => x === null) && h.ok;
