@@ -23,6 +23,8 @@
  *     慣性が止まり、選択は変わらない。別の点の上で押して離しても、選択は変わらない。慣性が止まったあと、同じ場所でもう一度
  *     クリックすると、通常どおり選択が変わる。慣性を止めた押下の直後のクリックは、ダブルクリックとして扱われない（点へ飛ばない）。
  *     飛行・俯瞰の両方。目印の上で始まって、目印が canvas へ合成したポインタイベントで慣性を止めた押下も、点のクリックにならない
+ *   - 切り替えで残った回転を止めるための押下: 慣性の最中に O でモードを切り替え、残った回転（settling）の最中に押して離しても、
+ *     選択は変わらず、回転は止まる。止まったあと・残った回転が自然に消えたあとの押下は、通常どおり選択が変わる。飛行 → 俯瞰・俯瞰 → 飛行の両方
  *   - ダブルクリック: その点へ移動し、止まった位置がその点から決めた距離で、点が画面の中央に十分な大きさで見える
  *   - 俯瞰モードでのダブルクリック: 飛行モードへ切り替わって移動する
  *   - コンソールエラーがない
@@ -716,6 +718,118 @@ async function testStopPress(page, mode, view, emptyView, emptyCandidates, point
   await frames(page, 2);
 }
 
+/** キャンバスへ、押して離す操作（pointerdown と pointerup）を同期で送る。`down` の直後の状態を返す。 */
+const PRESS_AND_RELEASE = ({ x, y, id, releaseAfterFrames }) => new Promise((resolve) => {
+  const canvas = [...document.querySelectorAll('canvas')].filter((c) => c.id !== 'info-image').sort((a, b) => b.clientWidth - a.clientWidth)[0];
+  const init = { pointerId: id, pointerType: 'mouse', isPrimary: true, bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y };
+  canvas.dispatchEvent(new PointerEvent('pointerdown', { ...init, button: 0, buttons: 1 }));
+  const afterDown = window.__explorer.getState();
+  const release = () => {
+    canvas.dispatchEvent(new PointerEvent('pointerup', { ...init, button: 0, buttons: 0 }));
+    resolve({ afterDown, afterUp: window.__explorer.getState() });
+  };
+  if (releaseAfterFrames > 0) {
+    let n = 0;
+    const tick = () => { if (++n >= releaseAfterFrames) release(); else requestAnimationFrame(tick); };
+    requestAnimationFrame(tick);
+  } else release();
+});
+
+/**
+ * モードの切り替え（O）の直後に、残った回転を止めるための押下。`from` のモードで点を選択し、慣性を付けて払い、
+ * 慣性の最中に O で切り替える（操作の慣性は止まり、残った回転になる）。
+ * - 残った回転の最中に、別の位置（点の上でも、点のない場所でも）を押して離しても、選択は変わらない。回転は止まる
+ * - 残った回転が止まったあとの同じ位置の押下は、通常どおりクリックとして働く（選択が変わる）
+ * - 残った回転が自然に消えたあとの押下も、通常どおりクリック
+ * O の送信・押下・離すは、同じ評価の中（描画のフレームの間）で行う。ソフトウェア描画では、キー入力の往復の間に残った回転が終わりかねない。
+ */
+async function testStopPressAfterSwitch(page, from, view, candidates) {
+  const name = from === 'fly' ? '飛行 → 俯瞰' : '俯瞰 → 飛行';
+  console.log(`\n[切り替えで残った回転を止めるための押下（${name}）]`);
+  const toMode = from === 'fly' ? 'overview' : 'fly';
+  const setMode = async (m) => {
+    if ((await state(page)).mode === m) return;
+    await page.keyboard.press('KeyO');
+    await page.waitForFunction((want) => window.__explorer.getState().mode === want, m);
+    await waitCameraIdle(page);
+  };
+  await setMode(from);
+  await setView(page, view.pos, view.look);
+  await waitStill(page);
+  const A = await findVisiblePoint(page, { minPx: 3 });
+  if (!A) { check(`${name}: 残った回転を止める押下の検証に使う点が見つかる`, false); return; }
+  /** 点を選択し、払って慣性で回し、慣性の最中に O を送って 1 フレーム進める。残った回転（settling）になっていれば true。 */
+  const prepare = async () => {
+    await setMode(from);
+    await setView(page, view.pos, view.look);
+    await waitStill(page);
+    if (!(await selectByClick(page, A))) return false;
+    if (!(await flickUntilRotating(page, from === 'fly' ? 150 : 120))) return false;
+    await page.evaluate(() => new Promise((resolve) => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyO', bubbles: true }));
+      requestAnimationFrame(() => resolve());
+    }));
+    const st = await state(page);
+    return st.mode === toMode && st.settling && !st.rotating;
+  };
+  const press = (x, y, id, releaseAfterFrames = 0) => page.evaluate(PRESS_AND_RELEASE, { x, y, id, releaseAfterFrames });
+  const settle = async () => { await waitCameraIdle(page); await frames(page, 2); };
+
+  // ---- 残った回転の最中の押下は、クリックにならない。止まったあとの押下は、クリックになる ----
+  // 止まったあとの視点で、押した位置に点がある（クリックなら別の点が選択される）候補を優先する。なければ点のない場所（クリックなら選択が解除される）
+  const tried = [];
+  const trial = async (px, py, needPoint) => {
+    if (!(await prepare())) { check(`${name}: （前提）点を選択して、払って、O で切り替えると、残った回転（settling）になる`, false); return 'abort'; }
+    const before = await state(page);
+    const r = await press(px, py, 61);
+    await frames(page, 5);
+    const sel = await ix(page);
+    const st = await state(page);
+    await settle();
+    const under = await pickAt(page, px, py); // 止まった視点で、押した位置にある点（なければ null）
+    if (under === A.i || (needPoint && under === null)) { tried.push(`(${px},${py})→${under}`); return 'skip'; }
+    check(`${name}: 残った回転の最中に、${under === null ? '点のない場所' : '点の上'}で押して離すと、回転が止まり、選択は変わらない`,
+      before.settling && !r.afterDown.settling && !r.afterUp.settling && !st.settling && sel.selected === A.i && st.mode === toMode,
+      `押す前 settling ${before.settling}、押した直後 ${r.afterDown.settling}、選択 ${sel.selected}（元 ${A.i}）、押した位置 (${px},${py})、止まったあとの位置の点 ${under}`);
+    const dir0 = (await state(page)).direction;
+    await frames(page, 3);
+    check(`${name}: 止まったあとは、向きが変わらない`, angleBetween(dir0, (await state(page)).direction) < 1e-9);
+    await press(px, py, 62);
+    const w = await waitFrames(page, async (pg) => ({ ok: (await ix(pg)).selected === under }), 10);
+    check(`${name}: 残った回転が止まったあとの同じ位置の押下は、通常どおりクリックとして働く（${under === null ? '選択が解除される' : `点 ${under} が選択される`}）`,
+      w.ok && (await state(page)).mode === toMode, `選択 ${(await ix(page)).selected}（期待 ${under}）`);
+    return 'done';
+  };
+  let done = false;
+  for (const needPoint of [true, false]) {
+    for (const [px, py] of candidates) {
+      const r = await trial(px, py, needPoint);
+      if (r === 'abort') return;
+      if (r === 'done') { done = true; break; }
+    }
+    if (done) break;
+  }
+  if (!done) { check(`${name}: 残った回転を止める押下の検証ができる位置が見つかる`, false, tried.join(' ')); return; }
+
+  // ---- 残った回転が自然に消えたあとの押下は、通常どおりクリック ----
+  const [qx, qy] = candidates[0];
+  if (!(await prepare())) { check(`${name}: （前提）点を選択して、払って、O で切り替えると、残った回転（settling）になる`, false); return; }
+  await settle();
+  const natural = await state(page);
+  const want = await pickAt(page, qx, qy);
+  if (want !== A.i) {
+    await press(qx, qy, 63);
+    const w = await waitFrames(page, async (pg) => ({ ok: (await ix(pg)).selected === want }), 10);
+    check(`${name}: 残った回転が自然に消えたあとの押下は、通常どおりクリックとして働く`, !natural.settling && w.ok, `選択 ${(await ix(page)).selected}（期待 ${want}）`);
+  } else {
+    check(`${name}: 残った回転が自然に消えたあとの押下の検証ができる位置がある`, false, `(${qx},${qy}) に元の点がある`);
+  }
+
+  await page.keyboard.press('Escape');
+  await setMode('fly');
+  await frames(page, 2);
+}
+
 /**
  * 目印の上で始まった押下が慣性を止める経路。目印は、押したまま 4 ピクセルを超えて動かすと、押した位置からの pointerdown と
  * 現在位置の pointermove を canvas へ合成して渡す（その時点で慣性が回っていれば、この合成した押下が慣性を止める）。
@@ -981,6 +1095,10 @@ async function main() {
     await testStopPress(page, 'overview', { pos: [1.4, 0.4, 1.5], look: center }, { pos: [1.4, 0.4, 1.5], look: center },
       [[100, 430], [1180, 430], [100, 330], [1180, 330], [100, 520]],
       [[cx + 60, cy + 40], [cx - 120, cy + 60], [cx + 100, cy - 80], [cx - 60, cy - 100], [cx, cy + 120]]);
+    const swapView = { pos: [1.4, 0.4, 1.5], look: center };
+    const swapCandidates = [[cx + 60, cy + 40], [cx - 120, cy + 60], [cx + 100, cy - 80], [cx - 60, cy - 100], [cx, cy + 120], [100, 430], [1180, 330]];
+    await testStopPressAfterSwitch(page, 'fly', swapView, swapCandidates);
+    await testStopPressAfterSwitch(page, 'overview', swapView, swapCandidates);
     await testStopPressOnLabel(page, overview);
     await testDoubleClick(page, edge);
     await testOverviewDoubleClick(page, overview);
