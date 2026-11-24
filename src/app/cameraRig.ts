@@ -1,6 +1,6 @@
 import { Euler, Vector3 } from 'three';
 import type { PerspectiveCamera } from 'three';
-import { FlyCameraControls, type FlyToOptions } from '../controls/FlyCameraControls';
+import { FlyCameraControls, type FlyToOptions, type MoveInertiaOptions } from '../controls/FlyCameraControls';
 import { viewAngles, type ViewAngles, type ViewSpec } from '../render/view';
 import { OverviewControls, type OverviewZoomState } from './overviewControls';
 import type { AutoSpeed } from './autoSpeed';
@@ -35,6 +35,8 @@ export interface CameraState {
   rotating: boolean;
   /** 俯瞰モードの中心までの距離の状態（目標の距離・実際の距離・寄っている途中か）。飛行モードでは null。 */
   overview: OverviewZoomState | null;
+  /** 飛行モードの移動の慣性（`fly.accelTimeConstant`・`fly.glideTimeConstant`）と、滑走中か（キーを離したあと、残った速度で進んでいる）。 */
+  moveInertia: { accelTimeConstant: number; glideTimeConstant: number; gliding: boolean };
 }
 
 /** 密度に応じた速度の自動調整の状態。 */
@@ -62,6 +64,11 @@ export interface CameraRigOptions {
    * 省略すると、0.15 秒で、「動きを減らす」設定（`prefers-reduced-motion: reduce`）なら 0。
    */
   zoomTimeConstant?: number;
+  /**
+   * 飛行モードの移動の慣性（加速 0.15 秒・滑走 0.5 秒）。省略した項目は既定で、
+   * 「動きを減らす」設定（`prefers-reduced-motion: reduce`）なら、どちらも 0.12 秒（キーを離すとすぐ止まる）。
+   */
+  moveInertia?: MoveInertiaOptions;
 }
 
 /** 飛行モードで、移動中のホーム復帰を中断させるキー（`FlyCameraControls` の移動キーと同じ）。 */
@@ -102,7 +109,7 @@ export class CameraRig {
     this.domElement = domElement;
     this.win = domElement.ownerDocument?.defaultView ?? window;
     this.center = center.clone();
-    this.fly = new FlyCameraControls(camera, domElement, { rotationInertia: options.rotationInertia });
+    this.fly = new FlyCameraControls(camera, domElement, { rotationInertia: options.rotationInertia, moveInertia: options.moveInertia });
     this.overview = new OverviewControls(camera, domElement, {
       rotationInertia: options.rotationInertia,
       zoomTimeConstant: options.zoomTimeConstant,
@@ -331,6 +338,11 @@ export class CameraRig {
       homing: this.flight !== null,
       rotating: this.isRotatingByInertia,
       overview: this._mode === 'overview' ? this.overview.zoomState() : null,
+      moveInertia: {
+        accelTimeConstant: this.fly.accelTimeConstant,
+        glideTimeConstant: this.fly.glideTimeConstant,
+        gliding: this._mode === 'fly' && this.fly.isGliding,
+      },
     };
   }
 

@@ -7,6 +7,8 @@
  *
  * 目標のクラスタは、manifest の粗い階層のクラスタのうち、medoid（`center`）のまわりが最も密なもの。
  * その medoid から点群の中心と反対の向き（外向き）へ、周囲に点がない位置まで下がったところから出発する。
+ * W を離したあとの滑走（移動の慣性。滑走の時定数 0.5 秒）の間も、係数が下がれば、残りの速度が同じ割合で下がることを、
+ * 点群の外の速い速度のまま、密なクラスタへ滑り込む場面で確かめる。
  * ソフトウェア描画では 1 フレームが約 200 ミリ秒かかり、アプリの経過時間は 1 フレーム 0.1 秒で頭打ちになる。
  * 速度や変化率は、アプリと同じ経過時間（rAF の時刻の差を 0.1 秒で頭打ち）で割って求める。
  * 失敗があれば終了コード 1 で終わる。記録は artifacts/autospeed.json にも保存する。
@@ -150,6 +152,40 @@ function record(page, { center, stopWithin, maxFrames }) {
   }), { center, stopWithin, maxFrames });
 }
 
+/**
+ * W を押し続けて、中心からの距離が `releaseWithin` 以下になるか、押し始めてアプリの時間（rAF の時刻の差を 0.1 秒で
+ * 頭打ち）で `maxHold` 秒たったら W を離し（同じ JS のタスクで keyup を送る）、滑走が止まるか `maxAfter` フレームたつまで、
+ * フレームごとに getState() を記録する。`released` は、離した時点の（入力があった最後の）行の番号。
+ */
+function recordRelease(page, { center, releaseWithin, maxHold, maxAfter }) {
+  return page.evaluate(({ center, releaseWithin, maxHold, maxAfter }) => new Promise((resolve) => {
+    const rows = [];
+    let released = -1, hold = 0, prev = null;
+    const step = (t) => {
+      const s = window.__explorer.getState();
+      if (prev !== null) hold += Math.min(0.1, (t - prev) / 1000);
+      prev = t;
+      rows.push({ t, s });
+      const d = Math.hypot(s.position[0] - center[0], s.position[1] - center[1], s.position[2] - center[2]);
+      if (released < 0 && (d <= releaseWithin || hold >= maxHold)) {
+        window.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyW', key: 'KeyW', bubbles: true }));
+        released = rows.length - 1;
+      }
+      if (released >= 0 && rows.length - 1 > released && (!s.moveInertia.gliding || rows.length - 1 - released >= maxAfter)) resolve({ rows, released });
+      else requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  }), { center, releaseWithin, maxHold, maxAfter });
+}
+
+/** 滑走が止まるまで進める。 */
+async function waitGlideEnd(page, maxFrames = 80) {
+  for (let i = 0; i < maxFrames; i++) {
+    await frames(page, 1);
+    if (!(await state(page)).moveInertia.gliding) return;
+  }
+}
+
 // ---------- 本体 ----------
 
 const f = (x, n = 4) => (x === null || x === undefined ? '-' : Number(x).toFixed(n));
@@ -194,7 +230,7 @@ async function main() {
     await page.keyboard.down('KeyW');
     const raw = await rec;
     await page.keyboard.up('KeyW');
-    await frames(page, 8);
+    await waitGlideEnd(page);
 
     const rows = [];
     for (let i = 1; i < raw.length; i++) {
@@ -258,10 +294,55 @@ async function main() {
       `${settled.length} フレームで 中央値 ${f(med, 2)} 倍（${f(Math.min(...ratios), 2)}〜${f(Math.max(...ratios), 2)}）、実速度 ${f(median(settled.map((r) => r.measured)))}、点の間隔 ${f(median(settled.map((r) => r.spacing)))}`);
     check('飛行中、ホイールで決めた speed は変わらない', rows.every((r) => r.speed === speed0), `speed ${speed0}`);
 
+    // ---- 滑走中の自動減速 ----
+    console.log('\n[W を離したあとの滑走も、自動の速度で減速する]');
+    {
+      const sat = plan.saturation;
+      const outDir0 = norm(sub(start, C));
+      // 離す位置: 点群の外（係数が上限）で、最も近い点までの距離が 飽和距離 + 0.65 になるところ。進行方向の先を見る距離
+      // （最高速 × 0.3 秒 ≈ 0.54）を足しても係数が上限のままで、そこから滑ると、滑走（最高速で約 0.87 進む）の途中で、
+      // 係数が下がる距離（飽和距離以内）へ入る
+      let rRel = target.radius;
+      while (neighbors(ds, add(C, mul(outDir0, rRel)), 1)[0][0] < sat + 0.65) rRel += 0.02;
+      await setView(page, add(C, mul(outDir0, rRel + 2.5)), C);
+      await frames(page, 3);
+      await page.keyboard.down('KeyW');
+      const { rows: gr, released } = await recordRelease(page, { center: C, releaseWithin: rRel, maxHold: 6, maxAfter: 120 });
+      await page.keyboard.up('KeyW');
+      const dts = gr.map((r, i) => (i ? Math.min(MAX_DT, (r.t - gr[i - 1].t) / 1000) : 0));
+      const measured = gr.map((r, i) => (i ? len(sub(r.s.position, gr[i - 1].s.position)) / dts[i] : 0));
+      const rel = gr[released].s;
+      const v0 = measured[released]; // 離した時点の速さ（直前のフレームの平均）
+      const after = gr.slice(released + 1);
+      const scales = after.map((r) => r.s.autoSpeed.scale);
+      const scaleRel = rel.autoSpeed.scale;
+      // 残りの速度は、離した速さ × （その時点の係数 / 離した時点の係数）を超えない
+      // （入力がないあいだは、係数が下がった割合を速度へ掛け、時定数 0.5 秒の減衰も掛かるので、これは上限）。
+      // フレーム i の移動はフレーム i-1 の終わりの係数で動くので、i-1 の係数と比べる。
+      let worst = 0;
+      for (let i = released + 1; i < gr.length; i++) {
+        const bound = v0 * (gr[i - 1].s.autoSpeed.scale / scaleRel);
+        worst = Math.max(worst, measured[i] / Math.max(bound, 1e-9));
+      }
+      const lastRow = gr[gr.length - 1].s;
+      const glided = len(sub(lastRow.position, rel.position));
+      const minScale = Math.min(...scales);
+      const undamped = v0 * 0.5 * 0.97; // 係数が下がらないときの総距離（τr 0.5 秒）
+      console.log(`離した位置は中心から ${f(len(sub(rel.position, C)), 3)}（計画 ${f(rRel, 3)}、最も近い点まで ${f(neighbors(ds, rel.position, 1)[0][0], 3)}、飽和距離 ${f(sat, 3)}）、離した時点の速さ ${f(v0)}、係数 ${f(scaleRel, 3)}`);
+      console.log('離したあとのフレーム: 係数 / 測った速さ / 速さの上限 =', after.slice(0, 40).map((r, i) => `${f(r.s.autoSpeed.scale, 2)}/${f(measured[released + 1 + i], 2)}/${f(v0 * (gr[released + i].s.autoSpeed.scale / scaleRel), 2)}`).join('  '));
+      check('（前提）離した時点で、点群の外を最高速（基準速度 × 上限の係数 4）で進んでいる', scaleRel >= MAX_SCALE * 0.9 && v0 > 0.9 * rel.effectiveSpeed, `係数 ${f(scaleRel, 3)}、速さ ${f(v0)}（基準速度 × 係数 = ${f(rel.effectiveSpeed)}）`);
+      check('離したあとも進み続け、やがて止まる（gliding が false になる）', after.filter((r, i) => measured[released + 1 + i] > 1e-6).length >= 2 && !lastRow.moveInertia.gliding && glided > 0.05,
+        `${after.length} フレーム、滑った距離 ${f(glided)}`);
+      check('滑走の途中で係数が下がる（密な塊へ滑り込む）', minScale < 0.7 * scaleRel, `係数 ${f(scaleRel, 3)} → 最小 ${f(minScale, 3)}`);
+      check('滑走中、測った速さは、離した速さ × 係数の比（下がった割合）を超えない（速い速度のまま滑り込まない）', worst <= 1.02, `速さ / 上限 の最大 ${f(worst, 3)}`);
+      check('係数が下がったぶん、滑る距離が縮む（係数が変わらないときの 0.97·v·τr に比べて 0.9 倍以下）', glided < 0.9 * undamped, `滑った距離 ${f(glided)}、係数が変わらないときの見込み ${f(undamped)}`);
+    }
+
     // ---- T キーで切り替え ----
     console.log('\n[T キーで無効・有効]');
     // 速度が 3 倍で、中心へ着いたあとは慣性で行き過ぎて位置が定まらないので、クラスタの中心の手前 0.1 から中心を向いて始める
-    await setView(page, add(C, mul(norm(sub(start, C)), 0.1)), C);
+    const nearC = add(C, mul(norm(sub(start, C)), 0.1));
+    await setView(page, nearC, C);
     await frames(page, 10);
     const before = await state(page);
     await page.keyboard.press('KeyT');
@@ -276,6 +357,7 @@ async function main() {
     await frames(page, 1);
     const moving = await state(page);
     await page.keyboard.up('KeyW');
+    await setView(page, nearC, C); // W を離したあとの滑走で位置が定まらないので、始めの位置へ戻す（速度も 0 になる）
     check('無効のあいだは、クラスタの内部でも動いている間 speedScale が 1 のまま', moving.speedScale === 1 && len(sub(moving.position, p0)) > 0.02,
       `移動 ${f(len(sub(moving.position, p0)))}`);
     await frames(page, 6);

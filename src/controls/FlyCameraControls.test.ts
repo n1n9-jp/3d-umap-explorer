@@ -126,8 +126,8 @@ describe('FlyCameraControls: キー入力', () => {
   it('Shift を押しても速さは変わらない', () => {
     const a = createRig();
     const b = createRig();
-    a.controls.timeConstant = 0;
-    b.controls.timeConstant = 0;
+    a.controls.accelTimeConstant = 0; a.controls.glideTimeConstant = 0;
+    b.controls.accelTimeConstant = 0; b.controls.glideTimeConstant = 0;
     keydown(a, 'KeyW');
     keydown(b, 'ShiftLeft', { shiftKey: true });
     keydown(b, 'KeyW', { shiftKey: true });
@@ -147,8 +147,8 @@ describe('FlyCameraControls: キー入力', () => {
     for (const code of ['KeyW', 'KeyS', 'KeyA', 'KeyD', 'KeyE', 'KeyQ', 'ArrowUp', 'ArrowLeft']) {
       const a = createRig();
       const b = createRig();
-      a.controls.timeConstant = 0;
-      b.controls.timeConstant = 0;
+      a.controls.accelTimeConstant = 0; a.controls.glideTimeConstant = 0;
+      b.controls.accelTimeConstant = 0; b.controls.glideTimeConstant = 0;
       keydown(a, code);
       const ev = keydown(b, code, { shiftKey: true });
       expect(ev.defaultPrevented, code).toBe(true);
@@ -512,8 +512,8 @@ describe('FlyCameraControls: speedScale', () => {
   it('実際の移動量にだけ掛かる', () => {
     const a = createRig();
     const b = createRig();
-    a.controls.timeConstant = 0;
-    b.controls.timeConstant = 0;
+    a.controls.accelTimeConstant = 0; a.controls.glideTimeConstant = 0;
+    b.controls.accelTimeConstant = 0; b.controls.glideTimeConstant = 0;
     b.controls.speedScale = 0.5;
     keydown(a, 'KeyW');
     keydown(b, 'KeyW');
@@ -536,7 +536,7 @@ describe('FlyCameraControls: speedScale', () => {
 
   it('maxSpeed を越える係数も効く（制限は speed にだけ働く）', () => {
     const r = createRig();
-    r.controls.timeConstant = 0;
+    r.controls.accelTimeConstant = 0; r.controls.glideTimeConstant = 0;
     r.controls.speed = 2;
     r.controls.speedScale = 2;
     expect(r.controls.speed).toBe(2);
@@ -1409,5 +1409,86 @@ describe('FlyCameraControls: 慣性で回る最中の前進', () => {
     const b = frames[frames.length - 1];
     const step = b.disp.clone().sub(a.disp);
     expect(angleBetween(step, b.dir)).toBeLessThan(0.01);
+  });
+});
+
+describe('FlyCameraControls: 移動の慣性の設定', () => {
+  const keydown = (r: Rig, code: string) => r.win.emit('keydown', { code, key: code, ctrlKey: false, metaKey: false, altKey: false });
+  const keyup = (r: Rig, code: string) => r.win.emit('keyup', { code, key: code });
+  const reducedMotionRig = () => {
+    const win = new FakeTarget() as FakeTarget & { matchMedia?: (q: string) => { matches: boolean } };
+    win.matchMedia = (q: string) => ({ matches: q.includes('prefers-reduced-motion: reduce') });
+    const el = new FakeTarget();
+    el.ownerDocument = { defaultView: win };
+    const camera = new PerspectiveCamera(60, 1, 0.001, 10);
+    return { win, el, camera, controls: new FlyCameraControls(camera, el as unknown as HTMLElement) };
+  };
+
+  it('既定は加速 0.15 秒・滑走 0.5 秒。オプションと代入で変えられ、null で既定へ戻る', () => {
+    const r = createRig();
+    expect(r.controls.accelTimeConstant).toBe(0.15);
+    expect(r.controls.glideTimeConstant).toBe(0.5);
+    r.controls.glideTimeConstant = 0.8;
+    r.controls.accelTimeConstant = 0.3;
+    expect(r.controls.glideTimeConstant).toBe(0.8);
+    expect(r.controls.accelTimeConstant).toBe(0.3);
+    r.controls.glideTimeConstant = null;
+    r.controls.accelTimeConstant = null;
+    expect(r.controls.glideTimeConstant).toBe(0.5);
+    expect(r.controls.accelTimeConstant).toBe(0.15);
+    r.controls.glideTimeConstant = NaN; // 有限でない値は自動（既定）と同じ扱い
+    expect(r.controls.glideTimeConstant).toBe(0.5);
+    const c = new FlyCameraControls(new PerspectiveCamera(), r.el as unknown as HTMLElement, {
+      moveInertia: { accelTimeConstant: 0.2, glideTimeConstant: 1 },
+    });
+    expect(c.accelTimeConstant).toBe(0.2);
+    expect(c.glideTimeConstant).toBe(1);
+    c.dispose();
+  });
+
+  it('キーを離したあとも進み続け、やがて止まる。滑る距離は離したときの速さ × τr に見合う', () => {
+    const r = createRig();
+    keydown(r, 'KeyW');
+    for (let i = 0; i < 240; i++) r.controls.update(1 / 60);
+    keyup(r, 'KeyW');
+    const z0 = r.camera.position.z;
+    r.controls.update(1 / 60);
+    expect(r.controls.isGliding).toBe(true);
+    for (let i = 0; i < 300; i++) r.controls.update(1 / 60);
+    expect(r.controls.isGliding).toBe(false);
+    const glided = z0 - r.camera.position.z;
+    expect(glided / (0.45 * 0.5)).toBeGreaterThan(0.95);
+    expect(glided / (0.45 * 0.5)).toBeLessThan(1.05);
+    expect(r.controls.update(1 / 60)).toBe(false);
+  });
+
+  it('「動きを減らす」設定のときは、既定がどちらも 0.12 秒（いまと同じ動き）。明示すれば使える', () => {
+    const r = reducedMotionRig();
+    expect(r.controls.accelTimeConstant).toBe(0.12);
+    expect(r.controls.glideTimeConstant).toBe(0.12);
+    r.controls.glideTimeConstant = 0.5;
+    expect(r.controls.glideTimeConstant).toBe(0.5);
+    r.controls.glideTimeConstant = null;
+    expect(r.controls.glideTimeConstant).toBe(0.12);
+    r.win.emit('keydown', { code: 'KeyW', key: 'KeyW', ctrlKey: false, metaKey: false, altKey: false });
+    for (let i = 0; i < 240; i++) r.controls.update(1 / 60);
+    r.win.emit('keyup', { code: 'KeyW', key: 'KeyW' });
+    const z0 = r.camera.position.z;
+    for (let i = 0; i < 300; i++) r.controls.update(1 / 60);
+    // 滑る距離は v·τ(0.12) 以下（0.45 × 0.12 = 0.054）
+    expect(z0 - r.camera.position.z).toBeLessThan(0.45 * 0.12 + 1e-9);
+    expect(z0 - r.camera.position.z).toBeGreaterThan(0.45 * 0.12 * 0.9);
+    r.controls.dispose();
+  });
+
+  it('無効化・pose の設定で滑走が終わる', () => {
+    const r = createRig();
+    keydown(r, 'KeyW');
+    for (let i = 0; i < 120; i++) r.controls.update(1 / 60);
+    keyup(r, 'KeyW');
+    r.controls.update(1 / 60);
+    expect(r.controls.isGliding).toBe(true);
+    r.controls.enabled = false;
+    expect(r.controls.isGliding).toBe(false);
   });
 });

@@ -10,6 +10,10 @@
  * 飛行でクラスタの内部へ進んだ位置と、俯瞰モードのスクリーンショットも保存する。
  * 移動量は速度の係数 1 を前提にするので、始めに T キーで速度の自動調整を無効にする。
  *
+ * キーを離したあとの滑走（移動の慣性。加速の時定数 0.15 秒・滑走の時定数 0.5 秒）は、描画の速さに依らない値（離した時点の
+ * 速さ × τr との比、止まる・止まらないの順序）で判定する。ブラウザの描画が 1 フレーム約 0.1〜0.4 秒かかっても、アプリの
+ * 1 フレームは 0.1 秒で頭打ちになり、移動は解析解で進むので、比は変わらない。`--fast-clock` では 1 フレームが 1/60 秒になる。
+ *
  * ドラッグを離したあとの回転の慣性（時定数 0.3 秒）は、離す直前の速さで決まる。ソフトウェア描画ではマウス
  * イベントが 1 つずつ数百ミリ秒かかって届くので、Playwright の `mouse.move(steps)` では速さが出ない。そこで、
  * 回転量を厳密に測る既存の検証は「止めてから離す」（離す前に 250 ミリ秒待つ）形にし、慣性の検証は CDP の
@@ -78,12 +82,12 @@ const frames = (page, n) => page.evaluate((k) => window.__explorer.measureFrames
 const setView = (page, pos, look) => page.evaluate((v) => window.__explorer.setView(v), { pos, look });
 const hudText = (page) => page.evaluate(() => document.getElementById('hud').innerText);
 
-/** 描画が `n` フレーム進む間、キーを押し続けて離し、動きが落ち着くまで少し待つ。 */
+/** 描画が `n` フレーム進む間、キーを押し続けて離し、滑走が止まる（移動の慣性が消える）まで待つ。 */
 async function holdKeys(page, keys, n) {
   for (const k of keys) await page.keyboard.down(k);
   await frames(page, n);
   for (const k of [...keys].reverse()) await page.keyboard.up(k);
-  await waitSim(page, 0.5);
+  await waitGlideEnd(page);
 }
 
 /**
@@ -104,7 +108,7 @@ async function holdKeysFor(page, keys, seconds) {
   for (const k of keys) await page.keyboard.down(k);
   await waitSim(page, seconds);
   for (const k of [...keys].reverse()) await page.keyboard.up(k);
-  await waitSim(page, 0.5);
+  await waitGlideEnd(page);
 }
 
 const yawOf = (d) => Math.atan2(-d[0], -d[2]);
@@ -166,10 +170,30 @@ async function sampleUntil(page, until, maxSimSeconds = 3) {
   return samples;
 }
 
-/** 模擬の時間で `seconds` 秒分（下限の見積もり）だけ描画を進める。移動の慣性（時定数 0.12 秒）などが消えるまでの待ちに使う。 */
+/** 模擬の時間で `seconds` 秒分（下限の見積もり）だけ描画を進める。 */
 async function waitSim(page, seconds) {
   let sim = 0;
   while (sim < seconds) sim += simSecondsOf(await frames(page, 1));
+}
+
+/** 移動の慣性（キーを離したあとの滑走）が終わるまで待つ。滑走は最高速から約 1.75 秒で止まる。止まらなければ例外にする。 */
+async function waitGlideEnd(page) {
+  const s = await sampleUntil(page, (x) => !x.moveInertia.gliding, 6);
+  if (s.timedOut) throw new Error('滑走が模擬の時間で 6 秒たっても止まらない');
+}
+
+/**
+ * キーを離す。離す直前の状態を、同じ JS のタスクで読む（描画の途中で離しても、離す直前の位置が正確に分かる）。
+ * 離したあと、Playwright のキーの状態もそろえる。
+ */
+async function releaseKey(page, code) {
+  const s = await page.evaluate((c) => {
+    const st = window.__explorer.getState();
+    window.dispatchEvent(new KeyboardEvent('keyup', { code: c, key: c, bubbles: true }));
+    return st;
+  }, code);
+  await page.keyboard.up(code);
+  return s;
 }
 
 // ---------- 検証本体 ----------
@@ -386,7 +410,7 @@ async function testModes(page, view, centerOf) {
     `位置の差 ${maxAbsDiff(d2.position, f1.position).toExponential(1)}, 向きの差 ${maxAbsDiff(d2.direction, f1.direction).toExponential(1)}`);
   check('戻った後の HUD は飛行モード', (await hudText(page)).includes('モード 飛行'));
   await holdKeys(page, ['KeyW'], 6);
-  await waitSim(page, 1); // 移動の慣性が消えるまで待つ
+  await waitGlideEnd(page); // 移動の慣性が消えるまで待つ
   const f2 = await state(page);
   check('飛行モードに戻ると W で動く', len(sub(f2.position, f1.position)) > 0.02);
   await drag(page, cx, cy, cx + 100, cy);
@@ -407,6 +431,89 @@ async function testModes(page, view, centerOf) {
   check('W を押したままモードを切り替えても、キーが押しっぱなし扱いにならない', k0.mode === 'fly' && maxAbsDiff(k0.position, k1.position) < 1e-9);
 }
 
+
+// ---------- 移動の慣性（キーを離したあとの滑走） ----------
+
+/** W を押して、最高速（基準速度 × 係数。時定数 0.15 秒の 10 倍以上の時間）に達するまで進める。 */
+async function cruise(page, key = 'KeyW', seconds = 1.5) {
+  await page.keyboard.down(key);
+  await waitSim(page, seconds);
+}
+
+const progressAlong = (p0, p, dir) => dot(sub(p, p0), dir);
+
+async function testGlide(page, view) {
+  console.log('\n[飛行モード: キーを離したあとの滑走]');
+  await setView(page, view.pos, view.look);
+  await frames(page, 2);
+  const st = await state(page);
+  const tauA = st.moveInertia.accelTimeConstant, tauR = st.moveInertia.glideTimeConstant;
+  check('移動の慣性の既定は、加速 0.15 秒・滑走 0.5 秒', tauA === 0.15 && tauR === 0.5 && st.moveInertia.gliding === false, JSON.stringify(st.moveInertia));
+
+  // 離したあとも進み続け、やがて止まる。滑った距離は、離した時点の速さ × τr に見合う
+  await cruise(page);
+  const rel = await releaseKey(page, 'KeyW');
+  const v0 = rel.effectiveSpeed; // 最高速に達しているので、離した時点の速さは 基準速度 × 係数
+  const dir = rel.direction;
+  const a = await sampleUntil(page, (x) => !x.moveInertia.gliding, 4);
+  const last = a[a.length - 1];
+  const progress = a.map((x) => progressAlong(rel.position, x.position, dir));
+  const glided = len(sub(last.position, rel.position));
+  // 止まるまでの総距離は v0·τr·(1 − 0.03)（速さが基準速度 × 係数 × 0.03 を下回ったところで止まる）
+  const ratio = glided / (v0 * tauR);
+  const growing = progress.filter((x, i) => x > (i ? progress[i - 1] : 0) + 1e-6).length;
+  check('W を離したあとも、位置が進み続ける（滑走中は gliding が true）', a[0].moveInertia.gliding && growing >= 2 && progress.every((x, i) => i === 0 || x >= progress[i - 1] - 1e-9),
+    `進んだ標本 ${growing}/${a.length}、離してからの移動（視線方向） ${progress.map((x) => x.toFixed(3)).join(' ')}`);
+  check('やがて止まる（gliding が false になり、そのあと位置が変わらない）', !a.timedOut && !last.moveInertia.gliding && (await staysStillPos(page)),
+    `${a.length} 標本、模擬の時間 ${last.simSeconds.toFixed(2)} 秒以上`);
+  check('滑った距離が、離した時点の速さ × τr に見合う（0.93〜1.0 倍。止まる閾値の 3% を引いた 0.97 倍の見込み）',
+    ratio > 0.93 && ratio < 1.0 + 1e-6, `滑った距離 ${glided.toFixed(4)}、速さ ${v0.toFixed(4)} × τr ${tauR} = ${(v0 * tauR).toFixed(4)}（${ratio.toFixed(3)} 倍）`);
+  check('滑る向きは、離した時点の進行方向', cos(sub(last.position, rel.position), dir) > 0.999, `cos ${cos(sub(last.position, rel.position), dir).toFixed(5)}`);
+  check('滑走の間、視線の向きは変わらない', a.every((x) => angleBetween(x.direction, rel.direction) < 1e-6));
+
+  // 逆向きのキーで、狙って止める: 加速の時定数 τa で止まるので、滑走よりずっと手前で止まる（行き過ぎは約 0.31·v·τa）
+  await setView(page, view.pos, view.look);
+  await frames(page, 2);
+  await cruise(page);
+  const rev = await page.evaluate(() => {
+    const st = window.__explorer.getState();
+    window.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyW', key: 'KeyW', bubbles: true }));
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyS', key: 'KeyS', bubbles: true, cancelable: true }));
+    return st;
+  });
+  await page.keyboard.up('KeyW');
+  const b = await sampleUntil(page, (x) => progressAlong(rev.position, x.position, rev.direction) < -0.02, 3);
+  const peak = Math.max(0, ...b.map((x) => progressAlong(rev.position, x.position, rev.direction)));
+  const lastB = b[b.length - 1];
+  const turnedBack = progressAlong(rev.position, lastB.position, rev.direction);
+  await releaseKey(page, 'KeyS');
+  await waitGlideEnd(page);
+  check('逆向きのキー（S）を押すと、滑走よりずっと手前で止まり、そのまま戻り始める',
+    !b.timedOut && peak < 0.25 * rev.effectiveSpeed * tauR && turnedBack < -0.02,
+    `前へ進んだ最大 ${peak.toFixed(4)}（離すだけの滑走なら ${(0.97 * rev.effectiveSpeed * tauR).toFixed(4)}。見込み ${(0.307 * rev.effectiveSpeed * tauA).toFixed(4)} 以下）、戻った量 ${turnedBack.toFixed(4)}`);
+
+  // キーを離している間に別のキーを押すと、滑走は終わって、そのキーの向きへ進む
+  await setView(page, view.pos, view.look);
+  await frames(page, 2);
+  await cruise(page);
+  await releaseKey(page, 'KeyW');
+  await frames(page, 1);
+  const g0 = await state(page);
+  await page.keyboard.down('KeyE');
+  await waitSim(page, 1);
+  const g1 = await releaseKey(page, 'KeyE');
+  check('滑走中に別のキー（E）を押すと、滑走は終わって上へ進む', g0.moveInertia.gliding && !g1.moveInertia.gliding && g1.position[1] > g0.position[1] + 0.05,
+    `y ${g0.position[1].toFixed(3)} → ${g1.position[1].toFixed(3)}`);
+  await waitGlideEnd(page);
+}
+
+/** 位置が `n` フレームのあいだ変わらないか（滑走が止まったあと）。 */
+async function staysStillPos(page, n = 3) {
+  const a = await state(page);
+  await frames(page, n);
+  const b = await state(page);
+  return len(sub(a.position, b.position)) < 1e-12 && !b.moveInertia.gliding;
+}
 
 // ---------- 回転の慣性 ----------
 
@@ -557,7 +664,7 @@ async function testInertiaFly(page, inside) {
       `いまの視線とのなす角 ${rl.toGaze.toFixed(3)} rad < 押した時点の視線とのなす角 ${rl.bent.toFixed(3)} rad`);
   }
   await settle(page);
-  await waitSim(page, 1); // 移動の慣性が消えるまで待つ
+  await waitGlideEnd(page); // 移動の慣性が消えるまで待つ
 
   // ピッチの制限: 慣性の間も ±89° で止まる
   for (const [name, y0, dy, sign] of [['上', 600, -400, 1], ['下', 200, 400, -1]]) {
@@ -733,6 +840,7 @@ async function testInertiaReducedMotion(browser, base) {
   const cx = width / 2, cy = height / 2;
   const matches = await page.evaluate(() => window.matchMedia('(prefers-reduced-motion: reduce)').matches);
   check('（前提）ブラウザが prefers-reduced-motion: reduce を報告する', matches === true);
+  await testReducedMotionGlide(page);
   for (const mode of ['fly', 'overview']) {
     if (mode === 'overview') {
       await page.keyboard.press('KeyO');
@@ -760,6 +868,23 @@ async function testInertiaReducedMotion(browser, base) {
   const z2 = await state(page);
   check('「視差効果を減らす」では、俯瞰モードのピンチでも距離が 1 度に動く', !z2.overview.zooming && Math.abs(dist(z2) / dist(z1) - Math.exp(-0.5)) < 1e-6, `倍率 ${(dist(z2) / dist(z1)).toFixed(6)}`);
   await page.close();
+}
+
+/** 「視差効果を減らす」設定では、移動の慣性の時定数がどちらも 0.12 秒（いまと同じ、キーを離すとすぐ止まる動き）になる。 */
+async function testReducedMotionGlide(page) {
+  await page.keyboard.press('KeyT'); // 距離の見込みを係数 1 で出すため、速度の自動調整を止める
+  await frames(page, 2);
+  await setView(page, [0, 0, 0], [0, 0, -1]);
+  await frames(page, 2);
+  const st = await state(page);
+  check('「視差効果を減らす」では、移動の時定数が加速・滑走とも 0.12 秒', st.moveInertia.accelTimeConstant === 0.12 && st.moveInertia.glideTimeConstant === 0.12 && st.speedScale === 1, JSON.stringify(st.moveInertia));
+  await cruise(page);
+  const rel = await releaseKey(page, 'KeyW');
+  const a = await sampleUntil(page, (x) => !x.moveInertia.gliding, 3);
+  const last = a[a.length - 1];
+  const ratio = len(sub(last.position, rel.position)) / (rel.effectiveSpeed * 0.12);
+  check('「視差効果を減らす」では、W を離すとすぐ止まる（滑る距離は 離した時点の速さ × 0.12 秒 の 0.93〜1.0 倍）',
+    !a.timedOut && ratio > 0.93 && ratio < 1 + 1e-6, `滑った距離 ${len(sub(last.position, rel.position)).toFixed(4)}（${ratio.toFixed(3)} 倍）、模擬の時間 ${last.simSeconds.toFixed(2)} 秒以上で停止`);
 }
 
 async function testUrl(browser, base) {
@@ -822,6 +947,7 @@ async function main() {
     await testMovement(page, inside);
     await testDrag(page);
     await testWheel(page);
+    await testGlide(page, inside);
     await testModes(page, edge, center);
     await testInertiaFly(page, inside);
     await testInertiaOverview(page, center);
@@ -832,7 +958,7 @@ async function main() {
     await setView(page, edge.pos, edge.look);
     await frames(page, 3);
     const s0 = await state(page);
-    await holdKeysFor(page, ['KeyW'], 1); // 縁からクラスタの内部まで届く距離を、描画の速さによらず進むため、フレーム数ではなく模擬の時間（1 秒分）で押す
+    await holdKeysFor(page, ['KeyW'], 0.4); // 縁からクラスタの内部まで届く距離を、描画の速さによらず進むため、フレーム数ではなく模擬の時間（0.4 秒分）で押す。離したあとの滑走（約 0.2）も加わって、中心の近くで止まる（長く押すと、中心を通り過ぎて反対側へ出る）
     const s1 = await state(page);
     const d0 = len(sub(s0.position, L)), d1 = len(sub(s1.position, L));
     await page.screenshot({ path: path.join(outDir, 'controls-fly-inside.png') });
