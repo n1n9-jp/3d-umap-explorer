@@ -81,6 +81,11 @@ export class SpatialIndex {
   private readonly stackOffX = new Float64Array(STACK_SIZE);
   private readonly stackOffY = new Float64Array(STACK_SIZE);
   private readonly stackOffZ = new Float64Array(STACK_SIZE);
+  /** `forEachInBoxes` 専用のスタック（`mayContain` と `visit` の中から `nearest` / `kNearest` / `within` を呼んでも、巡回の途中の状態を壊さない） */
+  private readonly boxStackLo = new Int32Array(STACK_SIZE);
+  private readonly boxStackHi = new Int32Array(STACK_SIZE);
+  /** `forEachInBoxes` の巡回の最中か（`mayContain` / `visit` の中から `forEachInBoxes` を入れ子で呼ぶときは、専用のスタックが使えないので別に用意する） */
+  private boxWalking = false;
   private heapD: Float64Array = new Float64Array(16);
   private heapI: Int32Array = new Int32Array(16);
   private collected: Int32Array = new Int32Array(64);
@@ -485,29 +490,35 @@ export class SpatialIndex {
       return;
     }
     const boxes = this.boxes;
-    const stackLo = this.stackLo;
-    const stackHi = this.stackHi;
-    stackLo[0] = 0;
-    stackHi[0] = n;
-    let sp = 1;
-    while (sp > 0) {
-      sp--;
-      const lo = stackLo[sp];
-      const hi = stackHi[sp];
-      const mid = (lo + hi) >> 1;
-      const b = mid * 6;
-      if (!mayContain(boxes[b], boxes[b + 1], boxes[b + 2], boxes[b + 3], boxes[b + 4], boxes[b + 5])) continue;
-      if (hi - lo <= LEAF_SIZE) {
-        for (let i = lo, o = lo * 3; i < hi; i++, o += 3) visit(ids[i], pts[o], pts[o + 1], pts[o + 2]);
-        continue;
+    const nested = this.boxWalking;
+    const stackLo = nested ? new Int32Array(STACK_SIZE) : this.boxStackLo;
+    const stackHi = nested ? new Int32Array(STACK_SIZE) : this.boxStackHi;
+    this.boxWalking = true;
+    try {
+      stackLo[0] = 0;
+      stackHi[0] = n;
+      let sp = 1;
+      while (sp > 0) {
+        sp--;
+        const lo = stackLo[sp];
+        const hi = stackHi[sp];
+        const mid = (lo + hi) >> 1;
+        const b = mid * 6;
+        if (!mayContain(boxes[b], boxes[b + 1], boxes[b + 2], boxes[b + 3], boxes[b + 4], boxes[b + 5])) continue;
+        if (hi - lo <= LEAF_SIZE) {
+          for (let i = lo, o = lo * 3; i < hi; i++, o += 3) visit(ids[i], pts[o], pts[o + 1], pts[o + 2]);
+          continue;
+        }
+        const o = mid * 3;
+        visit(ids[mid], pts[o], pts[o + 1], pts[o + 2]);
+        stackLo[sp] = lo;
+        stackHi[sp] = mid;
+        stackLo[sp + 1] = mid + 1;
+        stackHi[sp + 1] = hi;
+        sp += 2;
       }
-      const o = mid * 3;
-      visit(ids[mid], pts[o], pts[o + 1], pts[o + 2]);
-      stackLo[sp] = lo;
-      stackHi[sp] = mid;
-      stackLo[sp + 1] = mid + 1;
-      stackHi[sp + 1] = hi;
-      sp += 2;
+    } finally {
+      this.boxWalking = nested;
     }
   }
 

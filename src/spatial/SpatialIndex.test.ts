@@ -585,4 +585,64 @@ describe('forEachInBoxes（領域の枝刈りつきの巡回）', () => {
     for (const i of inside) expect(visited.has(i)).toBe(true);
     expect(visited.size).toBeLessThan(2000);
   });
+  it('mayContain と visit の中から kNearest / within / nearest を呼んでも、巡回は総当たりと一致し、問い合わせも正しい', () => {
+    const n = 3000;
+    const pos = make(n);
+    const index = new SpatialIndex(pos);
+    const lo = [-0.4, -0.5, -0.3], hi = [0.5, 0.3, 0.6];
+    const inBox = (i: number) => [0, 1, 2].every((k) => pos[3 * i + k]! >= lo[k]! && pos[3 * i + k]! <= hi[k]!);
+    const want = new Set<number>();
+    for (let i = 0; i < n; i++) if (inBox(i)) want.add(i);
+    expect(want.size).toBeGreaterThan(100);
+    const visited = new Set<number>();
+    let boxCalls = 0, queryChecks = 0;
+    const overlaps = (x0: number, y0: number, z0: number, x1: number, y1: number, z1: number) =>
+      x1 >= lo[0]! && x0 <= hi[0]! && y1 >= lo[1]! && y0 <= hi[1]! && z1 >= lo[2]! && z0 <= hi[2]!;
+    index.forEachInBoxes(
+      (x0, y0, z0, x1, y1, z1) => {
+        // 枝刈りの判定の中からも、同じ索引へ問い合わせる
+        if (boxCalls++ % 7 === 0) {
+          const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, cz = (z0 + z1) / 2;
+          expect(Array.from(index.within(cx, cy, cz, 0.25))).toEqual(bruteWithin(pos, cx, cy, cz, 0.25));
+          queryChecks++;
+        }
+        return overlaps(x0, y0, z0, x1, y1, z1);
+      },
+      (id, x, y, z) => {
+        visited.add(id);
+        if (id % 5 === 0) {
+          const got = index.kNearest(x, y, z, 6);
+          const brute = bruteK(pos, x, y, z, 6);
+          expect(Array.from(got.indices)).toEqual(brute.indices);
+          expect(Array.from(got.distances)).toEqual(brute.distances);
+          expect(Array.from(index.within(x, y, z, 0.2))).toEqual(bruteWithin(pos, x, y, z, 0.2));
+          expect(index.nearest(x, y, z)).toEqual(bruteNearest(pos, x, y, z));
+          queryChecks++;
+        }
+      });
+    expect(queryChecks).toBeGreaterThan(50);
+    for (const i of want) expect(visited.has(i)).toBe(true);
+    // 問い合わせを挟まない巡回と、同じ点の集合を渡している
+    const plain = new Set<number>();
+    index.forEachInBoxes(overlaps, (id) => plain.add(id));
+    expect([...visited].sort((a, b) => a - b)).toEqual([...plain].sort((a, b) => a - b));
+  });
+  it('visit の中から forEachInBoxes を入れ子で呼んでも、外側の巡回は全点を一度ずつ渡す', () => {
+    const n = 500;
+    const index = new SpatialIndex(make(n));
+    const outer = new Map<number, number>();
+    let innerTotal = 0;
+    index.forEachInBoxes(() => true, (id) => {
+      outer.set(id, (outer.get(id) ?? 0) + 1);
+      if (id % 100 === 0) {
+        let c = 0;
+        index.forEachInBoxes(() => true, () => { c++; });
+        expect(c).toBe(n);
+        innerTotal++;
+      }
+    });
+    expect(innerTotal).toBeGreaterThan(0);
+    expect(outer.size).toBe(n);
+    expect([...outer.values()].every((c) => c === 1)).toBe(true);
+  });
 });

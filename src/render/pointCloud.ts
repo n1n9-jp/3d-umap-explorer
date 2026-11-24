@@ -126,6 +126,8 @@ export class PointCloud {
       const scales = new Float32Array(count).fill(1);
       const attr = new THREE.InstancedBufferAttribute(scales, 1);
       attr.setUsage(THREE.DynamicDrawUsage);
+      // 最初の描画は three.js が全体を作成して送る（範囲は空にされない）。そのとき残っている範囲は、送信済みなので捨てる
+      attr.onUpload(() => attr.clearUpdateRanges());
       geometry.setAttribute('instanceDotScale', attr);
       this.dotScaleAttr = attr;
       this.dotDirtyFlags = new Uint8Array(count);
@@ -288,10 +290,15 @@ export class PointCloud {
   }
 
   /**
-   * `setDotScale` で変えた点だけを GPU へ送る（変えていなければ何も送らない）。
+   * `setDotScale` で変えた点だけを GPU へ送る対象にする（変えていなければ何もしない）。
    * 変えた点の添字を並べ、隣り合う点の間の隙間（要素数）がしきい値以内なら 1 つの範囲にまとめる。まとめるしきい値は、
    * 「範囲 1 つあたりの呼び出しの手間（`DOT_SCALE_CALL_COST` 要素分）× 範囲の数 + 送る要素数」が最小になるものを、候補から選ぶ
    * （変えた点が少なければ範囲ごとに細かく、多ければまとめて、全体の半分を超えるなら全体を 1 回で送る）。
+   *
+   * 送る範囲は属性の `updateRanges` に載せる。three.js は描画のとき、`updateRanges` の範囲だけを GPU へ送って**空にする**
+   * （空のままなら全体を送る。`WebGLAttributes.updateBuffer`）。したがって、`updateRanges` が空でないあいだは「まだ描画されていない
+   * 送信が残っている」ことになる。描画をはさまずに続けて呼ばれたときは、残っている範囲を捨てずに、今回の範囲を足してまとめる。
+   * 全体の送信が残っている間は、範囲 `[0, 全体)` 1 つで表し（空にすると「何も残っていない」と区別できない）、範囲を足しても全体のままにする。
    */
   commitDotScales(): void {
     const attr = this.dotScaleAttr, flags = this.dotDirtyFlags;
@@ -311,16 +318,31 @@ export class PointCloud {
       const cost = ranges * DOT_SCALE_CALL_COST + elements;
       if (cost < bestCost) { bestCost = cost; bestGap = gap; bestElements = elements; bestRanges = ranges; }
     }
-    attr.clearUpdateRanges();
-    if (bestGap >= 0) {
+    // 描画されずに残っている範囲（[start, end)）に、今回の範囲を足す。全体を送るときは [0, total) 1 つ
+    const spans: Array<[number, number]> = attr.updateRanges.map((r): [number, number] => [r.start, r.start + r.count]);
+    let full = bestGap < 0 || spans.some(([s0, e0]) => s0 <= 0 && e0 >= total);
+    if (!full) {
       let start = list[0]!, end = start + 1;
       for (let k = 1; k < n; k++) {
         const i = list[k]!;
         if (i - end <= bestGap) end = i + 1;
-        else { attr.addUpdateRange(start, end - start); start = i; end = i + 1; }
+        else { spans.push([start, end]); start = i; end = i + 1; }
       }
-      attr.addUpdateRange(start, end - start);
+      spans.push([start, end]);
+      // 残っていた範囲とまとめる: 近い範囲（隙間がしきい値以内）は 1 つにして、範囲の数を抑える
+      spans.sort((p, q) => p[0] - q[0]);
+      const merged: Array<[number, number]> = [];
+      for (const sp of spans) {
+        const last = merged[merged.length - 1];
+        if (last && sp[0] - last[1] <= bestGap) last[1] = Math.max(last[1], sp[1]);
+        else merged.push([sp[0], sp[1]]);
+      }
+      let elements = 0;
+      for (const [s0, e0] of merged) elements += e0 - s0;
+      if (merged.length * DOT_SCALE_CALL_COST + elements >= DOT_SCALE_CALL_COST + total) full = true; // 足し合わせたら全体のほうが安い
+      else { attr.clearUpdateRanges(); for (const [s0, e0] of merged) attr.addUpdateRange(s0, e0 - s0); }
     }
+    if (full) { attr.clearUpdateRanges(); attr.addUpdateRange(0, total); }
     attr.needsUpdate = true;
     for (let k = 0; k < n; k++) flags[list[k]!] = 0;
     this.dotDirtyCount = 0;
