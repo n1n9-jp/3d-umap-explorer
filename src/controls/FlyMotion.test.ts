@@ -731,6 +731,21 @@ describe('FlyMotion: 滑走（加速と滑走の時定数）', () => {
     expect(m.isGliding).toBe(false);
   });
 
+  it('停止するステップも、位置が進んでいるので moved を返し、そのあとは false', () => {
+    const m = cruising();
+    let reported = 0;
+    let lastPos = m.position.clone();
+    for (let i = 0; i < 600; i++) {
+      const moved = m.step(1 / 60, createMoveInput());
+      // moved が false のステップでは位置が変わっていない（カメラへ反映されない移動がない）
+      if (!moved) expect(m.position.distanceTo(lastPos)).toBe(0);
+      else reported++;
+      lastPos = m.position.clone();
+    }
+    expect(reported).toBeGreaterThan(60);
+    expect(m.velocity.length()).toBe(0);
+  });
+
   it('flyTo・setPose・stop は滑走を終える', () => {
     const a = cruising();
     a.step(1 / 60, createMoveInput());

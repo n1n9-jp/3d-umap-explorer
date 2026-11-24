@@ -881,7 +881,7 @@ async function main() {
     await setView(page, edge.pos, edge.look);
     await frames(page, 3);
     const s0 = await state(page);
-    await holdKeysFor(page, ['KeyW'], 1); // 縁からクラスタの内部まで届く距離を、描画の速さによらず進むため、フレーム数ではなく模擬の時間（1 秒分）で押す
+    await holdKeysFor(page, ['KeyW'], 0.4); // 縁からクラスタの内部まで届く距離を、描画の速さによらず進むため、フレーム数ではなく模擬の時間（0.4 秒分）で押す。離したあとの滑走（約 0.2）も加わって、中心の近くで止まる（長く押すと、中心を通り過ぎて反対側へ出る）
     const s1 = await state(page);
     const d0 = len(sub(s0.position, L)), d1 = len(sub(s1.position, L));
     await page.screenshot({ path: path.join(outDir, 'controls-fly-inside.png') });

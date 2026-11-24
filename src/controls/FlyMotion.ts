@@ -310,11 +310,13 @@ export class FlyMotion {
 
     if (dt === 0) return moved;
 
+    // 停止するステップは、速度が 0 になっても、その区間の位置は進んでいる（カメラへ反映させるため moved にする）
+    const wasMoving = v.lengthSq() > 0;
     if (hasMoveInput) this.integrate(dt, this.accelTimeConstant, this.target);
     else this.glide(dt);
 
     this._gliding = !hasMoveInput && v.lengthSq() > 0;
-    if (v.lengthSq() > 0 || hasMoveInput) moved = true;
+    if (wasMoving || v.lengthSq() > 0 || hasMoveInput) moved = true;
     return moved;
   }
 
