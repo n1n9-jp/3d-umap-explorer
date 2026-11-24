@@ -413,6 +413,7 @@ async function testHeading(page, views) {
   await page.mouse.move(sx, sy);
   await page.mouse.down();
   await page.mouse.move(sx, sy - 100, { steps: 10 });
+  await page.waitForTimeout(250); // ポインタを止めてから離す（離す直前の動きが速いと、回転の慣性が付くので）
   await page.mouse.up();
   await waitStill(page);
   const after = await mm(page);

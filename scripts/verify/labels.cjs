@@ -486,6 +486,7 @@ async function dragBy(page, x, y, dx, dy) {
   await page.mouse.move(x, y);
   await page.mouse.down();
   await page.mouse.move(x + dx, y + dy, { steps: 8 });
+  await page.waitForTimeout(250); // ポインタを止めてから離す（離す直前の動きが速いと、回転の慣性が付くので）
   await page.mouse.up();
   await frames(page, 3);
 }

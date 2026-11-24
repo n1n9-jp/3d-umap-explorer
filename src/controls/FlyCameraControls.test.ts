@@ -251,7 +251,8 @@ describe('FlyCameraControls: 視点', () => {
     expect(r.controls.update(1 / 60)).toBe(false);
   });
 
-  it('ボタンを離したら回転は止まる', () => {
+  it('ボタンを離したら、ポインタの動きに回転は追従しない（慣性を無効にして確かめる）', () => {
+    r.controls.rotationTimeConstant = 0;
     down();
     move(150, 100);
     r.el.emit('pointerup', { pointerId: 1 });
@@ -965,5 +966,294 @@ describe('FlyCameraControls: シャドウDOM内の入力欄', () => {
     expect(keydown(r, 'KeyW', { target: { tagName: 'INPUT' } }).defaultPrevented).toBe(false);
     frames(r.controls, 0.2);
     expect(r.camera.position.length()).toBe(0);
+  });
+});
+
+describe('FlyCameraControls: 回転の慣性', () => {
+  let r: Rig;
+  let clock = 0;
+  beforeEach(() => {
+    r = createRig();
+    clock = 1000;
+  });
+
+  const down = (x = 100, y = 100, extra: object = {}) =>
+    r.el.emit('pointerdown', { button: 0, pointerId: 1, clientX: x, clientY: y, timeStamp: clock, ...extra });
+  const move = (x: number, y: number) => r.el.emit('pointermove', { pointerId: 1, clientX: x, clientY: y, timeStamp: clock });
+  const up = () => r.el.emit('pointerup', { pointerId: 1, timeStamp: clock });
+
+  /** 16 ミリ秒ごとに `dxPerFrame` ピクセル（x）・`dyPerFrame`（y）動かして、`frameCount` フレーム分ドラッグする。 */
+  function drag(dxPerFrame: number, frameCount = 12, dyPerFrame = 0, startX = 100, startY = 100) {
+    down(startX, startY);
+    let x = startX;
+    let y = startY;
+    for (let i = 0; i < frameCount; i++) {
+      clock += 16;
+      x += dxPerFrame;
+      y += dyPerFrame;
+      move(x, y);
+    }
+  }
+
+  const yawOf = (camera: PerspectiveCamera) => {
+    const d = viewDirection(camera);
+    return Math.atan2(-d.x, -d.z);
+  };
+  const pitchOf = (camera: PerspectiveCamera) => Math.asin(viewDirection(camera).y);
+
+  it('動かしながら離すと、離したあとも同じ向きへ回り続け、やがて止まる', () => {
+    drag(16); // 1000 px/s
+    r.controls.update(1 / 60);
+    const atRelease = yawOf(r.camera);
+    up();
+    expect(r.controls.isRotatingByInertia).toBe(true);
+    let prev = atRelease;
+    let steps = 0;
+    while (r.controls.update(1 / 60) && steps < 1000) {
+      const yaw = yawOf(r.camera);
+      expect(yaw).toBeLessThan(prev + 1e-12); // 右へ回し続ける（ヨーは減る）
+      prev = yaw;
+      steps++;
+    }
+    expect(steps).toBeGreaterThan(30);
+    expect(r.controls.isRotatingByInertia).toBe(false);
+    // 離す前の速さ 2.5 rad/s（= 1000 px/s × 0.0025）→ 総回転量は約 2.5 × 0.3 = 0.75 rad
+    expect(atRelease - yawOf(r.camera)).toBeGreaterThan(0.6);
+    expect(atRelease - yawOf(r.camera)).toBeLessThan(0.8);
+    expect(r.controls.update(1 / 60)).toBe(false);
+  });
+
+  it('総回転量は、フレームレート（1/60 秒刻みと 1/30 秒刻み）によらず同じ', () => {
+    const run = (dt: number) => {
+      const rig = createRig();
+      let t = 1000;
+      const emit = (type: string, extra: object) => rig.el.emit(type, { pointerId: 1, timeStamp: t, ...extra });
+      emit('pointerdown', { button: 0, clientX: 100, clientY: 100 });
+      for (let i = 0; i < 12; i++) {
+        t += 16;
+        emit('pointermove', { clientX: 100 + 12 * (i + 1), clientY: 100 + 6 * (i + 1) });
+      }
+      emit('pointerup', {});
+      const before = viewDirection(rig.camera).clone();
+      for (let i = 0; i < Math.round(1.5 / dt); i++) rig.controls.update(dt);
+      return { before, after: viewDirection(rig.camera).clone() };
+    };
+    const a = run(1 / 60);
+    const b = run(1 / 30);
+    expect(a.after.distanceTo(a.before)).toBeGreaterThan(0.1);
+    expect(b.after.distanceTo(a.after)).toBeLessThan(1e-9);
+  });
+
+  it('ポインタを止めてから離すと、慣性は付かない', () => {
+    drag(16);
+    r.controls.update(1 / 60);
+    clock += 200; // 動きを止めたまま
+    up();
+    expect(r.controls.isRotatingByInertia).toBe(false);
+    const dir = viewDirection(r.camera).clone();
+    expect(r.controls.update(1 / 60)).toBe(false);
+    expect(viewDirection(r.camera).distanceTo(dir)).toBe(0);
+  });
+
+  it('動かさずに離したクリックでも、数ピクセルの揺れだけでも、慣性は付かない', () => {
+    down();
+    clock += 30;
+    up();
+    expect(r.controls.isRotatingByInertia).toBe(false);
+    down();
+    clock += 8;
+    move(102, 101);
+    clock += 8;
+    move(103, 101);
+    up();
+    expect(r.controls.isRotatingByInertia).toBe(false);
+    r.controls.update(1 / 60); // ドラッグ中の回転（わずかな揺れ）を反映する
+    expect(r.controls.update(1 / 60)).toBe(false);
+  });
+
+  it('ドラッグ中は、ポインタの動きにそのまま追従する（慣性の遅れを入れない）', () => {
+    drag(16, 1);
+    expect(r.controls.isRotatingByInertia).toBe(false);
+    r.controls.update(1 / 60);
+    expect(yawOf(r.camera)).toBeCloseTo(-16 * 0.0025, 9);
+  });
+
+  it('慣性の間は update が true を返し、change が発火する。止まったあとは発火しない', () => {
+    drag(16);
+    r.controls.update(1 / 60);
+    up();
+    let changes = 0;
+    r.controls.addEventListener('change', () => changes++);
+    for (let i = 0; i < 20; i++) expect(r.controls.update(1 / 60)).toBe(true);
+    expect(changes).toBe(20);
+    for (let i = 0; i < 200; i++) r.controls.update(1 / 60);
+    const after = changes;
+    expect(r.controls.update(1 / 60)).toBe(false);
+    expect(changes).toBe(after);
+  });
+
+  it('最初の角速度に上限がある（極端な速さで払っても、回りすぎない）', () => {
+    drag(400, 6); // 25000 px/s
+    r.controls.update(1 / 60);
+    const atRelease = yawOf(r.camera);
+    up();
+    for (let i = 0; i < 600; i++) r.controls.update(1 / 60);
+    const turned = Math.abs(yawOf(r.camera) - atRelease);
+    expect(turned).toBeLessThan(4 * 0.3 + 1e-6);
+    expect(turned).toBeGreaterThan(4 * 0.3 * 0.95);
+  });
+
+  it('ピッチは慣性の間も ±89° で止まり、止まったあとは回り続けない', () => {
+    drag(0, 12, -40); // 上へ払う（上を向く）
+    r.controls.update(1 / 60);
+    up();
+    for (let i = 0; i < 600; i++) r.controls.update(1 / 60);
+    expect(pitchOf(r.camera)).toBeCloseTo((89 * Math.PI) / 180, 6);
+    expect(r.controls.isRotatingByInertia).toBe(false);
+    expect(r.controls.update(1 / 60)).toBe(false);
+    // 下へ払う
+    drag(0, 12, 40, 100, 100);
+    up();
+    for (let i = 0; i < 600; i++) r.controls.update(1 / 60);
+    expect(pitchOf(r.camera)).toBeGreaterThanOrEqual(-(89 * Math.PI) / 180 - 1e-9);
+  });
+
+  it('ポインタを押すと慣性が止まる', () => {
+    drag(16);
+    up();
+    for (let i = 0; i < 5; i++) r.controls.update(1 / 60);
+    expect(r.controls.isRotatingByInertia).toBe(true);
+    r.el.emit('pointerdown', { button: 0, pointerId: 2, clientX: 5, clientY: 5, timeStamp: clock });
+    expect(r.controls.isRotatingByInertia).toBe(false);
+    const dir = viewDirection(r.camera).clone();
+    expect(r.controls.update(1 / 60)).toBe(false);
+    expect(viewDirection(r.camera).distanceTo(dir)).toBe(0);
+  });
+
+  it('左以外のボタンの押下でも止まる', () => {
+    drag(16);
+    up();
+    r.el.emit('pointerdown', { button: 2, pointerId: 3, clientX: 0, clientY: 0, timeStamp: clock });
+    expect(r.controls.isRotatingByInertia).toBe(false);
+  });
+
+  it('flyTo・setPose・無効化・フォーカスの喪失で止まる', () => {
+    const start = () => {
+      drag(16);
+      up();
+      r.controls.update(1 / 60);
+      expect(r.controls.isRotatingByInertia).toBe(true);
+    };
+    start();
+    r.controls.flyTo(new Vector3(0, 0, -5));
+    expect(r.controls.isRotatingByInertia).toBe(false);
+    r.controls.cancelFlyTo();
+
+    start();
+    r.controls.setPose(new Vector3(1, 0, 0), new Vector3(1, 0, -1));
+    expect(r.controls.isRotatingByInertia).toBe(false);
+
+    start();
+    r.win.emit('blur');
+    expect(r.controls.isRotatingByInertia).toBe(false);
+
+    start();
+    r.controls.enabled = false;
+    expect(r.controls.isRotatingByInertia).toBe(false);
+    r.controls.enabled = true;
+    expect(r.controls.update(1 / 60)).toBe(false); // 再有効化しても回り出さない
+  });
+
+  it('stopRotationInertia で止まる', () => {
+    drag(16);
+    up();
+    r.controls.stopRotationInertia();
+    expect(r.controls.isRotatingByInertia).toBe(false);
+  });
+
+  it('移動キー（W）では止まらず、回りながら進む', () => {
+    drag(16);
+    r.controls.update(1 / 60);
+    up();
+    const yaw0 = yawOf(r.camera);
+    keydown(r, 'KeyW');
+    for (let i = 0; i < 10; i++) r.controls.update(1 / 60);
+    expect(r.controls.isRotatingByInertia).toBe(true);
+    expect(yawOf(r.camera)).toBeLessThan(yaw0 - 0.05); // 回り続けている
+    expect(r.camera.position.length()).toBeGreaterThan(0.01); // 進んでいる
+    // 進む向きは、回った新しい視線の向き（横へ曲がる）
+    expect(Math.abs(r.camera.position.x)).toBeGreaterThan(0.001);
+    keyup(r, 'KeyW');
+  });
+
+  it('時定数 0 で無効（速く払って離しても慣性が付かない）。オプションでも指定できる', () => {
+    r.controls.rotationTimeConstant = 0;
+    drag(16);
+    up();
+    expect(r.controls.isRotatingByInertia).toBe(false);
+
+    const off = new FlyCameraControls(new PerspectiveCamera(), r.el as unknown as HTMLElement, { rotationInertia: { timeConstant: 0 } });
+    expect(off.rotationTimeConstant).toBe(0);
+    off.dispose();
+  });
+
+  it('時定数は既定 0.3 秒で、調整できる', () => {
+    expect(r.controls.rotationTimeConstant).toBe(0.3);
+    const total = (tau: number) => {
+      const rig = createRig();
+      rig.controls.rotationTimeConstant = tau;
+      let t = 1000;
+      rig.el.emit('pointerdown', { button: 0, pointerId: 1, clientX: 100, clientY: 100, timeStamp: t });
+      for (let i = 0; i < 12; i++) {
+        t += 16;
+        rig.el.emit('pointermove', { pointerId: 1, clientX: 100 + 8 * (i + 1), clientY: 100, timeStamp: t });
+      }
+      rig.el.emit('pointerup', { pointerId: 1, timeStamp: t });
+      const before = yawOf(rig.camera);
+      for (let i = 0; i < 600; i++) rig.controls.update(1 / 60);
+      return Math.abs(before - yawOf(rig.camera));
+    };
+    expect(total(0.6)).toBeGreaterThan(total(0.3) * 1.5);
+  });
+
+  it('「動きを減らす」設定のときは、既定で慣性が無効。時定数を指定すれば使える', () => {
+    const win = new FakeTarget() as FakeTarget & { matchMedia?: (q: string) => { matches: boolean } };
+    win.matchMedia = (q: string) => ({ matches: q.includes('prefers-reduced-motion: reduce') });
+    const el = new FakeTarget();
+    el.ownerDocument = { defaultView: win };
+    const controls = new FlyCameraControls(new PerspectiveCamera(), el as unknown as HTMLElement);
+    expect(controls.rotationTimeConstant).toBe(0);
+    let t = 1000;
+    el.emit('pointerdown', { button: 0, pointerId: 1, clientX: 0, clientY: 0, timeStamp: t });
+    for (let i = 0; i < 12; i++) {
+      t += 16;
+      el.emit('pointermove', { pointerId: 1, clientX: 16 * (i + 1), clientY: 0, timeStamp: t });
+    }
+    el.emit('pointerup', { pointerId: 1, timeStamp: t });
+    expect(controls.isRotatingByInertia).toBe(false);
+    controls.rotationTimeConstant = 0.3;
+    expect(controls.rotationTimeConstant).toBe(0.3);
+    controls.rotationTimeConstant = null;
+    expect(controls.rotationTimeConstant).toBe(0);
+    controls.dispose();
+  });
+
+  it('pointercancel・lostpointercapture では慣性を付けない', () => {
+    for (const type of ['pointercancel', 'lostpointercapture']) {
+      drag(16);
+      r.el.emit(type, { pointerId: 1, timeStamp: clock });
+      expect(r.controls.isRotatingByInertia).toBe(false);
+      // 続けて pointerup が来ても付かない
+      up();
+      expect(r.controls.isRotatingByInertia).toBe(false);
+    }
+  });
+
+  it('dispose のあと update は何もせず、慣性も残らない', () => {
+    drag(16);
+    up();
+    r.controls.dispose();
+    expect(r.controls.isRotatingByInertia).toBe(false);
+    expect(r.controls.update(1 / 60)).toBe(false);
   });
 });

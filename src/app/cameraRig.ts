@@ -6,6 +6,7 @@ import { OverviewControls } from './overviewControls';
 import type { AutoSpeed } from './autoSpeed';
 import { HOME_DURATION_SECONDS, HomeFlight, poseLookAt, type FlightPose } from './homeFlight';
 import { isFromEditable } from './keyEvents';
+import type { RotationInertiaOptions } from '../controls/RotationInertia';
 
 export type CameraMode = 'fly' | 'overview';
 
@@ -30,6 +31,8 @@ export interface CameraState {
   autoSpeed: AutoSpeedState;
   /** ホームの視点へ移動中か（`goHome` の途中）。 */
   homing: boolean;
+  /** ドラッグを離したあとの回転の慣性で回っている最中か（現在のモード）。 */
+  rotating: boolean;
 }
 
 /** 密度に応じた速度の自動調整の状態。 */
@@ -47,6 +50,11 @@ export interface AutoSpeedState {
 export interface CameraRigOptions {
   /** 密度に応じた速度の自動調整。なければ係数は 1 のまま。 */
   autoSpeed?: AutoSpeed | null;
+  /**
+   * ドラッグを離したあとの回転の慣性（飛行・俯瞰の両方）。`timeConstant` を 0 以下にすると無効。
+   * 省略すると、時定数 0.3 秒で、「動きを減らす」設定（`prefers-reduced-motion: reduce`）なら無効。
+   */
+  rotationInertia?: RotationInertiaOptions;
 }
 
 /** 飛行モードで、移動中のホーム復帰を中断させるキー（`FlyCameraControls` の移動キーと同じ）。 */
@@ -87,8 +95,8 @@ export class CameraRig {
     this.domElement = domElement;
     this.win = domElement.ownerDocument?.defaultView ?? window;
     this.center = center.clone();
-    this.fly = new FlyCameraControls(camera, domElement);
-    this.overview = new OverviewControls(camera, domElement);
+    this.fly = new FlyCameraControls(camera, domElement, { rotationInertia: options.rotationInertia });
+    this.overview = new OverviewControls(camera, domElement, { rotationInertia: options.rotationInertia });
     this.overview.pivot.copy(this.center);
     this.fly.addEventListener('speedchange', this.notify);
     this.autoSpeed = options.autoSpeed ?? null;
@@ -160,6 +168,24 @@ export class CameraRig {
     this.autoSpeedEnabled = !this._autoSpeedEnabled;
   }
 
+  /**
+   * ドラッグを離したあとの回転の慣性の時定数（秒。飛行・俯瞰の両方）。0 以下で無効。
+   * `null` を代入すると、既定（0.3 秒。「動きを減らす」設定なら無効）へ戻す。
+   */
+  get rotationTimeConstant(): number {
+    return this._mode === 'fly' ? this.fly.rotationTimeConstant : this.overview.rotationTimeConstant;
+  }
+
+  set rotationTimeConstant(value: number | null) {
+    this.fly.rotationTimeConstant = value;
+    this.overview.rotationTimeConstant = value;
+  }
+
+  /** 回転の慣性で回っている最中か（現在のモード）。 */
+  get isRotatingByInertia(): boolean {
+    return this._mode === 'fly' ? this.fly.isRotatingByInertia : this.overview.isRotatingByInertia;
+  }
+
   /** ホームの視点への移動の途中か。 */
   get homing(): boolean {
     return this.flight !== null;
@@ -175,6 +201,8 @@ export class CameraRig {
     // 点への自動移動（flyTo）の途中なら中断する（ホームへの移動が終わったあとに再開しないように）
     this.fly.cancelFlyTo();
     this.flying = false;
+    // 回転の慣性も止める（ホームへの移動と重ねて回り続けない）
+    this.stopRotationInertia();
     const from = this.currentPose();
     const to: FlightPose = { position: [...view.pos], ...viewAngles(view, from) };
     this.flight = new HomeFlight(from, to, durationSeconds);
@@ -201,12 +229,21 @@ export class CameraRig {
     this.flying = this.fly.isFlying;
   }
 
+  /** 回転の慣性を止める（飛行・俯瞰の両方。位置と向きはそのまま）。 */
+  stopRotationInertia(): void {
+    this.fly.stopRotationInertia();
+    this.overview.stopRotationInertia();
+  }
+
   update(dt: number): void {
     if (this.flight) {
       this.stepFlight(dt);
       return;
     }
-    if (this._mode !== 'fly') return;
+    if (this._mode !== 'fly') {
+      this.overview.update(dt); // ドラッグを離したあとの回転の慣性
+      return;
+    }
     this.prevPosition.copy(this.camera.position);
     this.fly.update(dt);
     if (this.flying) {
@@ -225,6 +262,7 @@ export class CameraRig {
 
   setView(view: ViewSpec): void {
     this.cancelHome();
+    this.stopRotationInertia();
     const pos = new Vector3(...view.pos);
     const look = new Vector3(...view.look);
     if (this._mode === 'fly') {
@@ -258,6 +296,7 @@ export class CameraRig {
         distance: this.autoSpeed ? this.autoSpeed.distance : null,
       },
       homing: this.flight !== null,
+      rotating: this.isRotatingByInertia,
     };
   }
 
