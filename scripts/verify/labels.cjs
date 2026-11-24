@@ -41,7 +41,7 @@ const { execSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require('playwright');
-const { loadDataset, waitForServer, startPreview, CHROMIUM_ARGS, sub, add, mul, len, norm } = require('./lib.cjs');
+const { loadDataset, waitForServer, startPreview, CHROMIUM_ARGS, sub, add, mul, len, norm, waitReorient } = require('./lib.cjs');
 
 const root = path.resolve(__dirname, '../..');
 const args = process.argv.slice(2);
@@ -380,6 +380,7 @@ async function testClickToFly(page, ds, clusters, coarse, size) {
   await goTo(page, home.pos, home.look);
   await page.keyboard.press('KeyO');
   await page.waitForFunction(() => window.__explorer.getState().mode === 'overview');
+  await waitReorient(page); // 点群の中心への向き直し（0.5 秒。ずれが 3° 未満なら始まらない）が終わるまで待つ
   await frames(page, 3);
   const so = await state(page);
   const stO = await labelState(page);
@@ -487,6 +488,12 @@ async function wheelAt(page, x, y, dy, { ctrl = false } = {}) {
   await page.mouse.wheel(0, dy);
   if (ctrl) await page.keyboard.up('Control');
   await frames(page, 3);
+  // 俯瞰モードの距離は目標へ時定数 0.15 秒で近づくので、寄り終える（zooming が false になる）まで待つ
+  for (let k = 0; k < 120; k++) {
+    const st = await state(page);
+    if (!st.overview || !st.overview.zooming) break;
+    await frames(page, 1);
+  }
 }
 
 async function dragBy(page, x, y, dx, dy) {
@@ -573,6 +580,7 @@ async function testPointerOnLabel(page, clusters) {
   await goTo(page, home2.pos, home2.look);
   await page.keyboard.press('KeyO');
   await page.waitForFunction(() => window.__explorer.getState().mode === 'overview');
+  await waitReorient(page); // 点群の中心への向き直し（0.5 秒。ずれが 3° 未満なら始まらない）が終わるまで待つ
   await frames(page, 3);
   const so = await state(page);
   const dist = (st) => len(sub(st.position, st.pivot));
@@ -594,7 +602,11 @@ async function testPointerOnLabel(page, clusters) {
     const dprO = await page.evaluate(() => devicePixelRatio);
     await wheelAt(page, ochip3.x, ochip3.y, -100, { ctrl: true });
     const logO = await page.evaluate(() => window.__wheels.filter((w) => w.trusted && w.ctrl && w.onLabel));
-    check('俯瞰モード: 目印の上の Ctrl＋ホイールもページのズームにならず、距離も変わらない', logO.length > 0 && logO.every((w) => w.prevented) && dist(await state(page)) === d_b && (await page.evaluate(() => devicePixelRatio)) === dprO, JSON.stringify(logO));
+    // 俯瞰モードの Ctrl＋ホイールはピンチとして寄る。マウスの 1 ノッチ（deltaY −100）は、1 回の上限の 1.15³ 分の 1 倍に収まる
+    const d_c = dist(await state(page));
+    check('俯瞰モード: 目印の上の Ctrl＋ホイールもページのズームにならず、ピンチとして寄る（1 ノッチで 1.15³ 分の 1 倍まで）',
+      logO.length > 0 && logO.every((w) => w.prevented) && Math.abs(d_c / d_b - 1.15 ** -3) < 1e-6 && (await page.evaluate(() => devicePixelRatio)) === dprO,
+      `距離 ${d_b.toFixed(4)} → ${d_c.toFixed(4)}（${(d_c / d_b).toFixed(6)} 倍、見込み ${(1.15 ** -3).toFixed(6)}）、${JSON.stringify(logO)}`);
     // 目印の上のドラッグで点群の中心のまわりを回る（目印のない場所のドラッグと同じ量）
     await goTo(page, so.position, so.lookAt);
     const before = await state(page);

@@ -244,4 +244,22 @@ function flickPoints(x0, y0, dx, dy, durationMs = 160, n = 10) {
   return pts;
 }
 
-module.exports = { readInfoRect, readUiRects, inRects, TOP_UI_IDS, loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, add, mul, len, norm, sendPointer, pointerGesture, flickPoints };
+// ---------- 模擬の時間で待つ ----------
+
+/**
+ * O キーで俯瞰モードへ切り替えたあと、点群の中心への向き直し（`getState().reorienting`。0.5 秒）が終わるまで待つ。
+ * 待ちの上限は、壁時計ではなく模擬の時間（`maxSimSeconds` 秒分）で決める。アプリは 1 フレームで min(0.1, 実時間) 秒だけ進むので、
+ * 描画が遅くても速くても、向き直しが終わるまでの待ちは同じ長さになる（`controls.cjs` の `sampleUntil` と同じ見積もり）。
+ * 向き直しが始まらなかった（中心とのずれが 3° 未満）ときは、すぐ返る。終わったら { ok: true }、上限に達したら { ok: false }。
+ */
+async function waitReorient(page, maxSimSeconds = 3) {
+  let sim = 0;
+  for (;;) {
+    if (!(await page.evaluate(() => window.__explorer.getState().reorienting))) return { ok: true, sim };
+    if (sim >= maxSimSeconds) return { ok: false, sim };
+    const stats = await page.evaluate(() => window.__explorer.measureFrames(1));
+    sim += (stats.frames + 1) * Math.min(0.1, stats.meanMs / 1000);
+  }
+}
+
+module.exports = { readInfoRect, readUiRects, inRects, TOP_UI_IDS, loadDataset, computeViews, waitForServer, startPreview, CHROMIUM_ARGS, sub, add, mul, len, norm, sendPointer, pointerGesture, flickPoints, waitReorient };
